@@ -84,6 +84,54 @@ Invoke-RestMethod http://localhost:8090/healthz
 http://localhost:8090
 ```
 
+## CLI 使用
+
+CLI 是 ResolveOps 的命令行入口，只调用 ResolveOps API，不直接连接 ERPNext，也不承载 Agent 核心逻辑。
+
+设置 API 地址和 operator key：
+
+```powershell
+$env:RESOLVEOPS_API_URL="http://localhost:8090"
+$env:RESOLVEOPS_OPERATOR_KEY="<ops-admin-key>"
+```
+
+查看运行状态：
+
+```powershell
+python resolveops.py status
+```
+
+查看 Case：
+
+```powershell
+python resolveops.py case list
+python resolveops.py case show <case-id>
+```
+
+查看可用故障注入：
+
+```powershell
+python resolveops.py fi list
+```
+
+通过 ResolveOps 触发 ERPNext 沙箱库存变化，不需要打开 ERPNext 页面：
+
+```powershell
+python resolveops.py fi run inventory_changed_before_execution `
+  --case <case-id> `
+  --item SKU-A12 `
+  --warehouse "重庆仓 - ROPS" `
+  --new-qty 0 `
+  --reason "simulate stock consumed before approval execution"
+```
+
+审批：
+
+```powershell
+python resolveops.py approval approve <approval-id>
+python resolveops.py approval revoke <approval-id> --reason "operator cancelled unsafe action"
+```
+
 ## 测试
 
 ```powershell
