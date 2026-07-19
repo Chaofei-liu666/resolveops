@@ -1,107 +1,132 @@
 # ResolveOps
 
-ResolveOps 是一个面向企业业务异常的 Agent。它不处理确定性的正常流程，而是在业务进入异常分支后，自动调查原因、生成行动计划、申请审批、受控执行，并通过真实系统回读验证结果。
+ResolveOps is an API-first enterprise Agent runtime for handling business exceptions in ERP workflows.
 
-当前版本支持三类 Case：
+It focuses on cases where a deterministic workflow is not enough: missing inventory, price mismatch, supplier delay, approval gating, business-state changes, and execution verification.
 
-- `inventory_shortage`：订单库存不足。Agent 调查库存、调拨路线、采购补货和客户约束，提出调拨或采购申请等 Action Plan。
-- `price_mismatch`：订单价格与参考价格不一致。Agent 调查订单价格和参考价，创建受控的价格复核记录，不直接修改 ERP 价格。
-- `delivery_delay`：在途采购到货晚于客户交付日期。Agent 调查订单、在途采购和客户约束，创建受控的供应商跟进记录，不直接修改 ERP 采购或销售日期。
+Current reference integration: ERPNext.
 
-## 核心闭环
+ERPNext is used as a real open-source ERP sandbox and adapter target. The Agent architecture is not ERPNext-specific: the same Tool Registry, Policy Engine, Executor and Verifier boundaries can be adapted to SAP, WMS, CRM, ticketing systems or internal business platforms.
+
+## What it demonstrates
+
+- Agent investigation with read-only business tools.
+- Dynamic tool exposure by case type.
+- Evidence-grounded action planning.
+- Policy-controlled write execution.
+- Human approval bound to case, plan version and action hash.
+- Approval expiration and revocation.
+- Idempotent write actions.
+- PostgreSQL-backed durable case state.
+- Case-level context isolation.
+- Read-after-write verification.
+- Controlled fault injection against ERPNext sandbox data.
+- CLI-first developer experience.
+- Regression and fault-injection tests.
+
+## Supported case types
+
+| Case type | Description |
+|---|---|
+| `inventory_shortage` | Sales order cannot be fulfilled from the current warehouse. The Agent investigates inventory, transfer routes, purchase options and customer constraints. |
+| `price_mismatch` | Sales order price differs from reference price. The Agent creates a controlled price-review record instead of changing ERP prices directly. |
+| `delivery_delay` | Inbound supply arrives later than the customer delivery date. The Agent creates a controlled supplier-follow-up task instead of directly changing ERP dates. |
+
+## Core flow
 
 ```text
-ERP 异常事件
-→ 创建 Case
-→ 按 event_type 暴露最小必要工具集
-→ Agent 调用只读业务工具调查
+Business exception
+→ Case
+→ Read tool investigation
 → Evidence-grounded Action Plan
-→ Policy / Approval
-→ Executor 执行写工具
+→ Policy Engine
+→ Approval
+→ Executor
 → Read-after-write Verification
 → resolved / replan / manual_review
 ```
 
-## 当前已实现能力
+## Architecture
 
-- 真实 ERPNext API 接入，而不是 mock 系统。
-- LLM 只允许调用只读业务工具，不能直接写 ERP。
-- LLM 调用通过 LLMGateway 统一处理 provider timeout、错误包装、latency 和 usage telemetry。
-- 只读工具通过 ReadToolScheduler 调度，支持批量并发、去重缓存和异常统一封装。
-- 按 `event_type` 动态暴露 read tools，避免价格异常误调用库存/采购工具。
-- 按 `event_type` 动态暴露 write Action schemas，避免 planner 提出不属于当前业务异常的行动。
-- 写操作也是工具，但只能作为 Action Plan 被提出，由 Policy、Approval、Executor 控制执行。
-- Operator 身份和角色从 `operators` 表按 API key hash 查询，审批不信任请求头自报角色。
-- 审批绑定 `case_id + plan_version + action_hash`，防止参数篡改和审批重放；审批带 `expires_at`，支持撤销，Worker 执行前会再次校验审批生命周期。
-- 写操作带 idempotency key，避免重复创建业务记录。
-- PostgreSQL `FOR UPDATE SKIP LOCKED` 领取任务，支持多 Worker 并发。
-- PostgreSQL advisory transaction lock 控制共享库存写入。
-- SQL migration runner 按 `production/migrations/*.sql` 顺序应用版本化变更，并记录到 `schema_migrations`。
-- ToolResult 统一表示工具成功、失败、可重试性和证据可用性。
-- Case 详情返回确定性 `tool_trace`，展示每次工具调用的目的、参数、结果摘要、证据编号，以及它支撑了哪些 Action。
-- CaseContextBuilder 按 `case_id` 构建上下文，并在进入 LLM 前清洗/校验 task context，避免多个 Case 串状态。
-- Verified Case Lessons 只从 `resolved + verification passed` 的 Case 沉淀，并且只作为规划提示。
-- 执行轨迹评估：Case Resolution、平均 read tool 次数、工具失败率、Verification Pass、Replan、Policy Denial、Handoff 等指标。
+```text
+CLI / Swagger / ERPNext Webhook
+        ↓
+FastAPI Control Plane
+        ↓
+PostgreSQL Case State
+        ↓
+Worker / Agent Runtime
+        ↓
+Tool Registry → Policy Engine → Executor → Verifier
+        ↓
+ERPNextAdapter / future external-system adapters
+```
 
-## 本地启动
+The CLI is only a presentation layer. It calls ResolveOps APIs and does not talk to ERPNext directly.
 
-复制环境变量模板：
+## Quick start
+
+Copy environment template:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-填写 `.env`：
+Edit `.env`:
 
 ```text
-POSTGRES_PASSWORD
-ERPNEXT_BASE_URL
-ERPNEXT_API_KEY
-ERPNEXT_API_SECRET
-WEBHOOK_SECRET
-OPERATOR_API_KEY
-LLM_BASE_URL
-LLM_API_KEY
-LLM_MODEL
-APPROVAL_TTL_SECONDS
+APP_ENV=local
+ERPNEXT_BASE_URL=...
+ERPNEXT_API_KEY=...
+ERPNEXT_API_SECRET=...
+WEBHOOK_SECRET=...
+OPERATOR_API_KEY=...
+LLM_BASE_URL=...
+LLM_API_KEY=...
+LLM_MODEL=...
 ```
 
-启动服务：
+Start services:
 
 ```powershell
 docker compose up -d --build
 ```
 
-健康检查：
+Health check:
 
 ```powershell
 Invoke-RestMethod http://localhost:8090/healthz
+Invoke-RestMethod http://localhost:8090/readyz
 ```
 
-控制台：
+OpenAPI docs:
+
+```text
+http://localhost:8090/docs
+```
+
+Console:
 
 ```text
 http://localhost:8090
 ```
 
-## CLI 使用
+## CLI
 
-CLI 是 ResolveOps 的命令行入口，只调用 ResolveOps API，不直接连接 ERPNext，也不承载 Agent 核心逻辑。
-
-设置 API 地址和 operator key：
+Set API address and operator key:
 
 ```powershell
 $env:RESOLVEOPS_API_URL="http://localhost:8090"
 $env:RESOLVEOPS_OPERATOR_KEY="<ops-admin-key>"
 ```
 
-查看运行状态：
+Runtime status:
 
 ```powershell
 python resolveops.py status
 ```
 
-查看 Case：
+Create and inspect a Case:
 
 ```powershell
 python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-00002 --reason "manual CLI test"
@@ -109,13 +134,20 @@ python resolveops.py case list
 python resolveops.py case show <case-id>
 ```
 
-查看可用故障注入：
+Approve or revoke an action:
+
+```powershell
+python resolveops.py approval approve <approval-id>
+python resolveops.py approval revoke <approval-id> --reason "operator cancelled unsafe action"
+```
+
+Fault injection catalog:
 
 ```powershell
 python resolveops.py fi list
 ```
 
-通过 ResolveOps 触发 ERPNext 沙箱库存变化，不需要打开 ERPNext 页面：
+Trigger ERPNext sandbox stock change through ResolveOps:
 
 ```powershell
 python resolveops.py fi run inventory_changed_before_execution `
@@ -126,46 +158,80 @@ python resolveops.py fi run inventory_changed_before_execution `
   --reason "simulate stock consumed before approval execution"
 ```
 
-审批：
+This calls:
 
-```powershell
-python resolveops.py approval approve <approval-id>
-python resolveops.py approval revoke <approval-id> --reason "operator cancelled unsafe action"
+```text
+CLI
+→ ResolveOps API
+→ permission / environment gate
+→ ERPNextAdapter
+→ ERPNext REST API
+→ Stock Reconciliation
 ```
 
-## 测试
+Fault injection is forbidden in production and requires:
+
+```text
+ENABLE_FAULT_INJECTION=true
+APP_ENV != production
+ops_admin or config_admin operator
+```
+
+## Tests
+
+Local tests:
 
 ```powershell
 python -m pytest -q
 ```
 
-Docker 隔离测试入口：
+Containerized regression:
 
 ```powershell
 .\scripts\test.ps1
 ```
 
-等价命令：
+Equivalent command:
 
 ```powershell
 docker compose --profile test run --rm test
 ```
 
-当前容器化回归：
+Current containerized regression:
 
 ```text
 64 passed, 1 skipped
 ```
 
-## 文档
+## Production status
 
-- [架构说明](docs/architecture.md)
-- [运行手册](docs/runbook.md)
-- [部署与上线安全清单](docs/deployment.md)
-- [生产就绪度评估](docs/production-readiness.md)
-- [面试问答笔记](docs/interview-notes.md)
-- [可靠性评估与故障注入](docs/evals.md)
+ResolveOps is currently suitable for:
 
-## 不提交的文件
+```text
+local development
+job/project demonstration
+ERPNext sandbox runs
+```
 
-`.env`、本地数据库、缓存目录不会进入 Git。敏感配置只保留在本地环境变量中，仓库只提交 `.env.example`。
+It is not yet a drop-in production system for real ERP write operations. Before production write access, add enterprise IAM, secret management, monitoring and alerting, backup/restore, load testing, and an operational runbook for incident handling.
+
+See [production readiness](docs/production-readiness.md).
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Runbook](docs/runbook.md)
+- [Deployment safety checklist](docs/deployment.md)
+- [Production readiness assessment](docs/production-readiness.md)
+- [Reliability evaluation and fault injection](docs/evals.md)
+- [Interview notes](docs/interview-notes.md)
+
+## Security
+
+Do not commit `.env`, local databases, real ERPNext credentials, LLM keys or operator keys.
+
+See [SECURITY.md](SECURITY.md).
+
+## License
+
+MIT License. See [LICENSE](LICENSE).
