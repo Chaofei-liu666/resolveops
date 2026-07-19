@@ -11,6 +11,7 @@ import pytest
 
 from production.actions import action_tool_spec, action_types_for_case, normalize_plan, normalize_proposal, planner_action_catalog, planner_action_instructions, registered_action_types
 import production.agent as agent_module
+import production.runtime_status as runtime_status_module
 from production.agent import InvestigationAgent
 from production.evidence import validate_plan_grounding
 from production.executors import executor_for
@@ -580,6 +581,65 @@ def test_runtime_status_reports_degraded_when_migration_is_missing():
 
     assert status['status'] == 'degraded'
     assert status['checks']['migrations']['pending_versions'] == versions[-1:]
+
+
+def test_runtime_status_warns_but_allows_local_operator_seed(monkeypatch):
+    monkeypatch.setattr(runtime_status_module.settings, 'app_env', 'local')
+    monkeypatch.setattr(runtime_status_module.settings, 'operator_seed_keys', 'local-sales:sales_manager:key')
+    monkeypatch.setattr(runtime_status_module.settings, 'llm_base_url', None)
+    monkeypatch.setattr(runtime_status_module.settings, 'llm_api_key', None)
+    monkeypatch.setattr(runtime_status_module.settings, 'llm_model', None)
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    with engine.begin() as db:
+        ensure_schema_migrations_table(db)
+        for version in expected_migration_versions():
+            db.execute(
+                text('INSERT INTO schema_migrations(version, filename, checksum) VALUES (:version, :filename, :checksum)'),
+                {'version': version, 'filename': f'{version}_test.sql', 'checksum': 'test'},
+            )
+    with Session(engine) as db:
+        status = build_runtime_status(db)
+
+    config = status['checks']['configuration']
+    assert status['status'] == 'ready'
+    assert config['ok'] is True
+    assert 'operator_seed_keys_enabled_for_local_development' in config['warnings']
+    assert 'llm_not_configured_agent_may_use_deterministic_fallback' in config['warnings']
+
+
+def test_runtime_status_blocks_production_like_placeholder_config(monkeypatch):
+    monkeypatch.setattr(runtime_status_module.settings, 'app_env', 'production')
+    monkeypatch.setattr(runtime_status_module.settings, 'erpnext_base_url', 'http://erpnext:8000')
+    monkeypatch.setattr(runtime_status_module.settings, 'erpnext_api_key', 'replace-me')
+    monkeypatch.setattr(runtime_status_module.settings, 'erpnext_api_secret', 'replace-me')
+    monkeypatch.setattr(runtime_status_module.settings, 'webhook_secret', 'replace-me')
+    monkeypatch.setattr(runtime_status_module.settings, 'operator_api_key', 'replace-me')
+    monkeypatch.setattr(runtime_status_module.settings, 'operator_seed_keys', 'local-sales:sales_manager:key')
+    monkeypatch.setattr(runtime_status_module.settings, 'llm_base_url', 'https://api.example.com/v1')
+    monkeypatch.setattr(runtime_status_module.settings, 'llm_api_key', 'replace-me')
+    monkeypatch.setattr(runtime_status_module.settings, 'llm_model', 'replace-me')
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    with engine.begin() as db:
+        ensure_schema_migrations_table(db)
+        for version in expected_migration_versions():
+            db.execute(
+                text('INSERT INTO schema_migrations(version, filename, checksum) VALUES (:version, :filename, :checksum)'),
+                {'version': version, 'filename': f'{version}_test.sql', 'checksum': 'test'},
+            )
+    with Session(engine) as db:
+        status = build_runtime_status(db)
+
+    config = status['checks']['configuration']
+    assert status['status'] == 'degraded'
+    assert config['ok'] is False
+    assert config['production_like'] is True
+    assert 'erpnext_credentials_missing_or_placeholder' in config['errors']
+    assert 'llm_credentials_required_for_production_like_env' in config['errors']
+    assert 'webhook_secret_missing_or_placeholder' in config['errors']
+    assert 'operator_api_key_missing_or_placeholder' in config['errors']
+    assert 'operator_seed_keys_not_allowed_in_production_like_env' in config['errors']
 
 
 def test_case_context_builder_isolates_concurrent_case_state():

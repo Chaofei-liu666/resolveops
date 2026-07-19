@@ -3,6 +3,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', extra='ignore')
+    app_env: str = 'local'
     database_url: str = 'postgresql+psycopg://resolveops:resolveops@postgres:5432/resolveops'
     erpnext_base_url: str
     erpnext_api_key: str

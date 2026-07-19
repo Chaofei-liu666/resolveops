@@ -17,7 +17,7 @@ docker compose --profile test run --rm test
 Current containerized regression:
 
 ```text
-62 passed, 1 skipped
+64 passed, 1 skipped
 ```
 
 | Risk | Test | Expected safe outcome |
