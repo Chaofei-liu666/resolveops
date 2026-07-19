@@ -24,6 +24,7 @@ from production.memory import candidate_lessons_from_verified_action, record_ver
 import production.migrations as migration_module
 from production.migrations import apply_migrations
 from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, Operator, PriceReview, SupplierFollowup, Task
+from production.llm_gateway import LLMGateway, LLMResult
 from production.policy import action_policy, allow_read_tool
 from production.tool_result import ToolResult
 from production.tool_scheduler import ReadToolCall, ReadToolScheduler, tool_signature
@@ -294,14 +295,15 @@ def test_tool_error_is_unknown_not_negative_fact():
     assert 'schema' in conclusion['rationale'].lower()
 
 
-def test_tool_budget_exhaustion_is_preserved_as_missing_information(monkeypatch):
-    class Response:
-        def raise_for_status(self): pass
-        def json(self):
-            return {'choices':[{'message':{'content':'{"status":"ready","recommended_actions":[],"alternatives":[],"rationale":"enough evidence","missing_information":[],"evidence_summary":[]}'}}]}
+def test_tool_budget_exhaustion_is_preserved_as_missing_information():
+    class FakeGateway:
+        def chat(self, _payload):
+            return LLMResult(status='success', response={
+                'choices':[{'message':{'content':'{"status":"ready","recommended_actions":[],"alternatives":[],"rationale":"enough evidence","missing_information":[],"evidence_summary":[]}'}}],
+                'usage': {'total_tokens': 10},
+            }, model='fake-model', latency_ms=1, usage={'total_tokens': 10})
 
-    monkeypatch.setattr('production.agent.httpx.post', lambda *args, **kwargs: Response())
-    conclusion = InvestigationAgent(None)._plan(
+    conclusion = InvestigationAgent(None, llm_gateway=FakeGateway())._plan(
         'SO-1',
         [{'tool':'get_order','arguments':{},'result':{'name':'SO-1'}}],
         [],
@@ -309,6 +311,36 @@ def test_tool_budget_exhaustion_is_preserved_as_missing_information(monkeypatch)
         budget_exhausted=True,
     )
     assert 'read-tool budget exhausted; plan uses only collected evidence' in conclusion['missing_information']
+    assert conclusion['llm']['usage']['total_tokens'] == 10
+
+
+def test_llm_gateway_normalizes_success_usage_and_message(monkeypatch):
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {'choices':[{'message':{'content':'{"ok":true}'}}], 'usage': {'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}}
+
+    monkeypatch.setattr('production.llm_gateway.httpx.post', lambda *args, **kwargs: Response())
+    result = LLMGateway(base_url='https://llm.test/v1', api_key='key', model='model-x').chat({'messages':[]})
+
+    assert result.ok is True
+    assert result.model == 'model-x'
+    assert result.first_message()['content'] == '{"ok":true}'
+    assert result.telemetry()['usage']['total_tokens'] == 5
+
+
+def test_llm_gateway_failure_is_retryable_for_timeout(monkeypatch):
+    import httpx
+
+    def raise_timeout(*_args, **_kwargs):
+        raise httpx.TimeoutException('timeout')
+
+    monkeypatch.setattr('production.llm_gateway.httpx.post', raise_timeout)
+    result = LLMGateway(base_url='https://llm.test/v1', api_key='key', model='model-x').chat({'messages':[]})
+
+    assert result.ok is False
+    assert result.error_code == 'llm_timeout'
+    assert result.retryable is True
 
 
 def test_customer_custom_field_is_normalized_as_business_evidence():

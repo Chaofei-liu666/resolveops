@@ -37,6 +37,7 @@ Worker
     ├─ Migration Runner
     ├─ CaseContextBuilder
     ├─ Tool Profile Router
+    ├─ LLMGateway
     ├─ InvestigationAgent
     ├─ BusinessReadTools
     ├─ Action Profile Router
@@ -90,6 +91,31 @@ Case event_type
 只有当不同业务的工具集、上下文权限、评估指标和风险策略明显分裂时，才适合拆成多个专门 Agent，例如 Contract Agent、Credit Agent、Pricing Agent。
 
 ## 工具设计
+
+## LLM Gateway
+
+Agent 不直接调用 LLM Provider HTTP API，而是通过 `LLMGateway`。
+
+当前 Gateway 负责：
+
+- 统一拼接 chat-completions endpoint。
+- 注入当前模型名。
+- 设置 provider timeout。
+- 将 timeout、HTTP error、provider error 规范化成 `LLMResult`。
+- 标记错误是否可重试。
+- 记录 model、latency_ms、usage。
+- 让 Agent 在 LLM 调用失败时安全 handoff，不继续生成写计划。
+
+后续如果需要生产级流控，可以在这个边界继续加入：
+
+```text
+per-provider max_concurrency
+token bucket
+request queue
+exponential backoff
+circuit breaker
+fallback model
+```
 
 LLM 看到的是业务语义工具，不是 ERPNext 页面或 Doctype。
 

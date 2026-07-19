@@ -203,7 +203,17 @@ context_built
 - 最大 replanning 次数
 - HTTP timeout
 
-生产下一步可以加 `LLMGateway`：
+当前已加最小 `LLMGateway`，Agent 不直接调用 provider HTTP API。
+
+已实现：
+
+- provider timeout
+- HTTP / timeout / provider error 统一包装
+- retryable 标记
+- model / latency_ms / usage telemetry
+- LLM 失败时安全 handoff，不继续生成写计划
+
+后续生产可继续加：
 
 ```text
 per-provider max_concurrency
@@ -211,7 +221,6 @@ token bucket
 request queue
 exponential backoff
 circuit breaker
-usage logging
 fallback model
 ```
 

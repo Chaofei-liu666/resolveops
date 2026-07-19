@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from datetime import date
 from typing import Any
-import httpx
 from .actions import planner_action_catalog, planner_action_instructions, registered_action_types
 from .config import settings
+from .llm_gateway import LLMGateway
 from .tool_result import ToolResult
 from .tool_scheduler import ReadToolCall, ReadToolScheduler
 SYSTEM='''You are ResolveOps' investigation agent for ERP business exceptions.
@@ -27,7 +27,9 @@ For price_mismatch, do not use inventory or replenishment actions.
 For delivery_delay, compare Sales Order delivery_date with inbound purchase schedule_date. If schedule_date is later, propose create_supplier_followup_task. Never propose changing ERP delivery dates directly.
 Return handoff only when no executable plan can be safely proposed from the evidence.'''
 class InvestigationAgent:
-    def __init__(self, tools): self.tools=tools
+    def __init__(self, tools, llm_gateway: LLMGateway | None = None):
+        self.tools=tools
+        self.llm=llm_gateway or LLMGateway()
     def run(self, order_id, on_observation, context: str | dict[str, Any] = ''):
         user=f'Investigate order {order_id}. Start by reading the order.'
         context_text = self._context_text(context)
@@ -44,9 +46,11 @@ class InvestigationAgent:
             # DeepSeek Thinking mode supports automatic tool choice, not a
             # forced function name. Evidence validation below prevents a plan
             # being created when the model skips the necessary read calls.
-            payload={'model':settings.llm_model,'messages':messages,'tools':self.tools.definitions(),'tool_choice':'auto','temperature':0}
-            r=httpx.post(settings.llm_base_url.rstrip('/')+'/chat/completions',headers={'Authorization':f'Bearer {settings.llm_api_key}'},json=payload,timeout=30); r.raise_for_status()
-            message=r.json()['choices'][0]['message']; messages.append(message); calls=message.get('tool_calls') or []
+            payload={'messages':messages,'tools':self.tools.definitions(),'tool_choice':'auto','temperature':0}
+            llm_result=self.llm.chat(payload)
+            if not llm_result.ok:
+                return {'status':'handoff','recommended_actions':[],'alternatives':[],'rationale':'LLM investigation call failed before sufficient evidence was gathered.','missing_information':[llm_result.error_code or 'llm_error'],'llm':llm_result.telemetry()}
+            message=llm_result.first_message() or {}; messages.append(message); calls=message.get('tool_calls') or []
             if not calls:
                 break
             batch=[]
@@ -90,9 +94,12 @@ class InvestigationAgent:
         event_type = self._event_type(context)
         evidence={'order_id':order_id,'current_date':date.today().isoformat(),'case_context':context or None,'observations':observations,'available_action_schemas':planner_action_catalog(event_type)}
         planner_system=PLANNER_SYSTEM_BASE + '\n\n' + planner_action_instructions(event_type)
-        payload={'model':settings.llm_model,'messages':[{'role':'system','content':planner_system},{'role':'user','content':json.dumps(evidence,ensure_ascii=False)}],'response_format':{'type':'json_object'},'temperature':0}
-        r=httpx.post(settings.llm_base_url.rstrip('/')+'/chat/completions',headers={'Authorization':f'Bearer {settings.llm_api_key}'},json=payload,timeout=30); r.raise_for_status()
-        conclusion=self._parse_conclusion(r.json()['choices'][0]['message'].get('content'))
+        payload={'messages':[{'role':'system','content':planner_system},{'role':'user','content':json.dumps(evidence,ensure_ascii=False)}],'response_format':{'type':'json_object'},'temperature':0}
+        llm_result=self.llm.chat(payload)
+        if not llm_result.ok:
+            return {'status':'handoff','recommended_actions':[],'alternatives':[],'rationale':'LLM planning call failed; automation stopped before write planning.','missing_information':[llm_result.error_code or 'llm_error'],'llm':llm_result.telemetry()}
+        conclusion=self._parse_conclusion((llm_result.first_message() or {}).get('content'))
+        conclusion['llm']=llm_result.telemetry()
         if failed_tools:
             unknown=[f'{name} unavailable: its business fact remains unknown.' for name in sorted(set(failed_tools))]
             conclusion['missing_information']=list(dict.fromkeys((conclusion.get('missing_information') or [])+unknown))
