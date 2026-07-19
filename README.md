@@ -1,52 +1,96 @@
 # ResolveOps
 
-订单履约异常处置 Agent，聚焦库存不足这一类异常，不把正常的确定性业务流程伪装成 Agent。
+ResolveOps 是一个面向企业订单履约异常的 Agent。它不处理确定性正常流程，而是在订单进入异常分支后，自动调查原因、生成行动计划、申请审批、受控执行，并通过真实业务系统回读验证结果。
 
-`production/` 是可部署服务：ERPNext 通过 REST API 接入，PostgreSQL 保存 Case/事件/审批/工具调用，API 和 Worker 独立运行。根目录旧的本地界面仅保留作交互原型，不是上线路径。
+当前第一版聚焦 ERP 订单履约异常，尤其是库存不足场景。项目使用 ERPNext 作为真实业务系统，PostgreSQL 保存 Case、事件、审批、工具调用、验证结果和轻量长期记忆。
 
-## 已实现的闭环
+## 核心闭环
 
-`异常 Case → 只读调查 → 证据与计划 → 调用级审批 → 幂等执行 → 独立验证 → 关闭/重新规划`
+```text
+ERP 异常事件
+→ 创建 Case
+→ Agent 调用只读工具调查
+→ Evidence-grounded Action Plan
+→ Policy / Approval
+→ Executor 执行写工具
+→ Read-after-write Verification
+→ resolved / replan / manual_review
+```
 
-- 所有执行计划都包含证据、预期结果、风险和验证方式；
-- 审批绑定 Case、计划版本和行动参数哈希，执行一次后即消费；
-- 写入前再次查询业务状态；
-- 调拨单带幂等键，超时重试不会重复创建；
-- 对同一“来源仓库 + SKU”的写操作使用持久化资源锁，避免多个 Case 同时占用同一库存；
-- 写入接口返回成功不代表完成，必须再次查询并验证。
-- Worker 租约过期时，只读调查可安全重排；可能已写入 ERP 的任务一律停止，转人工按幂等键核验。
-- 填入 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 后，Agent 在最多 8 次只读 Tool 调用预算内动态决定调查顺序；模型无法获得 ERP 写工具。
+## 已实现能力
 
-数据由内置 `ERPAdapter` 提供，以便无外部账号也能演示完整流程。替换该适配器即可接入 ERPNext REST API；Case、审批、事件和验证结果仍保留在本地 SQLite 中。
+- 真实 ERPNext API 接入，而不是 mock 系统。
+- LLM 只允许调用只读业务工具，不能直接写 ERP。
+- 写操作以 Action Plan 形式提出，由 Policy、Approval、Executor 控制。
+- 审批绑定 `case_id + plan_version + action_hash`，防止参数篡改和审批重放。
+- 写操作带 idempotency key，避免重复创建业务单据。
+- PostgreSQL `FOR UPDATE SKIP LOCKED` 领取任务，支持多 Worker 安全并发。
+- PostgreSQL advisory transaction lock 控制共享库存写入。
+- ToolResult 统一表示工具成功、失败、是否可重试、是否可作为证据。
+- CaseContextBuilder 按 `case_id` 构建上下文，避免多 Case 串状态。
+- Verified Case Lessons：只有 resolved 且验证通过的 Case 才沉淀经验，且只作为规划提示。
+- 执行轨迹评估：Case Resolution、Verification Pass、Replan、Policy Denial、Handoff 等指标。
 
-## 部署前置条件
+## 本地启动
 
-1. ERPNext 创建专用服务账号，只赋予 Sales Order、Bin 读取以及 Stock Entry 草稿创建权限。
-2. 在 Stock Entry 增加 `custom_resolveops_idempotency_key` 自定义字段（唯一索引）；它用于写操作的不确定结果恢复。
-3. 由 ERPNext 或集成层发送 `inventory_shortage` Webhook，Body 至少包含 `tenant_id`、`order_id`、`event`，并用 `WEBHOOK_SECRET` 计算 `sha256=<HMAC>` 签名。
-4. 将审批 API 放在企业 SSO/API Gateway 后；当前 `X-Operator-Key` 是部署初始保护，后续应由网关注入经验证的操作人身份。
-
-## 启动生产服务
+先复制环境变量模板：
 
 ```powershell
 Copy-Item .env.example .env
-# 填入实际 ERPNext 地址与密钥；不要提交 .env
-docker compose up --build -d
 ```
 
-API 在 `http://127.0.0.1:8080`，Worker 单独从 PostgreSQL 领取任务。`/healthz` 可供负载均衡健康检查使用。
+然后填写 `.env`：
 
-## 本地原型（非上线路径）
+```text
+POSTGRES_PASSWORD
+ERPNEXT_BASE_URL
+ERPNEXT_API_KEY
+ERPNEXT_API_SECRET
+WEBHOOK_SECRET
+OPERATOR_API_KEY
+LLM_BASE_URL
+LLM_API_KEY
+LLM_MODEL
+```
+
+启动服务：
 
 ```powershell
-python -m pip install -r requirements.txt
-python -m uvicorn app:app --reload --port 8080
+docker compose up -d --build
 ```
 
-打开 <http://127.0.0.1:8080>，选择 `CASE-1042`，依次点击“开始调查”、“批准本次行动”、“执行并验证”。
+健康检查：
 
-## 刻意未加入的组件
+```powershell
+Invoke-RestMethod http://localhost:8090/healthz
+```
 
-本版没有 Redis、向量数据库、多 Agent、MCP 或 LangGraph：它们不解决此 MVP 的核心风险。先验证证据驱动规划、审批边界、可追溯执行和结果验证，再根据真实接入需求演进。
+控制台：
 
-这里的锁由 SQLite 唯一约束实现，适合单机演示。生产多副本部署时，应将同一接口替换为 PostgreSQL 的事务锁/咨询锁（或有明确租约与续租机制的分布式协调服务）。
+```text
+http://localhost:8090
+```
+
+## 测试
+
+```powershell
+..\agent-sre\.venv\Scripts\python.exe -m pytest tests -q
+```
+
+当前本地测试应通过：
+
+```text
+37 passed, 1 skipped
+```
+
+## 文档
+
+- [架构说明](docs/architecture.md)
+- [运行手册](docs/runbook.md)
+- [面试问答笔记](docs/interview-notes.md)
+- [可靠性评估与故障注入](docs/evals.md)
+
+## 不提交的文件
+
+`.env`、本地数据库、缓存目录不会进入 Git。敏感配置只保留在本地环境变量中，仓库只提交 `.env.example`。
+
