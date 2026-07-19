@@ -19,6 +19,27 @@ engine = create_engine(settings.database_url, pool_pre_ping=True)
 
 ToolExecutor = Callable[[dict[str, Any], str], dict[str, Any]]
 
+READ_TOOL_PROFILES: dict[str, set[str]] = {
+    'inventory_shortage': {
+        'get_order',
+        'get_inventory',
+        'list_alternative_warehouses',
+        'get_customer_profile',
+        'get_item_supply_profile',
+        'get_inbound_purchase',
+        'get_transfer_options',
+    },
+    'price_mismatch': {
+        'get_order',
+        'get_reference_price',
+        'get_customer_profile',
+    },
+}
+
+
+def read_tool_names_for_case(event_type: str | None) -> set[str]:
+    return READ_TOOL_PROFILES.get(event_type or 'inventory_shortage', {'get_order'})
+
 
 @dataclass(frozen=True)
 class ToolSpec:
@@ -78,17 +99,21 @@ class ToolSpec:
 class ToolRegistry:
     """Registry owns the LLM-visible schema and the internal execution map."""
 
-    def __init__(self, specs: list[ToolSpec]) -> None:
-        self.specs = {spec.name: spec for spec in specs}
+    def __init__(self, specs: list[ToolSpec], enabled_names: set[str] | None = None) -> None:
+        self.all_specs = {spec.name: spec for spec in specs}
+        self.enabled_names = set(enabled_names or self.all_specs)
+        self.specs = {name: spec for name, spec in self.all_specs.items() if name in self.enabled_names}
 
     def definitions(self) -> list[dict[str, Any]]:
         return [spec.to_openai_tool() for spec in self.specs.values() if spec.llm_callable]
 
     def metadata(self, name: str) -> dict[str, Any]:
-        spec = self.specs.get(name)
+        spec = self.all_specs.get(name)
         if not spec:
             return {'name': name, 'permission': None, 'side_effect': None, 'risk_level': None, 'source_system': None}
-        return spec.metadata()
+        result = spec.metadata()
+        result['enabled_for_case'] = name in self.enabled_names
+        return result
 
     def execute(self, name: str, arguments: dict[str, Any], order_id: str) -> dict[str, Any]:
         return self.execute_result(name, arguments, order_id).observation_result()
@@ -190,9 +215,11 @@ class BusinessReadTools:
     enterprise system.
     """
 
-    def __init__(self, adapter: ERPNextAdapter):
+    def __init__(self, adapter: ERPNextAdapter, event_type: str = 'inventory_shortage'):
         self.adapter = adapter
-        self.registry = ToolRegistry(self._specs())
+        self.event_type = event_type
+        self.enabled_tool_names = read_tool_names_for_case(event_type)
+        self.registry = ToolRegistry(self._specs(), self.enabled_tool_names)
 
     def definitions(self) -> list[dict[str, Any]]:
         return self.registry.definitions()
@@ -205,6 +232,8 @@ class BusinessReadTools:
 
     def execute_result(self, name: str, arguments: dict[str, Any], order_id: str) -> ToolResult:
         try:
+            if name not in self.enabled_tool_names:
+                return ToolResult.failure('tool_not_enabled_for_case_type', source_system=self.metadata(name).get('source_system'))
             order = self.adapter.sales_order(order_id) if name == 'get_inventory' else None
             allowed, reason = allow_read_tool(name, arguments, order)
             if not allowed:

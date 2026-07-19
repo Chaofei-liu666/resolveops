@@ -32,8 +32,10 @@ PostgreSQL
     ↓
 Worker
     ├─ CaseContextBuilder
+    ├─ Tool Profile Router
     ├─ InvestigationAgent
     ├─ BusinessReadTools
+    ├─ Action Profile Router
     ├─ Evidence Grounding
     ├─ Policy Engine
     ├─ Approval Binding
@@ -47,8 +49,9 @@ Worker
 
 ```text
 Case event_type
-→ 选择调查工具
-→ 生成 Action Plan
+→ 选择 read tool profile
+→ 调查并生成 Action Plan
+→ action profile 校验
 → Evidence Grounding
 → Policy
 → Approval
@@ -59,7 +62,9 @@ Case event_type
 现在优先拆的是工程边界：
 
 - Read Tool Registry
+- Tool Profile Router
 - Action Registry
+- Action Profile Router
 - Policy Engine
 - Evidence Validator
 - Executor Registry
@@ -68,27 +73,31 @@ Case event_type
 
 ## 工具设计
 
-LLM 看到的是业务语义工具，不是 ERPNext 页面或 Doctype：
+LLM 看到的是业务语义工具，不是 ERPNext 页面或 Doctype。
 
-- `get_order`
-- `get_inventory`
-- `get_customer_profile`
-- `get_item_supply_profile`
-- `get_inbound_purchase`
-- `get_transfer_options`
-- `get_reference_price`
+只读工具由 `ToolSpec` 定义 schema、权限、风险、副作用和数据来源。底层当前由 `ERPNextAdapter` 实现，将来可以替换为 SAP、WMS、CRM 或定价系统。
 
-这些工具由 `ToolSpec` 定义 schema、权限、风险、副作用和数据来源。底层当前由 `ERPNextAdapter` 实现，将来可以替换为 SAP、WMS、CRM 或定价系统。
+### Read Tool Profile
 
-写操作也是工具，但不直接暴露给 LLM 调用。LLM 只能在 Action Plan 中提出：
+系统按 `event_type` 给 LLM 暴露最小必要工具集。
 
-- `transfer_stock`
-- `create_purchase_request`
-- `create_price_review_ticket`
-- `draft_customer_notification`
-- `create_manual_ticket`
+| event_type | LLM 可见 read tools |
+|---|---|
+| `inventory_shortage` | `get_order`, `get_inventory`, `list_alternative_warehouses`, `get_customer_profile`, `get_item_supply_profile`, `get_inbound_purchase`, `get_transfer_options` |
+| `price_mismatch` | `get_order`, `get_reference_price`, `get_customer_profile` |
 
-写工具必须经过 Policy、审批、幂等和验证。
+这不是只靠 prompt 提醒模型，而是 runtime 硬边界。隐藏工具不会出现在 LLM schema 中；即使模型绕过 schema 请求隐藏工具，也会返回 `tool_not_enabled_for_case_type`。
+
+### Write Action Profile
+
+写操作也是工具，但不直接暴露给 LLM 调用。LLM 只能在 Action Plan 中提出当前 Case 允许的 Action。
+
+| event_type | Planner 可见 write actions |
+|---|---|
+| `inventory_shortage` | `transfer_stock`, `create_purchase_request`, `draft_customer_notification`, `create_manual_ticket` |
+| `price_mismatch` | `create_price_review_ticket`, `create_manual_ticket` |
+
+Action Plan 标准化阶段会再次校验 action type 是否属于当前 Case。也就是说，价格异常里即使模型提出 `transfer_stock`，也会被系统拒绝。
 
 ## Case Context
 

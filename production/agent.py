@@ -63,8 +63,9 @@ class InvestigationAgent:
     def _plan(self, order_id, observations, failed_tools, context: str | dict[str, Any], budget_exhausted=False):
         if not observations:
             return {'status':'handoff','recommended_actions':[],'alternatives':[],'rationale':'Agent produced no read-tool evidence.','missing_information':['order and inventory evidence']}
-        evidence={'order_id':order_id,'current_date':date.today().isoformat(),'case_context':context or None,'observations':observations,'available_action_schemas':planner_action_catalog()}
-        planner_system=PLANNER_SYSTEM_BASE + '\n\n' + planner_action_instructions()
+        event_type = self._event_type(context)
+        evidence={'order_id':order_id,'current_date':date.today().isoformat(),'case_context':context or None,'observations':observations,'available_action_schemas':planner_action_catalog(event_type)}
+        planner_system=PLANNER_SYSTEM_BASE + '\n\n' + planner_action_instructions(event_type)
         payload={'model':settings.llm_model,'messages':[{'role':'system','content':planner_system},{'role':'user','content':json.dumps(evidence,ensure_ascii=False)}],'response_format':{'type':'json_object'},'temperature':0}
         r=httpx.post(settings.llm_base_url.rstrip('/')+'/chat/completions',headers={'Authorization':f'Bearer {settings.llm_api_key}'},json=payload,timeout=30); r.raise_for_status()
         conclusion=self._parse_conclusion(r.json()['choices'][0]['message'].get('content'))
@@ -124,3 +125,11 @@ class InvestigationAgent:
         if isinstance(context, str):
             return context
         return json.dumps(context, ensure_ascii=False)
+
+    @staticmethod
+    def _event_type(context: str | dict[str, Any]) -> str | None:
+        if not isinstance(context, dict):
+            return None
+        scope = context.get('scope') if isinstance(context.get('scope'), dict) else {}
+        event_type = scope.get('event_type')
+        return str(event_type) if event_type else None

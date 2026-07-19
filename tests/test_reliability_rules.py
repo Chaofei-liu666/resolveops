@@ -9,7 +9,7 @@ os.environ.setdefault('OPERATOR_API_KEY', 'test')
 
 import pytest
 
-from production.actions import action_tool_spec, normalize_plan, normalize_proposal, planner_action_catalog, planner_action_instructions, registered_action_types
+from production.actions import action_tool_spec, action_types_for_case, normalize_plan, normalize_proposal, planner_action_catalog, planner_action_instructions, registered_action_types
 import production.agent as agent_module
 from production.agent import InvestigationAgent
 from production.evidence import validate_plan_grounding
@@ -290,8 +290,21 @@ def test_business_read_tools_expose_business_names_not_erpnext_doctypes():
         pass
 
     names = {item['function']['name'] for item in BusinessReadTools(FakeAdapter()).definitions()}
-    assert {'get_order', 'get_inventory', 'get_customer_profile', 'get_reference_price'} <= names
+    assert {'get_order', 'get_inventory', 'get_customer_profile'} <= names
     assert not {'Sales Order', 'Bin', 'Stock Entry', 'Material Request'} & names
+
+
+def test_read_tool_profile_limits_llm_visible_tools_by_case_type():
+    class FakeAdapter:
+        pass
+
+    inventory_names = {item['function']['name'] for item in BusinessReadTools(FakeAdapter(), 'inventory_shortage').definitions()}
+    price_names = {item['function']['name'] for item in BusinessReadTools(FakeAdapter(), 'price_mismatch').definitions()}
+    assert {'get_order', 'get_inventory', 'get_transfer_options', 'get_inbound_purchase'} <= inventory_names
+    assert price_names == {'get_order', 'get_reference_price', 'get_customer_profile'}
+    assert not {'get_inventory', 'get_transfer_options', 'get_inbound_purchase', 'get_item_supply_profile'} & price_names
+    denied = BusinessReadTools(FakeAdapter(), 'price_mismatch').execute_result('get_inventory', {'item_code':'SKU-A12','warehouse':'Stores - ROPS'}, 'SO-1')
+    assert denied.to_dict()['error_code'] == 'tool_not_enabled_for_case_type'
 
 
 def test_business_read_tool_metadata_exposes_runtime_boundaries():
@@ -527,6 +540,19 @@ def test_planner_action_catalog_is_generated_from_action_registry():
     assert by_type['transfer_stock']['input_schema'] == action_tool_spec('transfer_stock').parameters
     assert by_type['transfer_stock']['llm_directly_callable'] is False
     assert by_type['create_purchase_request']['requires_approval'] is True
+
+
+def test_action_profile_limits_planner_visible_actions_by_case_type():
+    inventory_actions = {item['action_type'] for item in planner_action_catalog('inventory_shortage')}
+    price_actions = {item['action_type'] for item in planner_action_catalog('price_mismatch')}
+    assert {'transfer_stock', 'create_purchase_request'} <= inventory_actions
+    assert 'create_price_review_ticket' not in inventory_actions
+    assert price_actions == {'create_price_review_ticket', 'create_manual_ticket'}
+    assert action_types_for_case('price_mismatch') == {'create_price_review_ticket', 'create_manual_ticket'}
+    with pytest.raises(ValueError):
+        normalize_plan([
+            {'action_type':'transfer_stock','input':{'source':'WH-A','target':'WH-B','sku':'SKU-A12','quantity':1}},
+        ], 'wrong case type', allowed_action_types=action_types_for_case('price_mismatch'))
 
 
 def test_planner_instructions_are_generated_not_handwritten():

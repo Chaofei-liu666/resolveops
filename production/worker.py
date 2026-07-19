@@ -11,7 +11,7 @@ from .main import emit
 from .models import Approval, Base, Case, Invocation, Task
 from .tools import BusinessReadTools
 from .agent import InvestigationAgent
-from .actions import definition_for, normalize_plan, normalize_proposal
+from .actions import action_types_for_case, definition_for, normalize_plan, normalize_proposal
 from .evidence import validate_plan_grounding
 from .executors import executor_for
 from .memory import record_verified_lessons
@@ -81,7 +81,7 @@ def investigate(db, c, task_context=None):
 
 def investigate_with_agent(db, c, task_context):
     observations=[]
-    tool_surface=BusinessReadTools(erp)
+    tool_surface=BusinessReadTools(erp, c.event_type)
     case_context=CaseContextBuilder(db).build(c.id, task_context or {})
     def observe(name, args, result, tool_result=None):
         metadata=tool_surface.metadata(name)
@@ -95,7 +95,7 @@ def investigate_with_agent(db, c, task_context):
     c.evidence={'case_context':case_context,'observations':observations,'conclusion':conclusion,'replanning_context':task_context or None,'previous_evidence':previous_evidence if task_context else None}; proposals=conclusion.get('recommended_actions',[])
     if conclusion.get('status')!='ready' or not proposals:
         c.status='manual_review'; emit(db,c.id,'handoff','Agent ended investigation without a safe executable proposal.',{'conclusion':conclusion}); return
-    try: plan=normalize_plan(proposals,conclusion.get('rationale',''),[f'E-{index+1:03d}' for index in range(len(observations))])
+    try: plan=normalize_plan(proposals,conclusion.get('rationale',''),[f'E-{index+1:03d}' for index in range(len(observations))],action_types_for_case(c.event_type))
     except (ValueError, TypeError) as exc:
         c.status='manual_review'; emit(db,c.id,'handoff','Agent proposal failed Action Plan validation.',{'error':str(exc)}); return
     grounding=validate_plan_grounding(plan,observations,c.event_type)

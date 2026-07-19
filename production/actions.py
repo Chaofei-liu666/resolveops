@@ -13,6 +13,23 @@ from .tools import ToolSpec, object_schema
 Validator = Callable[[dict[str, Any]], dict[str, Any]]
 ResourceKeys = Callable[[dict[str, Any]], list[str]]
 
+ACTION_PROFILES: dict[str, set[str]] = {
+    'inventory_shortage': {
+        'transfer_stock',
+        'create_purchase_request',
+        'draft_customer_notification',
+        'create_manual_ticket',
+    },
+    'price_mismatch': {
+        'create_price_review_ticket',
+        'create_manual_ticket',
+    },
+}
+
+
+def action_types_for_case(event_type: str | None) -> set[str]:
+    return ACTION_PROFILES.get(event_type or 'inventory_shortage', {'create_manual_ticket'})
+
 
 @dataclass(frozen=True)
 class ActionDefinition:
@@ -258,11 +275,15 @@ def normalize_proposal(proposal: dict[str, Any], rationale: str, evidence_refs: 
     }
 
 
-def normalize_plan(proposals: list[dict[str, Any]], rationale: str, evidence_refs: list[str] | None = None) -> dict[str, Any]:
+def normalize_plan(proposals: list[dict[str, Any]], rationale: str, evidence_refs: list[str] | None = None, allowed_action_types: set[str] | None = None) -> dict[str, Any]:
     """A plan may contain one action or a coordinated set of actions."""
     if not isinstance(proposals, list) or not proposals or len(proposals) > 3:
         raise ValueError('recommended_actions must contain between one and three actions')
     actions = [normalize_proposal(proposal, rationale, evidence_refs) for proposal in proposals]
+    if allowed_action_types is not None:
+        disallowed = [action['action_type'] for action in actions if action['action_type'] not in allowed_action_types]
+        if disallowed:
+            raise ValueError(f'action_type not enabled for this case type: {", ".join(sorted(set(disallowed)))}')
     action_types = [action['action_type'] for action in actions]
     if len(set(action_types)) != len(action_types):
         raise ValueError('a plan may not repeat the same action type')
@@ -277,7 +298,7 @@ def action_tool_spec(action_type: str) -> ToolSpec | None:
     return ACTION_TOOL_SPECS.get(action_type)
 
 
-def planner_action_catalog() -> list[dict[str, Any]]:
+def planner_action_catalog(event_type: str | None = None) -> list[dict[str, Any]]:
     """Return write Action Schemas visible to the planner but not executable by it.
 
     This is the single source of truth for actions the LLM may propose.  The
@@ -286,7 +307,10 @@ def planner_action_catalog() -> list[dict[str, Any]]:
     from runtime validation.
     """
     catalog = []
+    enabled = action_types_for_case(event_type) if event_type else set(REGISTRY)
     for definition in REGISTRY.values():
+        if definition.action_type not in enabled:
+            continue
         spec = definition.tool_spec
         if not spec:
             continue
@@ -307,14 +331,14 @@ def planner_action_catalog() -> list[dict[str, Any]]:
     return catalog
 
 
-def planner_action_instructions() -> str:
+def planner_action_instructions(event_type: str | None = None) -> str:
     """Compact planner instructions generated from the Action Registry."""
     lines = [
         'Available write actions are Action Plan schemas, not directly callable tools.',
         'Return them only inside recommended_actions. Do not attempt direct ERP writes.',
         'Each recommended action must use action_type and input matching one schema below:',
     ]
-    for item in planner_action_catalog():
+    for item in planner_action_catalog(event_type):
         required = item['input_schema'].get('required', [])
         properties = item['input_schema'].get('properties', {})
         fields = ', '.join(f'{name}:{properties.get(name, {}).get("type", "any")}' for name in required) or 'no input'

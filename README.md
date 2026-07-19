@@ -4,14 +4,15 @@ ResolveOps 是一个面向企业业务异常的 Agent。它不处理确定性的
 
 当前版本支持两类 Case：
 
-- `inventory_shortage`：订单库存不足，Agent 调查库存、调拨路线、采购补货和客户约束，提出调拨/采购申请等 Action Plan。
-- `price_mismatch`：订单价格与参考价格不一致，Agent 调查订单价格和参考价，创建受控的价格复核记录，不直接修改 ERP 价格。
+- `inventory_shortage`：订单库存不足。Agent 调查库存、调拨路线、采购补货和客户约束，提出调拨或采购申请等 Action Plan。
+- `price_mismatch`：订单价格与参考价格不一致。Agent 调查订单价格和参考价，创建受控的价格复核记录，不直接修改 ERP 价格。
 
 ## 核心闭环
 
 ```text
 ERP 异常事件
 → 创建 Case
+→ 按 event_type 暴露最小必要工具集
 → Agent 调用只读业务工具调查
 → Evidence-grounded Action Plan
 → Policy / Approval
@@ -24,8 +25,9 @@ ERP 异常事件
 
 - 真实 ERPNext API 接入，而不是 mock 系统。
 - LLM 只允许调用只读业务工具，不能直接写 ERP。
+- 按 `event_type` 动态暴露 read tools，避免价格异常误调用库存/采购工具。
+- 按 `event_type` 动态暴露 write Action schemas，避免 planner 提出不属于当前业务异常的行动。
 - 写操作也是工具，但只能作为 Action Plan 被提出，由 Policy、Approval、Executor 控制执行。
-- 支持多异常类型：库存缺货和价格不一致。
 - 审批绑定 `case_id + plan_version + action_hash`，防止参数篡改和审批重放。
 - 写操作带 idempotency key，避免重复创建业务记录。
 - PostgreSQL `FOR UPDATE SKIP LOCKED` 领取任务，支持多 Worker 并发。
@@ -84,7 +86,7 @@ python -m pytest -q
 当前本地回归：
 
 ```text
-41 passed, 1 skipped
+43 passed, 1 skipped
 ```
 
 ## 文档
