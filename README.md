@@ -218,6 +218,7 @@ See [production readiness](docs/production-readiness.md).
 
 - [Architecture](docs/architecture.md)
 - [Quickstart](docs/quickstart.md)
+- [Cloud demo plan](docs/cloud-demo-plan.md)
 - [Runbook](docs/runbook.md)
 - [Deployment safety checklist](docs/deployment.md)
 - [Production readiness assessment](docs/production-readiness.md)
