@@ -152,6 +152,13 @@ python resolveops.py case list
 python resolveops.py case show <case-id>
 ```
 
+Evaluate recent Agent runs:
+
+```bash
+python resolveops.py eval summary --limit 20
+python resolveops.py eval summary --limit 20 --cases
+```
+
 Approve pending actions:
 
 ```bash

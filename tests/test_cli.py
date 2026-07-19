@@ -112,6 +112,67 @@ def test_cli_case_create_posts_resolveops_payload(monkeypatch, capsys):
     assert 'CASE-1' in capsys.readouterr().out
 
 
+def test_cli_eval_summary_calls_eval_endpoint(monkeypatch, capsys):
+    calls = []
+
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json, 'timeout': timeout})
+        return FakeResponse(data={
+            'total_cases': 2,
+            'resolved_cases': 1,
+            'manual_review_cases': 1,
+            'case_resolution_rate': 0.5,
+            'avg_read_tool_calls': 3,
+            'tool_failure_rate': 0.25,
+            'tool_failures': 1,
+            'approval_waiting_cases': 0,
+            'cases_with_writes': 1,
+            'verified_write_cases': 1,
+            'verification_pass_rate': 1,
+            'policy_denials': 0,
+            'replanned_cases': 1,
+            'manual_handoff_cases': 1,
+            'task_failures': 0,
+            'context_isolation_sanitized_cases': 1,
+            'context_isolation_failures': 0,
+            'evidence_grounding_passed_cases': 1,
+            'evidence_grounding_failures': 0,
+            'cases': [
+                {
+                    'case_id': 'CASE-1',
+                    'event_type': 'inventory_shortage',
+                    'order_id': 'SO-1',
+                    'status': 'resolved',
+                    'tool_call_count': 4,
+                    'write_invocation_count': 1,
+                    'has_replan': True,
+                }
+            ],
+        })
+
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
+    result = cli.main([
+        '--base-url', 'http://api.local',
+        '--operator-key', 'ops-key',
+        'eval', 'summary',
+        '--limit', '20',
+        '--cases',
+    ])
+
+    assert result == 0
+    assert calls == [{
+        'method': 'GET',
+        'url': 'http://api.local/v1/evals/summary?limit=20',
+        'headers': {'X-Operator-Key': 'ops-key'},
+        'json': None,
+        'timeout': 30,
+    }]
+    out = capsys.readouterr().out
+    assert 'ResolveOps Eval Summary' in out
+    assert 'resolution=50.0%' in out
+    assert 'CASE-1' in out
+
+
 def test_cli_returns_error_for_failed_api(monkeypatch, capsys):
     monkeypatch.setattr(cli.httpx, 'request', lambda *args, **kwargs: FakeResponse(status_code=403, data={'detail': 'disabled'}))
 

@@ -53,6 +53,13 @@ def print_json(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def fmt_percent(value: Any) -> str:
+    try:
+        return f'{float(value) * 100:.1f}%'
+    except (TypeError, ValueError):
+        return 'n/a'
+
+
 def print_status(data: dict[str, Any]) -> None:
     print('ResolveOps Runtime Status')
     print(f"status: {data.get('status')}")
@@ -149,6 +156,52 @@ def print_case_summary(case: dict[str, Any]) -> None:
         print('\n[Recent Events]')
         for event in events[-8:]:
             print(f"- {event.get('kind')}: {event.get('message')}")
+
+
+def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
+    total = data.get('total_cases', 0)
+    resolved = data.get('resolved_cases', 0)
+    manual = data.get('manual_review_cases', 0)
+    waiting = data.get('approval_waiting_cases', 0)
+    writes = data.get('cases_with_writes', 0)
+    verified = data.get('verified_write_cases', 0)
+
+    print('ResolveOps Eval Summary')
+    print(f"cases: total={total} resolved={resolved} manual_review={manual} waiting_approval={waiting}")
+    print(
+        f"rates: resolution={fmt_percent(data.get('case_resolution_rate'))} "
+        f"verification={fmt_percent(data.get('verification_pass_rate'))} "
+        f"tool_failure={fmt_percent(data.get('tool_failure_rate'))}"
+    )
+    print(
+        f"tools: avg_read_calls={data.get('avg_read_tool_calls', 0):.2f} "
+        f"tool_failures={data.get('tool_failures', 0)}"
+    )
+    print(
+        f"governance: write_cases={writes} verified_write_cases={verified} "
+        f"policy_denials={data.get('policy_denials', 0)}"
+    )
+    print(
+        f"recovery: replanned_cases={data.get('replanned_cases', 0)} "
+        f"manual_handoff_cases={data.get('manual_handoff_cases', 0)} "
+        f"task_failures={data.get('task_failures', 0)}"
+    )
+    print(
+        f"context: sanitized={data.get('context_isolation_sanitized_cases', 0)} "
+        f"failures={data.get('context_isolation_failures', 0)} "
+        f"grounding_passed={data.get('evidence_grounding_passed_cases', 0)} "
+        f"grounding_failures={data.get('evidence_grounding_failures', 0)}"
+    )
+    if show_cases:
+        cases = data.get('cases') or []
+        print('\n[Cases]')
+        for row in cases:
+            print(
+                f"- {row.get('case_id')} {row.get('event_type')} {row.get('order_id')} "
+                f"status={row.get('status')} tools={row.get('tool_call_count', 0)} "
+                f"writes={row.get('write_invocation_count', 0)} "
+                f"replan={row.get('has_replan', False)}"
+            )
 
 
 def cmd_status(args: argparse.Namespace, client: ApiClient) -> int:
@@ -249,6 +302,15 @@ def cmd_approval_revoke(args: argparse.Namespace, client: ApiClient) -> int:
     return 0
 
 
+def cmd_eval_summary(args: argparse.Namespace, client: ApiClient) -> int:
+    data = client.request('GET', f'/v1/evals/summary?limit={args.limit}')
+    if args.json:
+        print_json(data)
+    else:
+        print_eval_summary(data, show_cases=args.cases)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='resolveops', description='ResolveOps API-first Agent CLI')
     parser.add_argument('--base-url', default=os.getenv('RESOLVEOPS_API_URL', DEFAULT_BASE_URL), help='ResolveOps API base URL')
@@ -300,6 +362,13 @@ def build_parser() -> argparse.ArgumentParser:
     approval_revoke.add_argument('approval_id')
     approval_revoke.add_argument('--reason')
     approval_revoke.set_defaults(handler=cmd_approval_revoke)
+
+    eval_parser = sub.add_parser('eval', help='Evaluation and reliability summaries')
+    eval_sub = eval_parser.add_subparsers(dest='eval_command', required=True)
+    eval_summary = eval_sub.add_parser('summary', help='Show aggregate Agent execution quality metrics')
+    eval_summary.add_argument('--limit', type=int, default=50, help='Number of recent cases to evaluate')
+    eval_summary.add_argument('--cases', action='store_true', help='Include per-case rows')
+    eval_summary.set_defaults(handler=cmd_eval_summary)
     return parser
 
 
