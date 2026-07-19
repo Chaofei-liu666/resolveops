@@ -90,12 +90,25 @@ def investigate_with_agent(db, c, task_context):
         return
     if isolation['warnings']:
         emit(db,c.id,'context_isolation_sanitized','Scheduler task context contained foreign scope fields; they were removed before LLM planning.',isolation)
+    emit(db,c.id,'context_built','Case-scoped context was assembled for LLM investigation.',{
+        'scope':case_context.get('scope'),
+        'current_state':case_context.get('current_state'),
+        'memory_count':len((case_context.get('long_term_memory') or {}).get('lessons') or []),
+        'removed_task_scope_paths':case_context.get('isolation',{}).get('task_context_removed_scope_paths',[]),
+    })
     def observe(name, args, result, tool_result=None):
         metadata=tool_surface.metadata(name)
         observation={'tool':name,'arguments':args,'result':result,'metadata':metadata}
         if tool_result is not None:
             observation['tool_result']=tool_result
         observations.append(observation)
+        scheduler=(tool_result or {}).get('scheduler') if isinstance(tool_result,dict) else None
+        emit(db,c.id,'tool_scheduled','Read tool call completed through the scheduler.',{
+            'tool':name,
+            'scheduler':scheduler or {},
+            'status':(tool_result or {}).get('status') if isinstance(tool_result,dict) else None,
+            'error_code':(tool_result or {}).get('error_code') if isinstance(tool_result,dict) else None,
+        })
         emit(db,c.id,'tool_observation',f'Agent called read tool: {name}.',{'arguments':args,'result':result,'tool_result':tool_result,'metadata':metadata})
     conclusion=InvestigationAgent(tool_surface).run(c.order_id, observe, case_context)
     previous_evidence=c.evidence
@@ -109,6 +122,7 @@ def investigate_with_agent(db, c, task_context):
     if not grounding['allowed']:
         c.plan=plan; c.status='manual_review'; emit(db,c.id,'evidence_grounding_failed','Agent plan is not sufficiently supported by read-tool evidence.',grounding); return
     plan['evidence_grounding']=grounding
+    emit(db,c.id,'evidence_grounding_passed','Agent plan passed deterministic evidence grounding.',grounding)
     for action in plan['actions']:
         decision=action_policy(action,{'observations':observations}); action['policy']=decision
         if not decision['allowed']:
@@ -131,6 +145,7 @@ def execute(db,c,approval_id):
     if not executor:
         c.status='manual_review'; emit(db,c.id,'handoff','Executor registry has no implementation for this Action Plan type.',{'action_type':definition.action_type}); return
     action_input=action.get('input',action.get('arguments')); key=f'{c.id}:{action["action_id"]}:v{c.plan_version}'; inv=db.scalar(select(Invocation).where(Invocation.idempotency_key==key))
+    emit(db,c.id,'execution_started','Approved action entered governed Executor.',{'approval_id':approval_id,'action_id':action.get('action_id'),'action_type':definition.action_type,'idempotency_key':key})
     if inv and inv.status=='succeeded': name=inv.external_id
     elif inv: c.status='manual_review'; emit(db,c.id,'handoff','Previous write has unknown outcome; do not retry blindly.'); return
     else:

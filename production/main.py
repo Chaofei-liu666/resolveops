@@ -82,11 +82,32 @@ def audit_out(log: AuditLog):
 def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], invocations: list[Invocation], tasks: list[Task]):
     kinds=[event.kind for event in events]
     plan_actions=(case.plan or {}).get('actions',[]) if isinstance(case.plan,dict) else []
+    tool_events=[event for event in events if event.kind=='tool_observation']
+    scheduled_events=[event for event in events if event.kind=='tool_scheduled']
+    failed_tool_events=[
+        event for event in tool_events
+        if ((event.data or {}).get('result') or {}).get('error')
+        or (((event.data or {}).get('tool_result') or {}).get('status') == 'failed')
+    ]
+    scheduler_sources={}
+    for event in scheduled_events:
+        source=(((event.data or {}).get('scheduler') or {}).get('source')) or 'unknown'
+        scheduler_sources[source]=scheduler_sources.get(source,0)+1
     write_count=len(invocations)
     verification_passes=sum(1 for kind in kinds if kind=='verification_passed')
     verification_failures=sum(1 for kind in kinds if kind=='verification_failed')
     recovery_events=[kind for kind in kinds if kind in {'replan_requested','task_requeued','manual_review_required'}]
-    blocked_events=[kind for kind in kinds if kind in {'evidence_grounding_failed','policy_denied','handoff','worker_failure','verification_failed'}]
+    blocked_events=[kind for kind in kinds if kind in {'context_isolation_failed','evidence_grounding_failed','policy_denied','handoff','worker_failure','verification_failed'}]
+    stage_sequence=[
+        kind for kind in kinds
+        if kind in {
+            'case_created','context_built','context_isolation_sanitized','context_isolation_failed',
+            'tool_scheduled','tool_observation','evidence_grounding_passed','evidence_grounding_failed',
+            'agent_plan_created','approval_requested','approval_partial','approval_granted',
+            'execution_started','replan_requested','verification_passed','verification_failed',
+            'lessons_recorded','handoff','manual_review_required','worker_failure',
+        }
+    ]
     return {
         'case_id':case.id,
         'event_type':case.event_type,
@@ -96,7 +117,10 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'manual_review':case.status=='manual_review',
         'plan_version':case.plan_version,
         'action_count':len(plan_actions),
-        'tool_call_count':sum(1 for kind in kinds if kind=='tool_observation'),
+        'tool_call_count':len(tool_events),
+        'scheduled_tool_call_count':len(scheduled_events),
+        'tool_failure_count':len(failed_tool_events),
+        'tool_scheduler_sources':scheduler_sources,
         'approval_count':len(approvals),
         'pending_approval_count':sum(1 for approval in approvals if approval.status=='pending'),
         'write_invocation_count':write_count,
@@ -108,8 +132,12 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'task_failure_count':sum(1 for task in tasks if task.status=='failed'),
         'has_policy_denial':'policy_denied' in kinds,
         'has_evidence_grounding_failure':'evidence_grounding_failed' in kinds,
+        'has_evidence_grounding_passed':'evidence_grounding_passed' in kinds,
+        'has_context_isolation_failure':'context_isolation_failed' in kinds,
+        'has_context_isolation_sanitized':'context_isolation_sanitized' in kinds,
         'has_replan':'replan_requested' in kinds,
         'has_manual_handoff':any(kind in {'handoff','manual_review_required'} for kind in kinds),
+        'stage_sequence':stage_sequence,
         'event_kinds':kinds,
     }
 def eval_summary_out(rows):
@@ -118,18 +146,27 @@ def eval_summary_out(rows):
     manual=sum(1 for row in rows if row['manual_review'])
     writes=sum(row['write_invocation_count'] for row in rows)
     verified=sum(1 for row in rows if row['write_invocation_count']>0 and row['verification_complete'])
+    tool_calls=sum(row.get('tool_call_count',0) for row in rows)
+    tool_failures=sum(row.get('tool_failure_count',0) for row in rows)
     return {
         'total_cases':total,
         'resolved_cases':resolved,
         'manual_review_cases':manual,
         'case_resolution_rate':resolved/total if total else 0,
+        'avg_read_tool_calls':tool_calls/total if total else 0,
+        'tool_failure_rate':tool_failures/tool_calls if tool_calls else 0,
+        'tool_failures':tool_failures,
+        'approval_waiting_cases':sum(1 for row in rows if row.get('pending_approval_count',0)>0),
         'cases_with_writes':sum(1 for row in rows if row['write_invocation_count']>0),
         'verified_write_cases':verified,
         'verification_pass_rate':verified/sum(1 for row in rows if row['write_invocation_count']>0) if any(row['write_invocation_count']>0 for row in rows) else 1,
         'write_invocations':writes,
         'verification_failures':sum(row['verification_failed_count'] for row in rows),
         'policy_denials':sum(1 for row in rows if row['has_policy_denial']),
+        'evidence_grounding_passed_cases':sum(1 for row in rows if row.get('has_evidence_grounding_passed')),
         'evidence_grounding_failures':sum(1 for row in rows if row.get('has_evidence_grounding_failure')),
+        'context_isolation_sanitized_cases':sum(1 for row in rows if row.get('has_context_isolation_sanitized')),
+        'context_isolation_failures':sum(1 for row in rows if row.get('has_context_isolation_failure')),
         'replanned_cases':sum(1 for row in rows if row['has_replan']),
         'manual_handoff_cases':sum(1 for row in rows if row['has_manual_handoff']),
         'task_failures':sum(row['task_failure_count'] for row in rows),

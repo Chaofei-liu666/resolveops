@@ -37,7 +37,7 @@ ERP 异常事件
 - ToolResult 统一表示工具成功、失败、可重试性和证据可用性。
 - CaseContextBuilder 按 `case_id` 构建上下文，并在进入 LLM 前清洗/校验 task context，避免多个 Case 串状态。
 - Verified Case Lessons 只从 `resolved + verification passed` 的 Case 沉淀，并且只作为规划提示。
-- 执行轨迹评估：Case Resolution、Verification Pass、Replan、Policy Denial、Handoff 等指标。
+- 执行轨迹评估：Case Resolution、平均 read tool 次数、工具失败率、Verification Pass、Replan、Policy Denial、Handoff 等指标。
 
 ## 本地启动
 
@@ -88,7 +88,7 @@ python -m pytest -q
 当前本地回归：
 
 ```text
-51 passed, 1 skipped
+52 passed, 1 skipped
 ```
 
 ## 文档

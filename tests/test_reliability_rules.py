@@ -797,7 +797,12 @@ def test_audit_log_serializes_actor_role_and_resource():
 def test_eval_case_requires_write_verification():
     case = Case(id='case-1', tenant_id='demo', order_id='SO-1', status='resolved', plan_version=1, plan={'actions':[{'action_type':'transfer_stock'}]})
     events = [
-        Event(case_id='case-1', kind='tool_observation', message='read', data={}),
+        Event(case_id='case-1', kind='case_created', message='created', data={}),
+        Event(case_id='case-1', kind='context_built', message='context', data={}),
+        Event(case_id='case-1', kind='tool_scheduled', message='scheduled', data={'scheduler':{'source':'executed'},'status':'success'}),
+        Event(case_id='case-1', kind='tool_observation', message='read', data={'result':{'name':'SO-1'},'tool_result':{'status':'success'}}),
+        Event(case_id='case-1', kind='evidence_grounding_passed', message='grounded', data={}),
+        Event(case_id='case-1', kind='execution_started', message='execute', data={}),
         Event(case_id='case-1', kind='verification_passed', message='ok', data={}),
     ]
     approvals = [Approval(case_id='case-1', plan_version=1, action_hash='abc', action={}, status='consumed')]
@@ -808,6 +813,30 @@ def test_eval_case_requires_write_verification():
     assert result['write_invocation_count'] == 1
     assert result['verification_complete'] is True
     assert result['tool_call_count'] == 1
+    assert result['scheduled_tool_call_count'] == 1
+    assert result['tool_failure_count'] == 0
+    assert result['tool_scheduler_sources'] == {'executed': 1}
+    assert result['has_evidence_grounding_passed'] is True
+    assert 'execution_started' in result['stage_sequence']
+
+
+def test_eval_case_counts_tool_failures_and_context_isolation():
+    case = Case(id='case-2', tenant_id='demo', order_id='SO-2', status='manual_review', plan_version=0)
+    events = [
+        Event(case_id='case-2', kind='context_isolation_sanitized', message='cleaned', data={}),
+        Event(case_id='case-2', kind='context_isolation_failed', message='blocked', data={}),
+        Event(case_id='case-2', kind='tool_scheduled', message='scheduled', data={'scheduler':{'source':'cache'},'status':'failed','error_code':'tool_scheduler_failed'}),
+        Event(case_id='case-2', kind='tool_observation', message='read failed', data={'result':{'error':'tool_scheduler_failed'},'tool_result':{'status':'failed'}}),
+        Event(case_id='case-2', kind='handoff', message='manual', data={}),
+    ]
+    result = eval_case_out(case, events, [], [], [])
+
+    assert result['manual_review'] is True
+    assert result['tool_failure_count'] == 1
+    assert result['tool_scheduler_sources'] == {'cache': 1}
+    assert result['has_context_isolation_sanitized'] is True
+    assert result['has_context_isolation_failure'] is True
+    assert result['blocked_event_count'] == 2
 
 
 def test_eval_summary_counts_recovery_and_failure_signals():
@@ -818,8 +847,14 @@ def test_eval_summary_counts_recovery_and_failure_signals():
             'write_invocation_count': 1,
             'verification_complete': True,
             'verification_failed_count': 0,
+            'tool_call_count': 4,
+            'tool_failure_count': 0,
+            'pending_approval_count': 0,
             'has_policy_denial': False,
+            'has_evidence_grounding_passed': True,
             'has_evidence_grounding_failure': False,
+            'has_context_isolation_sanitized': False,
+            'has_context_isolation_failure': False,
             'has_replan': True,
             'has_manual_handoff': False,
             'task_failure_count': 0,
@@ -830,8 +865,14 @@ def test_eval_summary_counts_recovery_and_failure_signals():
             'write_invocation_count': 0,
             'verification_complete': True,
             'verification_failed_count': 1,
+            'tool_call_count': 2,
+            'tool_failure_count': 1,
+            'pending_approval_count': 1,
             'has_policy_denial': True,
+            'has_evidence_grounding_passed': False,
             'has_evidence_grounding_failure': True,
+            'has_context_isolation_sanitized': True,
+            'has_context_isolation_failure': True,
             'has_replan': False,
             'has_manual_handoff': True,
             'task_failure_count': 1,
@@ -841,6 +882,12 @@ def test_eval_summary_counts_recovery_and_failure_signals():
     assert summary['total_cases'] == 2
     assert summary['case_resolution_rate'] == 0.5
     assert summary['verification_pass_rate'] == 1
+    assert summary['avg_read_tool_calls'] == 3
+    assert summary['tool_failure_rate'] == 1 / 6
+    assert summary['approval_waiting_cases'] == 1
     assert summary['policy_denials'] == 1
+    assert summary['evidence_grounding_passed_cases'] == 1
     assert summary['evidence_grounding_failures'] == 1
+    assert summary['context_isolation_sanitized_cases'] == 1
+    assert summary['context_isolation_failures'] == 1
     assert summary['replanned_cases'] == 1

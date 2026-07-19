@@ -146,9 +146,14 @@ target_domain
 不只评估最终文本，而是评估事件轨迹：
 
 - Case Resolution Rate
+- Average Read Tool Calls
+- Tool Failure Rate
 - Verification Pass Rate
 - Policy Denial Count
+- Approval Waiting Cases
+- Evidence Grounding Pass Count
 - Evidence Grounding Failure Count
+- Context Isolation Sanitized / Failed Count
 - Replan Count
 - Manual Handoff Count
 - Task Failure Count
@@ -161,6 +166,19 @@ case_events
 approvals
 tool_invocations
 tasks
+```
+
+每个 Case 还会输出 `stage_sequence`，用于看清楚执行链路走到了哪一步，例如：
+
+```text
+context_built
+→ tool_scheduled
+→ tool_observation
+→ evidence_grounding_passed
+→ agent_plan_created
+→ approval_granted
+→ execution_started
+→ verification_passed
 ```
 
 ## 9. LLM API 高并发限流怎么处理？

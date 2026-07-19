@@ -231,3 +231,29 @@ write action verification passed
 ```
 
 Lesson 只作为 planning hint，不能替代实时业务系统查询、Policy、Approval、Idempotency 和 Verification。
+
+## Runtime Evals
+
+ResolveOps 不用“答案相似度”评估 Agent，而是从真实 Case 事件轨迹计算运行指标。
+
+当前每个 Case 会提取：
+
+- `stage_sequence`：关键阶段顺序，例如 `context_built → tool_scheduled → tool_observation → evidence_grounding_passed → agent_plan_created → approval_granted → execution_started → verification_passed`。
+- `tool_call_count`：read tool 调用次数。
+- `tool_failure_count`：失败或不可用的 read tool 结果。
+- `tool_scheduler_sources`：工具结果来自 executed、cache、deduped 还是 unknown。
+- `pending_approval_count`：是否卡在审批。
+- `verification_complete`：写入是否完成独立回读验证。
+- `blocked_event_count`：是否因证据不足、策略拒绝、上下文隔离失败、验证失败或人工接管而停止。
+
+汇总接口 `/v1/evals/summary` 再计算：
+
+- Case Resolution Rate
+- Average Read Tool Calls
+- Tool Failure Rate
+- Verification Pass Rate
+- Approval Waiting Cases
+- Evidence Grounding Pass / Failure
+- Context Isolation Sanitized / Failed
+- Replanned Cases
+- Manual Handoff Cases

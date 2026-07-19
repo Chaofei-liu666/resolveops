@@ -11,7 +11,7 @@ python -m pytest -q
 Current local regression:
 
 ```text
-51 passed, 1 skipped
+52 passed, 1 skipped
 ```
 
 | Risk | Test | Expected safe outcome |
@@ -42,12 +42,19 @@ Computed signals:
 | Metric | Source of truth |
 |---|---|
 | Case Resolution Rate | `cases.status == resolved` |
+| Average Read Tool Calls | `tool_observation` events per Case |
+| Tool Failure Rate | failed `ToolResult` / total read-tool observations |
 | Verification Pass Rate | `tool_invocations` plus `verification_passed` / `verification_failed` events |
+| Approval Waiting Cases | pending `approvals` |
 | Recovery Count | `replan_requested`, `task_requeued`, `manual_review_required` events |
 | Policy Denial Count | `policy_denied` events |
+| Evidence Grounding Pass Count | `evidence_grounding_passed` events |
 | Evidence Grounding Failure Count | `evidence_grounding_failed` events |
+| Context Isolation Count | `context_isolation_sanitized` / `context_isolation_failed` events |
 | Manual Handoff Count | `handoff`, `manual_review_required` events |
 | Task Failure Count | failed `tasks` |
+
+Each Case row also includes a compact `stage_sequence`, extracted from the event trail. This sequence is intended for AgentOps debugging: it shows whether a Case reached context assembly, read-tool scheduling, evidence grounding, approval, execution, verification, lesson recording, or safe handoff.
 
 Historical fault-injection cases intentionally stop at manual review, so resolution rate is not the only quality signal for this mixed dataset. The stronger signal is that all write cases must pass independent verification or stop safely.
 
