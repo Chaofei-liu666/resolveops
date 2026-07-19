@@ -138,7 +138,36 @@ GET /v1/evals/summary
 - manual_handoff_cases
 - task_failures
 
-## 8. 常见问题
+## 8. 运行状态检查
+
+轻量存活检查：
+
+```text
+GET /healthz
+```
+
+上线 readiness 检查：
+
+```text
+GET /readyz
+```
+
+管理员运行状态：
+
+```text
+GET /v1/runtime/status
+Required role: ops_admin or config_admin
+```
+
+重点看：
+
+- `checks.database.ok`
+- `checks.migrations.pending_versions`
+- `queues.queued`
+- `queues.running`
+- `queues.failed`
+
+## 9. 常见问题
 
 ### PowerShell profile.ps1 报错
 

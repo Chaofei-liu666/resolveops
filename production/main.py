@@ -16,6 +16,7 @@ from .config import settings
 from .approval_state import approval_is_expired, utc_now
 from .migrations import apply_migrations
 from .models import AuditLog, Base, Approval, Case, Event, Invocation, LogisticsLane, Operator, Task
+from .runtime_status import build_runtime_status
 from .tool_trace import build_tool_trace
 
 SUPPORTED_EVENTS={'inventory_shortage','price_mismatch','delivery_delay','supplier_delay'}
@@ -224,6 +225,22 @@ def eval_summary_out(rows):
     }
 @app.get('/healthz')
 def health(): return {'status':'ok'}
+@app.get('/readyz')
+def readiness():
+    try:
+        with Session(engine) as db:
+            status=build_runtime_status(db)
+    except Exception:
+        raise HTTPException(503,'not ready')
+    if status['status']!='ready':
+        raise HTTPException(503,{'status':status['status'],'checks':status['checks']})
+    return {'status':'ready'}
+@app.get('/v1/runtime/status')
+def runtime_status(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        require_role(identity,'ops_admin','config_admin')
+        return build_runtime_status(db)
 @app.get('/')
 def console():
     if not STATIC_DIR.exists(): raise HTTPException(404,'console static files not found')

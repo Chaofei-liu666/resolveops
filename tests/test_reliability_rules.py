@@ -22,10 +22,11 @@ from production.context import CaseContextBuilder, build_case_context, validate_
 from production.main import LogisticsLaneIn, OperatorIdentity, audit_out, case_tool_trace, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_role
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
 import production.migrations as migration_module
-from production.migrations import apply_migrations
+from production.migrations import apply_migrations, ensure_schema_migrations_table
 from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, Operator, PriceReview, SupplierFollowup, Task
 from production.llm_gateway import LLMGateway, LLMResult
 from production.policy import action_policy, allow_read_tool
+from production.runtime_status import build_runtime_status, expected_migration_versions
 from production.tool_result import ToolResult
 from production.tool_scheduler import ReadToolCall, ReadToolScheduler, tool_signature
 from production.tools import BusinessReadTools, ToolSpec, summarize_customer_profile
@@ -537,6 +538,48 @@ def test_sql_migration_runner_records_versions_idempotently(tmp_path, monkeypatc
     assert rows[0][1] == '0001_test_migration.sql'
     assert [item['version'] for item in first] == ['0001']
     assert second == []
+
+
+def test_runtime_status_reports_ready_when_migrations_are_complete():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    with engine.begin() as db:
+        ensure_schema_migrations_table(db)
+        for version in expected_migration_versions():
+            db.execute(
+                text('INSERT INTO schema_migrations(version, filename, checksum) VALUES (:version, :filename, :checksum)'),
+                {'version': version, 'filename': f'{version}_test.sql', 'checksum': 'test'},
+            )
+    with Session(engine) as db:
+        db.add_all([
+            Task(case_id='case-ready', kind='investigate', status='queued'),
+            Task(case_id='case-ready', kind='execute', status='running'),
+        ])
+        db.commit()
+        status = build_runtime_status(db)
+
+    assert status['status'] == 'ready'
+    assert status['checks']['migrations']['pending_versions'] == []
+    assert status['queues']['queued'] == 1
+    assert status['queues']['running'] == 1
+
+
+def test_runtime_status_reports_degraded_when_migration_is_missing():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    versions = expected_migration_versions()
+    with engine.begin() as db:
+        ensure_schema_migrations_table(db)
+        for version in versions[:-1]:
+            db.execute(
+                text('INSERT INTO schema_migrations(version, filename, checksum) VALUES (:version, :filename, :checksum)'),
+                {'version': version, 'filename': f'{version}_test.sql', 'checksum': 'test'},
+            )
+    with Session(engine) as db:
+        status = build_runtime_status(db)
+
+    assert status['status'] == 'degraded'
+    assert status['checks']['migrations']['pending_versions'] == versions[-1:]
 
 
 def test_case_context_builder_isolates_concurrent_case_state():

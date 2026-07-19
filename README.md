@@ -105,7 +105,7 @@ docker compose --profile test run --rm test
 当前容器化回归：
 
 ```text
-60 passed, 1 skipped
+62 passed, 1 skipped
 ```
 
 ## 文档
