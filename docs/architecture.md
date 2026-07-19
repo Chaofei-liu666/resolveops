@@ -2,19 +2,22 @@
 
 ## 设计边界
 
-ResolveOps 不是通用 ERP Agent，也不是多 Agent 角色扮演系统。它的边界是：
+ResolveOps 不是通用 ERP Agent，也不是多个角色包装出来的多 Agent 演示。它的边界是：
 
 ```text
-正常确定性流程 → 交给 ERP / Workflow
-异常长尾流程 → 交给 ResolveOps Agent
+正常确定性流程 → ERP / Workflow
+异常长尾流程   → ResolveOps Agent
 ```
 
-第一版聚焦订单履约异常，尤其是库存不足导致无法按期交付的 Case。
+当前支持两类异常：
+
+- `inventory_shortage`：订单库存不足。
+- `price_mismatch`：订单价格与参考价格不一致。
 
 ## 总体架构
 
 ```text
-ERPNext Webhook
+ERPNext / integration webhook
     ↓
 FastAPI Ingress
     ↓
@@ -24,6 +27,7 @@ PostgreSQL
     ├─ case_events
     ├─ approvals
     ├─ tool_invocations
+    ├─ price_reviews
     └─ case_lessons
     ↓
 Worker
@@ -37,34 +41,34 @@ Worker
     └─ Verification
 ```
 
-## Agent 运行流程
+## 为什么现在不拆多个 Agent
 
-### 1. 创建 Case
+当前不按业务类型拆多个大模型 Agent。原因是库存缺货和价格不一致虽然业务不同，但还可以共用一套稳定的执行骨架：
 
-ERPNext 或集成层发送 `inventory_shortage` webhook。API 校验 HMAC 签名、`event_id`、`tenant_id` 和 `order_id`，然后创建 Case 和 investigation Task。
+```text
+Case event_type
+→ 选择调查工具
+→ 生成 Action Plan
+→ Evidence Grounding
+→ Policy
+→ Approval
+→ Executor
+→ Verification
+```
 
-`event_id` 是输入侧幂等边界，重复 webhook 只返回同一个 Case。
+现在优先拆的是工程边界：
 
-### 2. 构建 Case Context
+- Read Tool Registry
+- Action Registry
+- Policy Engine
+- Evidence Validator
+- Executor Registry
 
-Worker 开始调查前调用 `CaseContextBuilder(case_id)`。
+只有当不同业务的工具集、上下文权限、评估指标和风险策略明显分裂时，才适合拆成多个专门 Agent，例如 Contract Agent、Credit Agent、Pricing Agent。
 
-上下文只包含当前 Case 的：
+## 工具设计
 
-- Case 状态
-- 最近事件
-- 已确认工具观察
-- 审批引用
-- 工具调用引用
-- 任务引用
-- 上次失败原因
-- 同租户相关 Verified Case Lessons
-
-这解决多 Case 并发时的上下文隔离问题。
-
-### 3. 调查阶段
-
-LLM 只能看到只读工具，例如：
+LLM 看到的是业务语义工具，不是 ERPNext 页面或 Doctype：
 
 - `get_order`
 - `get_inventory`
@@ -72,56 +76,65 @@ LLM 只能看到只读工具，例如：
 - `get_item_supply_profile`
 - `get_inbound_purchase`
 - `get_transfer_options`
+- `get_reference_price`
 
-工具失败会包装为 `ToolResult`，例如：
+这些工具由 `ToolSpec` 定义 schema、权限、风险、副作用和数据来源。底层当前由 `ERPNextAdapter` 实现，将来可以替换为 SAP、WMS、CRM 或定价系统。
 
-```json
-{
-  "status": "failed",
-  "error_code": "tool_execution_failed",
-  "retryable": true,
-  "evidence_usable": false
-}
-```
-
-失败事实只能表示 unknown，不能被模型解释成“没有库存”或“没有采购”。
-
-### 4. 计划阶段
-
-LLM 不能直接写 ERP，只能提出 Action Plan：
+写操作也是工具，但不直接暴露给 LLM 调用。LLM 只能在 Action Plan 中提出：
 
 - `transfer_stock`
 - `create_purchase_request`
+- `create_price_review_ticket`
 - `draft_customer_notification`
 - `create_manual_ticket`
 
-Action Plan 会被标准化为受控 action envelope，包含：
+写工具必须经过 Policy、审批、幂等和验证。
 
-- action_id
-- action_type
-- input
-- risk
-- execution
-- verification
-- compensation
-- tool metadata
+## Case Context
 
-### 5. Evidence Grounding
+上下文按 `case_id` 构建，而不是按聊天 session 构建。`CaseContextBuilder` 只读取当前 Case 的：
 
-系统用确定性规则检查模型计划是否有证据支撑。
+- scope：case_id、tenant_id、event_type、order_id、plan_version
+- current_state
+- task_context
+- confirmed_observations
+- previous_plan
+- last_failure
+- recent_events
+- approval_refs
+- invocation_refs
+- long_term_memory
 
-例如 `transfer_stock` 必须有：
+这样可以支持多个 Case 并发处理时的上下文隔离。
+
+## Evidence Grounding
+
+模型可以提出计划，但计划是否有证据支撑由确定性规则判断。
+
+`inventory_shortage` 中，`transfer_stock` 必须有：
 
 - 订单证据
 - 目标仓库存证据
 - 来源仓库存证据
-- 物流路线证据
+- 调拨路线证据
+
+`price_mismatch` 中，`create_price_review_ticket` 必须有：
+
+- 订单行价格证据
+- 同 SKU 的参考价证据
+- `difference = order_rate - reference_rate`
 
 没有证据支撑的计划不会进入审批。
 
-### 6. Policy / Approval
+## Policy / Approval
 
-Policy Engine 根据订单金额、客户等级和 action_type 决定所需角色。
+Policy Engine 根据 action_type、订单金额、客户等级等信号决定需要哪些角色审批。
+
+当前策略示例：
+
+- `transfer_stock`：仓储负责人；高金额或 VIP 客户增加销售负责人。
+- `create_purchase_request`：采购负责人；高金额或 VIP 客户增加销售负责人。
+- `create_price_review_ticket`：销售负责人 + 财务负责人。
 
 审批绑定：
 
@@ -133,54 +146,35 @@ action input
 required_roles
 ```
 
-执行前会重新校验 action_hash，防止审批被复用或参数被篡改。
+执行前重新校验 action_hash，防止审批被复用或参数被篡改。
 
-### 7. Executor
+## Executor / Verification
 
-Worker 不直接写 ERP，而是通过 Executor Registry。
+Executor Registry 负责写工具的实际执行。
 
-目前实现：
+当前实现：
 
 - `transfer_stock` → ERPNext Stock Entry draft
 - `create_purchase_request` → ERPNext Material Request draft
+- `create_price_review_ticket` → ResolveOps 本地 PriceReview draft
 
-写操作前执行 preflight，例如重新读取来源库存。如果库存变化，旧审批失效，Case 进入 replanning。
+写入成功不等于 Case 完成。Executor 写入后必须回读验证：
 
-### 8. Verification
-
-ERPNext 返回成功不等于任务完成。Executor 写入后必须回读源系统验证：
-
-- 单据是否存在
-- 数量是否正确
-- 仓库是否正确
+- 记录是否存在
+- 字段是否正确
 - 状态是否符合预期
 
-验证通过才允许 Case 关闭。
+验证通过后才允许 Case 进入 `resolved`。
 
-### 9. Verified Case Lessons
+## Verified Case Lessons
 
-只有满足以下条件才生成长期记忆：
+长期记忆是轻量的 Verified Case Lessons，不是完整聊天记录。
+
+只有满足以下条件才沉淀经验：
 
 ```text
 Case status == resolved
 write action verification passed
 ```
 
-Lesson 只作为 planning hint，不能替代：
-
-- ERP 实时查询
-- Policy
-- Approval
-- Idempotency
-- Verification
-
-## 为什么没有直接使用 Mem0 / 向量库 / 知识图谱
-
-当前核心数据主要是结构化业务状态，适合数据库、API 和确定性规则。向量库、Mem0、知识图谱适合后续大量非结构化制度、邮件、合同进入系统后再引入。
-
-本项目第一版优先证明：
-
-```text
-Agent 如何在真实企业系统里安全、可靠、可验证地完成一个业务 Case。
-```
-
+Lesson 只作为 planning hint，不能替代实时业务系统查询、Policy、Approval、Idempotency 和 Verification。

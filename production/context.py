@@ -66,6 +66,7 @@ def build_case_context(
         'scope': {
             'case_id': case.id,
             'tenant_id': case.tenant_id,
+            'event_type': case.event_type,
             'order_id': case.order_id,
             'plan_version': case.plan_version,
         },

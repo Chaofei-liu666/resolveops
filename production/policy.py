@@ -2,7 +2,7 @@
 from __future__ import annotations
 from .config import settings
 
-READ_TOOLS={'get_order','get_inventory','list_alternative_warehouses','get_customer_profile','get_inbound_purchase','get_transfer_options','get_item_supply_profile'}
+READ_TOOLS={'get_order','get_inventory','list_alternative_warehouses','get_customer_profile','get_inbound_purchase','get_transfer_options','get_item_supply_profile','get_reference_price'}
 
 def allow_read_tool(name: str, arguments: dict, order: dict | None = None) -> tuple[bool,str]:
     if name not in READ_TOOLS: return False,'tool_not_allowlisted'
@@ -27,4 +27,6 @@ def action_policy(plan: dict, evidence: dict | None) -> dict:
         roles=['procurement_manager']
         if amount>100000 or vip: roles.append('sales_manager')
         return {'allowed':True,'reason':'purchase_request_approval_required','required_roles':roles,'amount':amount,'vip':vip}
+    if plan['action_type']=='create_price_review_ticket':
+        return {'allowed':True,'reason':'price_review_requires_sales_and_finance','required_roles':['sales_manager','finance_manager'],'amount':amount,'vip':vip}
     return {'allowed':False,'reason':'no_executor_policy','required_roles':[]}

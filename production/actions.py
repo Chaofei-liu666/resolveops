@@ -55,6 +55,28 @@ def purchase_request_input(data: dict[str, Any]) -> dict[str, Any]:
     return {'target': str(data['target']), 'sku': str(data['sku']), 'quantity': quantity, 'required_by': str(data['required_by'])}
 
 
+def price_review_input(data: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError('create_price_review_ticket input must be an object')
+    required = {'sku', 'order_rate', 'reference_rate', 'difference'}
+    if not required <= data.keys() or any(data[k] in (None, '') for k in required):
+        raise ValueError('create_price_review_ticket requires sku, order_rate, reference_rate and difference')
+    order_rate = float(data['order_rate'])
+    reference_rate = float(data['reference_rate'])
+    difference = float(data['difference'])
+    if abs((order_rate - reference_rate) - difference) > 0.01:
+        raise ValueError('create_price_review_ticket difference must equal order_rate - reference_rate')
+    if abs(difference) <= 0.01:
+        raise ValueError('create_price_review_ticket requires a non-zero price difference')
+    return {
+        'sku': str(data['sku']),
+        'order_rate': order_rate,
+        'reference_rate': reference_rate,
+        'difference': difference,
+        'reason': str(data.get('reason') or 'Order rate differs from reference price.'),
+    }
+
+
 ACTION_TOOL_SPECS: dict[str, ToolSpec] = {
     'transfer_stock': ToolSpec(
         name='transfer_stock',
@@ -116,6 +138,31 @@ ACTION_TOOL_SPECS: dict[str, ToolSpec] = {
         llm_callable=False,
         requires_approval=True,
     ),
+    'create_price_review_ticket': ToolSpec(
+        name='create_price_review_ticket',
+        description='Create a governed local price-review record for a detected order/reference price mismatch; never changes ERP prices.',
+        parameters=object_schema(
+            {
+                'sku': {'type': 'string'},
+                'order_rate': {'type': 'number'},
+                'reference_rate': {'type': 'number'},
+                'difference': {'type': 'number'},
+                'reason': {'type': 'string'},
+            },
+            ['sku', 'order_rate', 'reference_rate', 'difference'],
+        ),
+        permission='pricing:review:create',
+        side_effect='create_review_record',
+        risk_level='high',
+        source_system='ResolveOpsDB',
+        executor_ref='resolveops.create_price_review_ticket',
+        llm_callable=False,
+        requires_approval=True,
+        idempotency_required=True,
+        resource_keys=['pricing:{sku}'],
+        verification={'tool': 'get_price_review', 'assertions': ['draft', 'sku', 'order_rate', 'reference_rate', 'difference']},
+        compensation={'strategy': 'close_draft_price_review'},
+    ),
     'create_manual_ticket': ToolSpec(
         name='create_manual_ticket',
         description='Create a human handoff ticket for unresolved business exceptions.',
@@ -159,6 +206,17 @@ REGISTRY: dict[str, ActionDefinition] = {
         None,
         'sales_owner',
         tool_spec=ACTION_TOOL_SPECS['draft_customer_notification'],
+    ),
+    'create_price_review_ticket': ActionDefinition(
+        action_type='create_price_review_ticket',
+        title='Create price review ticket',
+        executor=ACTION_TOOL_SPECS['create_price_review_ticket'].executor_ref,
+        approval_policy='sales_and_finance',
+        validator=price_review_input,
+        resource_keys=lambda x: [f"pricing:{x['sku']}"],
+        verification=ACTION_TOOL_SPECS['create_price_review_ticket'].verification,
+        compensation=ACTION_TOOL_SPECS['create_price_review_ticket'].compensation,
+        tool_spec=ACTION_TOOL_SPECS['create_price_review_ticket'],
     ),
     'create_manual_ticket': ActionDefinition(
         'create_manual_ticket',

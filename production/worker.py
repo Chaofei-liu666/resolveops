@@ -24,6 +24,7 @@ def ensure_schema():
         try:
             Base.metadata.create_all(db)
             db.execute(text('ALTER TABLE cases ADD COLUMN IF NOT EXISTS source_event_id VARCHAR(160)'))
+            db.execute(text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS event_type VARCHAR(80) NOT NULL DEFAULT 'inventory_shortage'"))
             db.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_cases_tenant_source_event ON cases (tenant_id, source_event_id) WHERE source_event_id IS NOT NULL'))
             db.execute(text('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ'))
             db.execute(text('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_error TEXT'))
@@ -58,6 +59,10 @@ def recover_expired_leases(db):
 def investigate(db, c, task_context=None):
     if settings.llm_base_url and settings.llm_api_key and settings.llm_model:
         return investigate_with_agent(db, c, task_context or {})
+    if c.event_type != 'inventory_shortage':
+        c.status='manual_review'
+        emit(db,c.id,'handoff','No deterministic fallback exists for this event type without LLM.',{'event_type':c.event_type})
+        return
     so=erp.sales_order(c.order_id); item=so['items'][0]; target=item.get('warehouse'); required=float(item['qty']); local=erp.stock(item['item_code'],target)
     # ERPNext's reserved quantity is unavailable to a new transfer. A shortage
     # is therefore based on usable stock, never by adding reservations back.
@@ -93,7 +98,7 @@ def investigate_with_agent(db, c, task_context):
     try: plan=normalize_plan(proposals,conclusion.get('rationale',''),[f'E-{index+1:03d}' for index in range(len(observations))])
     except (ValueError, TypeError) as exc:
         c.status='manual_review'; emit(db,c.id,'handoff','Agent proposal failed Action Plan validation.',{'error':str(exc)}); return
-    grounding=validate_plan_grounding(plan,observations)
+    grounding=validate_plan_grounding(plan,observations,c.event_type)
     if not grounding['allowed']:
         c.plan=plan; c.status='manual_review'; emit(db,c.id,'evidence_grounding_failed','Agent plan is not sufficiently supported by read-tool evidence.',grounding); return
     plan['evidence_grounding']=grounding
@@ -137,9 +142,9 @@ def execute(db,c,approval_id):
             return
         execution_context=executor.context(erp,c.order_id,action_input)
         inv=Invocation(idempotency_key=key,case_id=c.id,tool=executor.invocation_tool,status='pending'); db.add(inv); db.flush()
-        name=executor.write(erp,action_input,execution_context.get('company'),key)
+        name=executor.write(db,erp,action_input,execution_context.get('company'),key,c)
         inv.status='succeeded'; inv.external_id=name; a.status='consumed'
-    verification=executor.verify(erp,name,action_input)
+    verification=executor.verify(db,erp,name,action_input)
     verified=verification['verified']; event_data=verification['event_data']
     if verified:
         pending=db.scalars(select(Approval).where(Approval.case_id==c.id,Approval.plan_version==c.plan_version,Approval.status!='consumed')).all()

@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .models import AuditLog, Base, Approval, Case, Event, Invocation, LogisticsLane, Task
 
+SUPPORTED_EVENTS={'inventory_shortage','price_mismatch'}
+
 class LogisticsLaneIn(BaseModel):
     tenant_id: str = Field(default='demo', min_length=1, max_length=80)
     source_warehouse: str = Field(min_length=1, max_length=140)
@@ -40,6 +42,7 @@ def bootstrap_schema():
             # can upgrade safely; production CI should run this as a versioned
             # migration. The advisory lock prevents API/Worker startup races.
             db.execute(text('ALTER TABLE cases ADD COLUMN IF NOT EXISTS source_event_id VARCHAR(160)'))
+            db.execute(text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS event_type VARCHAR(80) NOT NULL DEFAULT 'inventory_shortage'"))
             db.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_cases_tenant_source_event ON cases (tenant_id, source_event_id) WHERE source_event_id IS NOT NULL'))
             db.execute(text('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ'))
             db.execute(text('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_error TEXT'))
@@ -86,6 +89,7 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
     blocked_events=[kind for kind in kinds if kind in {'evidence_grounding_failed','policy_denied','handoff','worker_failure','verification_failed'}]
     return {
         'case_id':case.id,
+        'event_type':case.event_type,
         'order_id':case.order_id,
         'status':case.status,
         'resolved':case.status=='resolved',
@@ -142,12 +146,12 @@ async def erp_webhook(request: Request, x_resolveops_signature: str=Header(...))
     body=await request.body(); expected='sha256='+hmac.new(settings.webhook_secret.encode(),body,hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected,x_resolveops_signature): raise HTTPException(401,'invalid webhook signature')
     payload=json.loads(body)
-    if payload.get('event')!='inventory_shortage': raise HTTPException(422,'unsupported event')
+    if payload.get('event') not in SUPPORTED_EVENTS: raise HTTPException(422,'unsupported event')
     if not payload.get('order_id') or not payload.get('tenant_id') or not payload.get('event_id'): raise HTTPException(422,'event_id, order_id and tenant_id required')
     with Session(engine) as db:
         existing=db.scalar(select(Case).where(Case.tenant_id==payload['tenant_id'], Case.source_event_id==payload['event_id']))
         if existing: return {'case_id':existing.id,'status':existing.status,'duplicate':True}
-        case=Case(tenant_id=payload['tenant_id'],source_event_id=payload['event_id'],order_id=payload['order_id']); db.add(case)
+        case=Case(tenant_id=payload['tenant_id'],source_event_id=payload['event_id'],event_type=payload['event'],order_id=payload['order_id']); db.add(case)
         try: db.flush()
         except IntegrityError:
             # A concurrent delivery passed the read check. The unique index is
@@ -155,7 +159,7 @@ async def erp_webhook(request: Request, x_resolveops_signature: str=Header(...))
             db.rollback()
             existing=db.scalar(select(Case).where(Case.tenant_id==payload['tenant_id'], Case.source_event_id==payload['event_id']))
             return {'case_id':existing.id,'status':existing.status,'duplicate':True}
-        emit(db,case.id,'case_created','Trusted ERPNext webhook received.',{'event_id':payload.get('event_id')})
+        emit(db,case.id,'case_created','Trusted ERPNext webhook received.',{'event_id':payload.get('event_id'),'event_type':payload.get('event')})
         db.add(Task(case_id=case.id,kind='investigate')); db.commit(); return {'case_id':case.id,'status':'queued','duplicate':False}
 @app.get('/v1/cases')
 def case_list(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), limit:int=50):
@@ -170,7 +174,7 @@ def case_list(x_operator_key:str|None=Header(default=None), x_operator:str|None=
             latest=db.scalars(select(Event).where(Event.case_id==case.id).order_by(Event.created_at.desc()).limit(1)).first()
             actions=(case.plan or {}).get('actions',[]) if isinstance(case.plan,dict) else []
             result.append({
-                'id':case.id,'tenant_id':case.tenant_id,'source_event_id':case.source_event_id,'order_id':case.order_id,
+                'id':case.id,'tenant_id':case.tenant_id,'source_event_id':case.source_event_id,'event_type':case.event_type,'order_id':case.order_id,
                 'status':case.status,'plan_version':case.plan_version,'created_at':case.created_at.isoformat() if case.created_at else None,
                 'updated_at':case.updated_at.isoformat() if case.updated_at else None,
                 'actions':[a.get('action_type') for a in actions],
@@ -238,7 +242,7 @@ def case_detail(case_id:str, x_operator_key:str|None=Header(default=None), x_ope
         invocations=db.scalars(select(Invocation).where(Invocation.case_id==case_id)).all()
         tasks=db.scalars(select(Task).where(Task.case_id==case_id)).all()
         return {
-            'id':case.id,'tenant_id':case.tenant_id,'source_event_id':case.source_event_id,'order_id':case.order_id,
+            'id':case.id,'tenant_id':case.tenant_id,'source_event_id':case.source_event_id,'event_type':case.event_type,'order_id':case.order_id,
             'status':case.status,'plan_version':case.plan_version,'plan':case.plan,'evidence':case.evidence,
             'created_at':case.created_at.isoformat() if case.created_at else None,'updated_at':case.updated_at.isoformat() if case.updated_at else None,
             'approvals':[approval_out(a) for a in approvals],

@@ -2,9 +2,9 @@
 
 ## 1. 高并发下 Agent 状态怎么持久化？
 
-我的设计不是按聊天 session 管理，而是按业务 `case_id` 管理。核心状态放 PostgreSQL，不放 Redis。
+项目不按聊天 session 管理状态，而是按业务 `case_id` 管理。核心状态放 PostgreSQL，不放 Redis。
 
-原因是 Case、审批、工具调用、验证结果都需要事务、审计和恢复。Redis 可以用于限流、缓存和短生命周期协调，但不适合作为业务状态唯一来源。
+原因是 Case、审批、计划、工具调用、验证结果都需要事务、审计和恢复。Redis 可以做限流、短期缓存和临时协调，但不适合作为业务状态唯一来源。
 
 当前实现：
 
@@ -14,6 +14,7 @@ tasks
 case_events
 approvals
 tool_invocations
+price_reviews
 case_lessons
 ```
 
@@ -26,8 +27,6 @@ case_lessons
 上下文隔离：CaseContextBuilder 只按 case_id 取状态
 ```
 
-原子性通过数据库事务保证。审批执行时校验 `case_id + plan_version + action_hash`，防止旧审批或跨 Case 审批被复用。
-
 ## 2. Redis 还是数据库？
 
 核心业务状态进数据库。
@@ -35,13 +34,13 @@ case_lessons
 Redis 更适合：
 
 - API 限流
-- 短期缓存
-- 临时分布式锁
+- 临时缓存
+- 短生命周期分布式锁
 - 实时进度缓存
 
-但审批、计划、事件、工具调用、验证结果必须进数据库，因为这些需要审计和恢复。
+但审批、计划、工具调用、验证结果必须进数据库，因为这些数据需要恢复和审计。
 
-## 3. Plan-and-Solve 和 ReAct 区别？
+## 3. Plan-and-Solve 和 ReAct 的区别？
 
 ResolveOps 是混合式：
 
@@ -51,30 +50,13 @@ ResolveOps 是混合式：
 执行阶段：确定性 Executor
 ```
 
-ReAct 更适合开放探索；企业写操作不能让模型在循环里直接执行，所以模型只能提出计划。
-
-执行流程：
-
-```text
-read tools
-→ observations
-→ Action Plan
-→ Evidence Grounding
-→ Policy
-→ Approval
-→ Executor
-→ Verification
-```
-
-如果 preflight 发现库存变化，旧审批失效，Case 进入 replanning。
+ReAct 适合开放探索，但企业写操作不能让模型边想边直接执行。所以模型只负责调查和提出计划，真正执行前还要经过 Evidence Grounding、Policy、Approval 和 Verification。
 
 ## 4. 多工具并行调用怎么做？
 
 当前版本没有做 aggressive parallel tool calling。读工具目前按模型回合顺序执行，写工具必须串行。
 
-原因是第一版优先保证证据链和写操作安全。
-
-如果后续实现并行，只并发无副作用读工具：
+后续如果实现，只并发无副作用读工具：
 
 ```text
 ToolScheduler
@@ -82,16 +64,16 @@ ToolScheduler
 → asyncio.gather 调多个 HTTP API
 → 每个结果包装成 ToolResult
 → 汇总 observations
-→ 一次性给 Planner
+→ 一次性交给 Planner
 ```
 
-写工具不并行。同一业务对象写入必须串行或加锁。
+写工具不并发。同一业务对象写入必须串行或加锁。
 
-## 5. 长上下文爆炸怎么处理？
+## 5. 长上下文爆了怎么办？
 
-本项目不是保存完整聊天历史，而是构建结构化 Case Context。
+项目不保存完整聊天历史，而是构建结构化 Case Context。
 
-当前上下文包含：
+当前上下文包括：
 
 - scope
 - current_state
@@ -104,54 +86,52 @@ ToolScheduler
 - invocation_refs
 - long_term_memory
 
-最近事件有窗口限制，长期经验沉淀为 Verified Case Lessons。
-
-关键点：
-
-```text
-压缩的是执行上下文，不是简单总结聊天记录。
-完整审计仍保留在数据库 event log。
-```
+完整审计仍保留在数据库 event log 中；给模型的是压缩后的执行上下文。
 
 ## 6. 什么时候拆多个 Agent？
 
-不按工具数量机械拆分。拆分边界看业务职责、上下文、权限和评估指标是否不同。
+不因为新增业务就立刻拆 Agent。拆分边界看四件事：
 
-适合拆：
+1. 工具集是否明显不同。
+2. 上下文和权限边界是否不同。
+3. 风险策略是否不同。
+4. 单个 Agent 是否因为工具太多开始选错工具。
 
-- 订单异常处置
-- 合同审查
-- 客户沟通
-- 采购寻源
+当前阶段采用：
 
-不适合拆：
+```text
+一个主 Agent
+多 event_type
+多 Read Tool
+多 Action
+统一 Policy / Executor / Verification
+```
 
-- 库存查询 Agent
-- 订单查询 Agent
-- 审批 Agent
-
-当前版本没有拆多 Agent，因为一个主 Agent + Tool Registry + Executor Registry 更清晰。
+以后如果加入合同审查、客户信用、法务条款，才适合拆成 Contract Agent、Credit Agent、Pricing Agent。
 
 ## 7. 语义路由怎么做？
 
-当前入口是 ERP webhook，事件类型明确，所以用规则路由即可。
+当前入口是 ERP webhook，事件类型明确，所以用规则路由：
 
-语义路由适合自然语言、邮件、工单入口。后续可加小模型输出：
+```text
+inventory_shortage → 库存调查工具和调拨/采购 Action
+price_mismatch → 价格调查工具和价格复核 Action
+```
+
+如果未来入口变成自然语言、邮件或工单，可以加小模型分类：
 
 ```text
 intent
 risk_level
 confidence
-target_agent_or_tool_domain
+target_domain
 ```
 
-低置信度不直接执行，转人工或只允许只读调查。
+低置信度不直接执行，只进入只读调查或人工分流。
 
 ## 8. 怎么评估 Agent 执行轨迹？
 
-不只评估最终文本，而是评估事件轨迹。
-
-指标：
+不只评估最终文本，而是评估事件轨迹：
 
 - Case Resolution Rate
 - Verification Pass Rate
@@ -171,21 +151,18 @@ tool_invocations
 tasks
 ```
 
-## 9. LLM API 高并发限流怎么做？
+## 9. LLM API 高并发限流怎么处理？
 
-当前版本做了运行预算：
+当前版本有运行预算：
 
 - 最大调查轮次
 - 最大 read tool 次数
 - 最大 replanning 次数
 - HTTP timeout
 
-还没有完整 ProviderGateway。
-
-生产下一步会加：
+生产下一步可以加 `LLMGateway`：
 
 ```text
-LLMGateway
 per-provider max_concurrency
 token bucket
 request queue
@@ -205,9 +182,9 @@ fallback model
 inventory:{source_warehouse}:{sku}
 ```
 
-获取失败直接 `resource_busy`，不长时间等待。事务结束自动释放，减少锁泄漏风险。
+获取失败直接返回 `resource_busy`，不长时间等待。事务结束自动释放，减少锁泄漏风险。
 
-Redis setnx 适合高频短锁，但要处理 TTL、续租、误释放和主从一致性。当前业务状态已在 PostgreSQL，用 advisory lock 更简单可靠。
+Redis setnx 也能做锁，但要处理 TTL、续租、误释放和主从一致性。当前业务状态已经在 PostgreSQL，用 advisory lock 更简单可靠。
 
 ## 11. 记忆为什么不用 Mem0？
 
@@ -221,5 +198,24 @@ lesson 只作为 planning hint
 不能替代 ERP 实时查询、Policy、Approval、Verification
 ```
 
-这个设计更能体现企业 Agent 的记忆边界。
+这比直接接入向量库或 Mem0 更能体现企业 Agent 的记忆边界。
 
+## 12. 工具是不是 ERP 功能？
+
+不是。工具是 LLM 连接外部世界的业务能力接口。ERPNext 只是当前适配器。
+
+例如：
+
+```text
+get_reference_price
+```
+
+对 LLM 来说是“读取参考销售价”。底层今天可以查 ERPNext Item Price，未来也可以换成定价系统、CRM 或合同系统。
+
+写工具同理：
+
+```text
+create_price_review_ticket
+```
+
+它不是 ERP 页面按钮，而是一个受治理的业务动作：有 schema、权限、风险、副作用、幂等和验证。

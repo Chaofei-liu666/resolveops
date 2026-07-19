@@ -13,6 +13,7 @@ class Case(Base):
     # ERP's immutable event id is the ingress idempotency boundary.  A partial
     # unique index is installed by bootstrap for non-null values.
     source_event_id: Mapped[str|None]=mapped_column(String(160), nullable=True)
+    event_type: Mapped[str]=mapped_column(String(80), default='inventory_shortage', index=True)
     order_id: Mapped[str]=mapped_column(String(140), index=True)
     status: Mapped[str]=mapped_column(String(40), default='queued')
     plan_version: Mapped[int]=mapped_column(Integer, default=0)
@@ -87,5 +88,20 @@ class CaseLesson(Base):
     source_action_type: Mapped[str|None]=mapped_column(String(80), nullable=True, index=True)
     confidence: Mapped[float]=mapped_column(Float, default=1.0)
     status: Mapped[str]=mapped_column(String(20), default='active', index=True)
+    data: Mapped[dict]=mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), server_default=func.now())
+
+class PriceReview(Base):
+    __tablename__='price_reviews'
+    id: Mapped[str]=mapped_column(String, primary_key=True, default=lambda:str(uuid4()))
+    tenant_id: Mapped[str]=mapped_column(String(80), index=True)
+    case_id: Mapped[str]=mapped_column(String, index=True)
+    order_id: Mapped[str]=mapped_column(String(140), index=True)
+    sku: Mapped[str]=mapped_column(String(140), index=True)
+    order_rate: Mapped[float]=mapped_column(Float)
+    reference_rate: Mapped[float]=mapped_column(Float)
+    difference: Mapped[float]=mapped_column(Float)
+    status: Mapped[str]=mapped_column(String(40), default='draft', index=True)
+    idempotency_key: Mapped[str]=mapped_column(String(220), unique=True)
     data: Mapped[dict]=mapped_column(JSON, default=dict)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), server_default=func.now())

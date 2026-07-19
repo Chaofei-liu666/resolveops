@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from production.context import CaseContextBuilder
 from production.main import LogisticsLaneIn, OperatorIdentity, audit_out, eval_case_out, eval_summary_out, require_role
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
-from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, Task
+from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, PriceReview, Task
 from production.policy import action_policy, allow_read_tool
 from production.tool_result import ToolResult
 from production.tools import BusinessReadTools, ToolSpec, summarize_customer_profile
@@ -72,6 +72,26 @@ def test_purchase_request_requires_procurement_approval():
     plan = {'action_type': 'create_purchase_request'}
     evidence = {'observations': [{'tool': 'get_order', 'result': {'grand_total': 1}}, {'tool': 'get_customer_profile', 'result': {}}]}
     assert action_policy(plan, evidence)['required_roles'] == ['procurement_manager']
+
+
+def test_price_review_action_has_strict_contract_and_dual_approval():
+    action = normalize_proposal({
+        'action_type': 'create_price_review_ticket',
+        'input': {
+            'sku': 'SKU-A12',
+            'order_rate': 5000,
+            'reference_rate': 4500,
+            'difference': 500,
+            'reason': 'Sales Order rate is higher than reference price.',
+        },
+    }, 'Price mismatch is supported by order and reference price evidence.')
+    assert action['executable']
+    assert action['execution']['executor'] == 'resolveops.create_price_review_ticket'
+    assert action['tool']['llm_callable'] is False
+    assert action['tool']['risk_level'] == 'high'
+    decision = action_policy({'action_type': 'create_price_review_ticket'}, {'observations':[{'tool':'get_order','result':{'grand_total':150000}}]})
+    assert decision['allowed']
+    assert decision['required_roles'] == ['sales_manager', 'finance_manager']
 
 
 def test_policy_tolerates_empty_customer_group():
@@ -137,6 +157,52 @@ def test_evidence_grounding_rejects_transfer_without_lane_evidence():
     result = validate_plan_grounding(plan, observations)
     assert not result['allowed']
     assert any('missing transfer lane evidence' in problem for problem in result['problems'])
+
+
+def price_mismatch_observations():
+    return [
+        {'tool':'get_order','arguments':{},'result':{
+            'name':'SO-PRICE-1',
+            'grand_total':150000,
+            'items':[{'item_code':'SKU-A12','warehouse':'Stores - ROPS','qty':30,'rate':5000}],
+        }},
+        {'tool':'get_reference_price','arguments':{'item_code':'SKU-A12'},'result':{
+            'item_code':'SKU-A12',
+            'reference_rate':4500,
+            'price_list':'Standard Selling',
+            'currency':'CNY',
+        }},
+    ]
+
+
+def test_price_mismatch_grounding_accepts_supported_review_action():
+    plan = normalize_plan([
+        {'action_type':'create_price_review_ticket','input':{
+            'sku':'SKU-A12',
+            'order_rate':5000,
+            'reference_rate':4500,
+            'difference':500,
+            'reason':'Order rate exceeds reference price.',
+        }},
+    ], 'grounded price mismatch')
+    result = validate_plan_grounding(plan, price_mismatch_observations(), 'price_mismatch')
+    assert result['allowed']
+    assert result['case_type'] == 'price_mismatch'
+
+
+def test_price_mismatch_grounding_rejects_missing_reference_price():
+    plan = normalize_plan([
+        {'action_type':'create_price_review_ticket','input':{
+            'sku':'SKU-A12',
+            'order_rate':5000,
+            'reference_rate':4500,
+            'difference':500,
+        }},
+    ], 'not grounded')
+    observations = [item for item in price_mismatch_observations() if item['tool'] != 'get_reference_price']
+    result = validate_plan_grounding(plan, observations, 'price_mismatch')
+    assert not result['allowed']
+    assert any('missing reference price evidence' in problem for problem in result['problems'])
 
 
 def test_known_model_schema_variant_is_normalized_before_policy_checks():
@@ -224,7 +290,7 @@ def test_business_read_tools_expose_business_names_not_erpnext_doctypes():
         pass
 
     names = {item['function']['name'] for item in BusinessReadTools(FakeAdapter()).definitions()}
-    assert {'get_order', 'get_inventory', 'get_customer_profile'} <= names
+    assert {'get_order', 'get_inventory', 'get_customer_profile', 'get_reference_price'} <= names
     assert not {'Sales Order', 'Bin', 'Stock Entry', 'Material Request'} & names
 
 
@@ -401,11 +467,34 @@ def test_write_action_tools_share_schema_but_are_not_llm_callable():
 def test_executor_registry_maps_action_type_to_write_adapter_tool():
     transfer = executor_for('transfer_stock')
     purchase = executor_for('create_purchase_request')
+    price_review = executor_for('create_price_review_ticket')
     assert transfer is not None
     assert transfer.invocation_tool == 'create_transfer_draft'
     assert purchase is not None
     assert purchase.invocation_tool == 'create_purchase_request_draft'
+    assert price_review is not None
+    assert price_review.invocation_tool == 'create_price_review_ticket'
     assert executor_for('draft_customer_notification') is None
+
+
+def test_price_review_executor_writes_and_verifies_local_review_record():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        case = Case(id='case-price', tenant_id='demo', event_type='price_mismatch', order_id='SO-PRICE-1')
+        db.add(case)
+        db.flush()
+        executor = executor_for('create_price_review_ticket')
+        action_input = {'sku':'SKU-A12','order_rate':5000,'reference_rate':4500,'difference':500,'reason':'mismatch'}
+        review_id = executor.write(db, None, action_input, None, 'case-price:action:v1', case)
+        verification = executor.verify(db, None, review_id, action_input)
+        db.commit()
+
+    assert verification['verified'] is True
+    with Session(engine) as db:
+        review = db.get(PriceReview, review_id)
+        assert review.status == 'draft'
+        assert review.order_id == 'SO-PRICE-1'
 
 
 def test_transfer_executor_preflight_detects_source_inventory_change():

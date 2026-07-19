@@ -56,6 +56,34 @@ def matching_lane(observations: list[dict[str, Any]], sku: str, source: str, tar
     return None
 
 
+def order_item(order: dict[str, Any], sku: str) -> dict[str, Any] | None:
+    for item in order.get('items') or []:
+        if item.get('item_code') == sku:
+            return item
+    return None
+
+
+def order_item_rate(item: dict[str, Any]) -> float | None:
+    for key in ('rate', 'base_rate', 'net_rate'):
+        if item.get(key) is not None:
+            return float(item.get(key) or 0)
+    return None
+
+
+def reference_price_for(observations: list[dict[str, Any]], sku: str) -> dict[str, Any] | None:
+    for observation in observations or []:
+        if observation.get('tool') != 'get_reference_price':
+            continue
+        args = observation.get('arguments') or {}
+        result = observation.get('result') or {}
+        if result.get('error') or args.get('item_code') != sku:
+            continue
+        if result.get('reference_rate') is None:
+            continue
+        return result
+    return None
+
+
 def order_context(observations: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[str]]:
     problems: list[str] = []
     order = first_success(observations, 'get_order')
@@ -97,7 +125,60 @@ def validates_purchase_timing(observations: list[dict[str, Any]], required_by: s
     return True, None
 
 
-def validate_plan_grounding(plan: dict[str, Any], observations: list[dict[str, Any]]) -> dict[str, Any]:
+def validate_price_mismatch_plan(plan: dict[str, Any], observations: list[dict[str, Any]]) -> dict[str, Any]:
+    actions = plan.get('actions') if isinstance(plan, dict) else None
+    if not isinstance(actions, list) or not actions:
+        return {'allowed': False, 'reason': 'plan has no actions', 'problems': ['plan has no actions']}
+    problems: list[str] = []
+    order = first_success(observations, 'get_order')
+    if not order:
+        problems.append('missing successful get_order evidence')
+    if len(actions) != 1:
+        problems.append('price_mismatch currently supports exactly one governed review action')
+
+    for action in actions:
+        action_type = action.get('action_type')
+        action_input = action.get('input') or {}
+        if action_type != 'create_price_review_ticket':
+            problems.append(f'{action_type} is not allowed for price_mismatch evidence grounding')
+            continue
+        sku = action_input.get('sku')
+        if not sku:
+            problems.append('create_price_review_ticket missing sku')
+            continue
+        item = order_item(order or {}, sku)
+        if not item:
+            problems.append(f'order has no item evidence for {sku}')
+            continue
+        rate = order_item_rate(item)
+        if rate is None:
+            problems.append(f'order item {sku} has no rate evidence')
+            continue
+        ref = reference_price_for(observations, sku)
+        if not ref:
+            problems.append(f'missing reference price evidence for {sku}')
+            continue
+        order_rate = float(action_input.get('order_rate') or 0)
+        reference_rate = float(action_input.get('reference_rate') or 0)
+        difference = float(action_input.get('difference') or 0)
+        if abs(order_rate - rate) > 0.01:
+            problems.append(f'order_rate {order_rate} does not match order evidence {rate}')
+        if abs(reference_rate - float(ref.get('reference_rate') or 0)) > 0.01:
+            problems.append(f'reference_rate {reference_rate} does not match reference price evidence {ref.get("reference_rate")}')
+        if abs((order_rate - reference_rate) - difference) > 0.01:
+            problems.append('difference does not equal order_rate - reference_rate')
+        if abs(difference) <= 0.01:
+            problems.append('price difference is zero; no review action is grounded')
+
+    return {
+        'allowed': not problems,
+        'reason': 'grounded' if not problems else 'evidence_not_sufficient',
+        'problems': problems,
+        'case_type': 'price_mismatch',
+    }
+
+
+def validate_inventory_shortage_plan(plan: dict[str, Any], observations: list[dict[str, Any]]) -> dict[str, Any]:
     actions = plan.get('actions') if isinstance(plan, dict) else None
     if not isinstance(actions, list) or not actions:
         return {'allowed': False, 'reason': 'plan has no actions', 'problems': ['plan has no actions']}
@@ -153,4 +234,11 @@ def validate_plan_grounding(plan: dict[str, Any], observations: list[dict[str, A
         'problems': problems,
         'shortage': shortage,
         'covered_quantity': covered,
+        'case_type': 'inventory_shortage',
     }
+
+
+def validate_plan_grounding(plan: dict[str, Any], observations: list[dict[str, Any]], case_type: str = 'inventory_shortage') -> dict[str, Any]:
+    if case_type == 'price_mismatch':
+        return validate_price_mismatch_plan(plan, observations)
+    return validate_inventory_shortage_plan(plan, observations)

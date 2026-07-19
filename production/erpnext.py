@@ -1,5 +1,6 @@
 """Narrow, API-first ERPNext boundary. No browser automation or DB access."""
 from __future__ import annotations
+import json
 from typing import Any
 import httpx
 
@@ -57,6 +58,30 @@ class ERPNextAdapter:
 
     def item(self, name: str) -> dict:
         return self._get(f'/api/resource/Item/{name}')
+
+    def reference_price(self, item_code: str) -> dict:
+        """Read selling reference price from ERPNext Item Price.
+
+        This is a reference signal for price-review planning only.  It is not
+        authority to mutate a Sales Order price.
+        """
+        filters = json.dumps([["item_code", "=", item_code], ["selling", "=", 1]], ensure_ascii=False)
+        fields = json.dumps(["name", "item_code", "price_list", "price_list_rate", "currency", "valid_from", "valid_upto"])
+        data = self._get('/api/resource/Item Price', {
+            'filters': filters,
+            'fields': fields,
+            'limit_page_length': 20,
+        })
+        if not data:
+            return {'item_code': item_code, 'reference_rate': None, 'prices': []}
+        price = data[0]
+        return {
+            'item_code': item_code,
+            'reference_rate': float(price.get('price_list_rate') or 0),
+            'price_list': price.get('price_list'),
+            'currency': price.get('currency'),
+            'prices': data,
+        }
 
     def inbound_purchase_items(self, item_code: str) -> list[dict]:
         """Read inbound supply through permitted Purchase Order headers.

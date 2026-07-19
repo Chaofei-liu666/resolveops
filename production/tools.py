@@ -280,6 +280,17 @@ class BusinessReadTools:
                 executor=lambda args, _order_id: summarize_item_supply_profile(self.adapter.item(args['item_code'])),
             ),
             ToolSpec(
+                name='get_reference_price',
+                description='Read selling reference price for a SKU from the enterprise pricing source.',
+                llm_description='Read reference selling price for a SKU.',
+                parameters=object_schema({'item_code': {'type': 'string'}}, ['item_code']),
+                permission='pricing:read',
+                side_effect='none',
+                risk_level='medium',
+                source_system='ERPNextAdapter',
+                executor=lambda args, _order_id: self.adapter.reference_price(args['item_code']),
+            ),
+            ToolSpec(
                 name='get_inbound_purchase',
                 description='Read inbound supply records for a SKU. Failed lookup means unknown, not no supply.',
                 llm_description='Read inbound supply for a SKU.',

@@ -1,15 +1,18 @@
 # ResolveOps
 
-ResolveOps 是一个面向企业订单履约异常的 Agent。它不处理确定性正常流程，而是在订单进入异常分支后，自动调查原因、生成行动计划、申请审批、受控执行，并通过真实业务系统回读验证结果。
+ResolveOps 是一个面向企业业务异常的 Agent。它不处理确定性的正常流程，而是在业务进入异常分支后，自动调查原因、生成行动计划、申请审批、受控执行，并通过真实系统回读验证结果。
 
-当前第一版聚焦 ERP 订单履约异常，尤其是库存不足场景。项目使用 ERPNext 作为真实业务系统，PostgreSQL 保存 Case、事件、审批、工具调用、验证结果和轻量长期记忆。
+当前版本支持两类 Case：
+
+- `inventory_shortage`：订单库存不足，Agent 调查库存、调拨路线、采购补货和客户约束，提出调拨/采购申请等 Action Plan。
+- `price_mismatch`：订单价格与参考价格不一致，Agent 调查订单价格和参考价，创建受控的价格复核记录，不直接修改 ERP 价格。
 
 ## 核心闭环
 
 ```text
 ERP 异常事件
 → 创建 Case
-→ Agent 调用只读工具调查
+→ Agent 调用只读业务工具调查
 → Evidence-grounded Action Plan
 → Policy / Approval
 → Executor 执行写工具
@@ -17,29 +20,30 @@ ERP 异常事件
 → resolved / replan / manual_review
 ```
 
-## 已实现能力
+## 当前已实现能力
 
 - 真实 ERPNext API 接入，而不是 mock 系统。
 - LLM 只允许调用只读业务工具，不能直接写 ERP。
-- 写操作以 Action Plan 形式提出，由 Policy、Approval、Executor 控制。
+- 写操作也是工具，但只能作为 Action Plan 被提出，由 Policy、Approval、Executor 控制执行。
+- 支持多异常类型：库存缺货和价格不一致。
 - 审批绑定 `case_id + plan_version + action_hash`，防止参数篡改和审批重放。
-- 写操作带 idempotency key，避免重复创建业务单据。
-- PostgreSQL `FOR UPDATE SKIP LOCKED` 领取任务，支持多 Worker 安全并发。
+- 写操作带 idempotency key，避免重复创建业务记录。
+- PostgreSQL `FOR UPDATE SKIP LOCKED` 领取任务，支持多 Worker 并发。
 - PostgreSQL advisory transaction lock 控制共享库存写入。
-- ToolResult 统一表示工具成功、失败、是否可重试、是否可作为证据。
-- CaseContextBuilder 按 `case_id` 构建上下文，避免多 Case 串状态。
-- Verified Case Lessons：只有 resolved 且验证通过的 Case 才沉淀经验，且只作为规划提示。
+- ToolResult 统一表示工具成功、失败、可重试性和证据可用性。
+- CaseContextBuilder 按 `case_id` 构建上下文，避免多个 Case 串状态。
+- Verified Case Lessons 只从 `resolved + verification passed` 的 Case 沉淀，并且只作为规划提示。
 - 执行轨迹评估：Case Resolution、Verification Pass、Replan、Policy Denial、Handoff 等指标。
 
 ## 本地启动
 
-先复制环境变量模板：
+复制环境变量模板：
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-然后填写 `.env`：
+填写 `.env`：
 
 ```text
 POSTGRES_PASSWORD
@@ -74,13 +78,13 @@ http://localhost:8090
 ## 测试
 
 ```powershell
-..\agent-sre\.venv\Scripts\python.exe -m pytest tests -q
+python -m pytest -q
 ```
 
-当前本地测试应通过：
+当前本地回归：
 
 ```text
-37 passed, 1 skipped
+41 passed, 1 skipped
 ```
 
 ## 文档
@@ -93,4 +97,3 @@ http://localhost:8090
 ## 不提交的文件
 
 `.env`、本地数据库、缓存目录不会进入 Git。敏感配置只保留在本地环境变量中，仓库只提交 `.env.example`。
-

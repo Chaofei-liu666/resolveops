@@ -7,13 +7,14 @@ action-specific adapter call and read-after-write verification logic.
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
-from sqlalchemy import text
+from sqlalchemy import select, text
 from .erpnext import ERPNextAdapter
+from .models import Case, PriceReview
 
 PreflightFn = Callable[[Any, ERPNextAdapter, dict[str, Any]], dict[str, Any]]
 ContextFn = Callable[[ERPNextAdapter, str, dict[str, Any]], dict[str, Any]]
-WriteFn = Callable[[ERPNextAdapter, dict[str, Any], str | None, str], str]
-VerifyFn = Callable[[ERPNextAdapter, str, dict[str, Any]], dict[str, Any]]
+WriteFn = Callable[[Any, ERPNextAdapter, dict[str, Any], str | None, str, Case], str]
+VerifyFn = Callable[[Any, ERPNextAdapter, str, dict[str, Any]], dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ def preflight_transfer_stock(db: Any, erp: ERPNextAdapter, action_input: dict[st
     return {'ok': True, 'fresh_inventory': fresh}
 
 
-def write_transfer_stock(erp: ERPNextAdapter, action_input: dict[str, Any], _company: str | None, idempotency_key: str) -> str:
+def write_transfer_stock(_db: Any, erp: ERPNextAdapter, action_input: dict[str, Any], _company: str | None, idempotency_key: str, _case: Case) -> str:
     return erp.create_transfer_draft(
         source=action_input['source'],
         target=action_input['target'],
@@ -69,13 +70,13 @@ def write_transfer_stock(erp: ERPNextAdapter, action_input: dict[str, Any], _com
     )
 
 
-def verify_transfer_stock(erp: ERPNextAdapter, external_id: str, action_input: dict[str, Any]) -> dict[str, Any]:
+def verify_transfer_stock(_db: Any, erp: ERPNextAdapter, external_id: str, action_input: dict[str, Any]) -> dict[str, Any]:
     doc=erp.stock_entry(external_id); item=doc['items'][0]
     verified=doc['docstatus']==0 and float(item['qty'])==float(action_input['quantity']) and item['s_warehouse']==action_input['source'] and item['t_warehouse']==action_input['target']
     return {'verified':verified,'event_data':{'stock_entry':external_id}}
 
 
-def write_purchase_request(erp: ERPNextAdapter, action_input: dict[str, Any], company: str | None, idempotency_key: str) -> str:
+def write_purchase_request(_db: Any, erp: ERPNextAdapter, action_input: dict[str, Any], company: str | None, idempotency_key: str, _case: Case) -> str:
     return erp.create_purchase_request(
         target=action_input['target'],
         item_code=action_input['sku'],
@@ -86,10 +87,43 @@ def write_purchase_request(erp: ERPNextAdapter, action_input: dict[str, Any], co
     )
 
 
-def verify_purchase_request(erp: ERPNextAdapter, external_id: str, action_input: dict[str, Any]) -> dict[str, Any]:
+def verify_purchase_request(_db: Any, erp: ERPNextAdapter, external_id: str, action_input: dict[str, Any]) -> dict[str, Any]:
     doc=erp.material_request(external_id); item=doc['items'][0]
     verified=doc['docstatus']==0 and doc['material_request_type']=='Purchase' and float(item['qty'])==float(action_input['quantity']) and item.get('warehouse')==action_input['target'] and item['item_code']==action_input['sku']
     return {'verified':verified,'event_data':{'material_request':external_id}}
+
+
+def write_price_review(db: Any, _erp: ERPNextAdapter, action_input: dict[str, Any], _company: str | None, idempotency_key: str, case: Case) -> str:
+    existing = db.scalar(select(PriceReview).where(PriceReview.idempotency_key == idempotency_key))
+    if existing:
+        return existing.id
+    review = PriceReview(
+        tenant_id=case.tenant_id,
+        case_id=case.id,
+        order_id=case.order_id,
+        sku=action_input['sku'],
+        order_rate=float(action_input['order_rate']),
+        reference_rate=float(action_input['reference_rate']),
+        difference=float(action_input['difference']),
+        idempotency_key=idempotency_key,
+        data={'reason': action_input.get('reason'), 'source': 'agent_action_plan'},
+    )
+    db.add(review)
+    db.flush()
+    return review.id
+
+
+def verify_price_review(db: Any, _erp: ERPNextAdapter, review_id: str, action_input: dict[str, Any]) -> dict[str, Any]:
+    review = db.get(PriceReview, review_id)
+    verified = bool(
+        review
+        and review.status == 'draft'
+        and review.sku == action_input['sku']
+        and float(review.order_rate) == float(action_input['order_rate'])
+        and float(review.reference_rate) == float(action_input['reference_rate'])
+        and float(review.difference) == float(action_input['difference'])
+    )
+    return {'verified': verified, 'event_data': {'price_review': review_id}}
 
 
 EXECUTOR_REGISTRY: dict[str, WriteActionExecutor] = {
@@ -108,6 +142,14 @@ EXECUTOR_REGISTRY: dict[str, WriteActionExecutor] = {
         context=purchase_request_context,
         write=write_purchase_request,
         verify=verify_purchase_request,
+    ),
+    'create_price_review_ticket': WriteActionExecutor(
+        action_type='create_price_review_ticket',
+        invocation_tool='create_price_review_ticket',
+        preflight=ok_preflight,
+        context=empty_context,
+        write=write_price_review,
+        verify=verify_price_review,
     ),
 }
 
