@@ -1,7 +1,15 @@
 # ResolveOps schema migrations
 
-`0001_webhook_idempotency.sql` prevents duplicate ERP webhook delivery from
-creating duplicate Cases. The application currently executes this idempotently
-at startup to upgrade the running pilot. Before a production rollout, apply
-these files through CI using a database migration user, then remove DDL rights
-from the API and Worker roles.
+SQL files in this directory are applied in filename order and recorded in
+`schema_migrations`.
+
+The application still creates missing base tables in local development with
+SQLAlchemy metadata, but schema evolution must be represented by versioned SQL
+files here.
+
+For production, run the same migrations through CI/CD with a database migration
+user, then remove DDL rights from the API and Worker roles.
+
+`0001_webhook_idempotency.sql` covers the first online schema evolution:
+webhook idempotency, event type routing, worker lease recovery fields, and
+multi-role approvals.

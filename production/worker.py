@@ -8,6 +8,7 @@ from .config import settings
 from .context import CaseContextBuilder, validate_case_context_isolation
 from .erpnext import ERPNextAdapter
 from .main import emit
+from .migrations import apply_migrations
 from .models import Approval, Base, Case, Invocation, Task
 from .tools import BusinessReadTools
 from .agent import InvestigationAgent
@@ -23,13 +24,7 @@ def ensure_schema():
         db.execute(text("SELECT pg_advisory_lock(hashtext('resolveops_schema_bootstrap'))"))
         try:
             Base.metadata.create_all(db)
-            db.execute(text('ALTER TABLE cases ADD COLUMN IF NOT EXISTS source_event_id VARCHAR(160)'))
-            db.execute(text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS event_type VARCHAR(80) NOT NULL DEFAULT 'inventory_shortage'"))
-            db.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_cases_tenant_source_event ON cases (tenant_id, source_event_id) WHERE source_event_id IS NOT NULL'))
-            db.execute(text('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ'))
-            db.execute(text('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_error TEXT'))
-            db.execute(text("ALTER TABLE approvals ADD COLUMN IF NOT EXISTS required_roles JSON NOT NULL DEFAULT '[\"warehouse_manager\"]'::json"))
-            db.execute(text("ALTER TABLE approvals ADD COLUMN IF NOT EXISTS approved_roles JSON NOT NULL DEFAULT '[]'::json"))
+            apply_migrations(db)
         finally:
             db.execute(text("SELECT pg_advisory_unlock(hashtext('resolveops_schema_bootstrap'))"))
 def digest(action, version): return hashlib.sha256(json.dumps({'action':action,'version':version},sort_keys=True).encode()).hexdigest()

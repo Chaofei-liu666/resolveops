@@ -34,6 +34,7 @@ ERP 异常事件
 - 写操作带 idempotency key，避免重复创建业务记录。
 - PostgreSQL `FOR UPDATE SKIP LOCKED` 领取任务，支持多 Worker 并发。
 - PostgreSQL advisory transaction lock 控制共享库存写入。
+- SQL migration runner 按 `production/migrations/*.sql` 顺序应用版本化变更，并记录到 `schema_migrations`。
 - ToolResult 统一表示工具成功、失败、可重试性和证据可用性。
 - CaseContextBuilder 按 `case_id` 构建上下文，并在进入 LLM 前清洗/校验 task context，避免多个 Case 串状态。
 - Verified Case Lessons 只从 `resolved + verification passed` 的 Case 沉淀，并且只作为规划提示。
@@ -88,7 +89,7 @@ python -m pytest -q
 当前本地回归：
 
 ```text
-52 passed, 1 skipped
+53 passed, 1 skipped
 ```
 
 ## 文档

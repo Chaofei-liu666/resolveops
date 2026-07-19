@@ -15,12 +15,14 @@ from production.agent import InvestigationAgent
 from production.evidence import validate_plan_grounding
 from production.executors import executor_for
 from fastapi import HTTPException
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from production.context import CaseContextBuilder, build_case_context, validate_case_context_isolation
 from production.main import LogisticsLaneIn, OperatorIdentity, audit_out, eval_case_out, eval_summary_out, require_role
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
+import production.migrations as migration_module
+from production.migrations import apply_migrations
 from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, PriceReview, SupplierFollowup, Task
 from production.policy import action_policy, allow_read_tool
 from production.tool_result import ToolResult
@@ -443,6 +445,22 @@ def test_read_tool_scheduler_converts_runtime_exceptions_to_tool_result():
     assert result.error_code == 'tool_scheduler_failed'
     assert result.error_type == 'TimeoutError'
     assert result.retryable is True
+
+
+def test_sql_migration_runner_records_versions_idempotently(tmp_path, monkeypatch):
+    (tmp_path / '0001_test_migration.sql').write_text('CREATE TABLE example_migrated(id INTEGER PRIMARY KEY);', encoding='utf-8')
+    monkeypatch.setattr(migration_module, 'MIGRATIONS_DIR', tmp_path)
+    engine = create_engine('sqlite:///:memory:')
+    with engine.begin() as db:
+        Base.metadata.create_all(db)
+        first = apply_migrations(db)
+        second = apply_migrations(db)
+        rows = db.execute(text('SELECT version, filename FROM schema_migrations ORDER BY version')).all()
+
+    assert [row[0] for row in rows] == ['0001']
+    assert rows[0][1] == '0001_test_migration.sql'
+    assert [item['version'] for item in first] == ['0001']
+    assert second == []
 
 
 def test_case_context_builder_isolates_concurrent_case_state():

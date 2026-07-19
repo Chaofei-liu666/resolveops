@@ -11,7 +11,7 @@ python -m pytest -q
 Current local regression:
 
 ```text
-52 passed, 1 skipped
+53 passed, 1 skipped
 ```
 
 | Risk | Test | Expected safe outcome |

@@ -28,10 +28,12 @@ PostgreSQL
     ├─ case_events
     ├─ approvals
     ├─ tool_invocations
+    ├─ schema_migrations
     ├─ price_reviews
     └─ case_lessons
     ↓
 Worker
+    ├─ Migration Runner
     ├─ CaseContextBuilder
     ├─ Tool Profile Router
     ├─ InvestigationAgent
@@ -43,6 +45,20 @@ Worker
     ├─ Executor Registry
     └─ Verification
 ```
+
+## Schema Migration
+
+ResolveOps 现在使用轻量 SQL migration runner 管理 schema 演进。
+
+```text
+production/migrations/*.sql
+→ 按文件名版本顺序执行
+→ 写入 schema_migrations(version, filename, checksum, applied_at)
+```
+
+本地开发启动时仍会用 SQLAlchemy metadata 创建空库基础表，但字段演进、索引和在线升级逻辑必须进入版本化 SQL 文件。API 和 Worker 启动时都会调用同一套 runner，并用 PostgreSQL advisory lock 防止两个进程并发执行 migration。
+
+生产部署时建议在 CI/CD 中用独立 migration 用户执行这些 SQL，然后移除 API / Worker 数据库账号的 DDL 权限。
 
 ## 为什么现在不拆多个 Agent
 

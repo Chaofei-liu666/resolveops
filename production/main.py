@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import settings
+from .migrations import apply_migrations
 from .models import AuditLog, Base, Approval, Case, Event, Invocation, LogisticsLane, Task
 
 SUPPORTED_EVENTS={'inventory_shortage','price_mismatch','delivery_delay','supplier_delay'}
@@ -38,16 +39,7 @@ def bootstrap_schema():
         db.execute(text("SELECT pg_advisory_lock(hashtext('resolveops_schema_bootstrap'))"))
         try:
             Base.metadata.create_all(db)
-            # Initial online migration. Kept idempotent so an existing deployment
-            # can upgrade safely; production CI should run this as a versioned
-            # migration. The advisory lock prevents API/Worker startup races.
-            db.execute(text('ALTER TABLE cases ADD COLUMN IF NOT EXISTS source_event_id VARCHAR(160)'))
-            db.execute(text("ALTER TABLE cases ADD COLUMN IF NOT EXISTS event_type VARCHAR(80) NOT NULL DEFAULT 'inventory_shortage'"))
-            db.execute(text('CREATE UNIQUE INDEX IF NOT EXISTS uq_cases_tenant_source_event ON cases (tenant_id, source_event_id) WHERE source_event_id IS NOT NULL'))
-            db.execute(text('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ'))
-            db.execute(text('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS last_error TEXT'))
-            db.execute(text("ALTER TABLE approvals ADD COLUMN IF NOT EXISTS required_roles JSON NOT NULL DEFAULT '[\"warehouse_manager\"]'::json"))
-            db.execute(text("ALTER TABLE approvals ADD COLUMN IF NOT EXISTS approved_roles JSON NOT NULL DEFAULT '[]'::json"))
+            apply_migrations(db)
         finally:
             db.execute(text("SELECT pg_advisory_unlock(hashtext('resolveops_schema_bootstrap'))"))
 
