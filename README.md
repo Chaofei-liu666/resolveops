@@ -113,6 +113,7 @@ docker compose --profile test run --rm test
 - [架构说明](docs/architecture.md)
 - [运行手册](docs/runbook.md)
 - [部署与上线安全清单](docs/deployment.md)
+- [生产就绪度评估](docs/production-readiness.md)
 - [面试问答笔记](docs/interview-notes.md)
 - [可靠性评估与故障注入](docs/evals.md)
 
