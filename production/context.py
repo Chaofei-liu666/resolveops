@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 from .memory import relevant_lessons_for_case
 from .models import Approval, Case, Event, Invocation, Task
 
+SCOPE_KEYS = {'case_id', 'tenant_id', 'order_id', 'source_event_id'}
+
 
 def _compact_events(events: list[Event], limit: int = 12) -> list[dict[str, Any]]:
     recent = events[-limit:]
@@ -35,6 +37,54 @@ def _tool_observations(case: Case) -> list[dict[str, Any]]:
     return observations if isinstance(observations, list) else []
 
 
+def _sanitize_task_value(value: Any, case: Case, path: str = '$') -> tuple[Any, list[str]]:
+    """Remove foreign scope identifiers from scheduler-provided task context.
+
+    Task payloads are not the source of truth for durable Case identity.  They
+    may carry replan hints, but they must not be able to smuggle another Case's
+    case_id, tenant_id, or order_id into the LLM context.
+    """
+    removed: list[str] = []
+    expected = {
+        'case_id': case.id,
+        'tenant_id': case.tenant_id,
+        'order_id': case.order_id,
+        'source_event_id': case.source_event_id,
+    }
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            child_path = f'{path}.{key}'
+            if key in SCOPE_KEYS and child not in (None, '', expected.get(key)):
+                removed.append(child_path)
+                continue
+            clean_child, child_removed = _sanitize_task_value(child, case, child_path)
+            result[key] = clean_child
+            removed.extend(child_removed)
+        return result, removed
+    if isinstance(value, list):
+        result_list = []
+        for index, child in enumerate(value):
+            clean_child, child_removed = _sanitize_task_value(child, case, f'{path}[{index}]')
+            result_list.append(clean_child)
+            removed.extend(child_removed)
+        return result_list, removed
+    return value, removed
+
+
+def _sanitize_task_context(task_context: dict[str, Any], case: Case) -> tuple[dict[str, Any], list[str]]:
+    clean: dict[str, Any] = {}
+    removed: list[str] = []
+    for key in ('reason', 'previous_plan'):
+        if key not in task_context:
+            clean[key] = None
+            continue
+        clean_value, clean_removed = _sanitize_task_value(task_context.get(key), case, f'$.{key}')
+        clean[key] = clean_value
+        removed.extend(clean_removed)
+    return clean, removed
+
+
 def build_case_context(
     case: Case,
     events: list[Event],
@@ -51,6 +101,7 @@ def build_case_context(
     assert these to prevent accidental cross-Case leakage.
     """
     task_context = task_context or {}
+    clean_task_context, removed_task_scope_paths = _sanitize_task_context(task_context, case)
     lessons = lessons or []
     observations = _tool_observations(case)
     event_kinds = [event.kind for event in events]
@@ -79,8 +130,8 @@ def build_case_context(
             'task_attempts': sum(task.attempts or 0 for task in tasks),
         },
         'task_context': {
-            'reason': task_context.get('reason'),
-            'previous_plan': task_context.get('previous_plan'),
+            'reason': clean_task_context.get('reason'),
+            'previous_plan': clean_task_context.get('previous_plan'),
         },
         'confirmed_observations': observations,
         'previous_plan': case.plan,
@@ -140,7 +191,52 @@ def build_case_context(
                 *[task.case_id for task in tasks],
             }),
             'lesson_tenant_ids_present': sorted({lesson.get('tenant_id') for lesson in lessons if lesson.get('tenant_id')}),
+            'task_context_removed_scope_paths': removed_task_scope_paths,
         },
+    }
+
+
+def validate_case_context_isolation(context: dict[str, Any]) -> dict[str, Any]:
+    """Validate that a context payload is safe to send to the LLM."""
+    problems: list[str] = []
+    warnings: list[str] = []
+    scope = context.get('scope') if isinstance(context.get('scope'), dict) else {}
+    case_id = scope.get('case_id')
+    tenant_id = scope.get('tenant_id')
+    order_id = scope.get('order_id')
+    isolation = context.get('isolation') if isinstance(context.get('isolation'), dict) else {}
+
+    if not case_id:
+        problems.append('context has no scope.case_id')
+    case_ids_present = isolation.get('case_ids_present') or []
+    if case_id and case_ids_present != [case_id]:
+        problems.append(f'context contains records from other cases: {case_ids_present}')
+
+    for ref_group in ('approval_refs', 'invocation_refs', 'task_refs'):
+        for ref in context.get(ref_group) or []:
+            if isinstance(ref, dict) and ref.get('case_id') != case_id:
+                problems.append(f'{ref_group} contains foreign case_id {ref.get("case_id")}')
+
+    for lesson_tenant_id in isolation.get('lesson_tenant_ids_present') or []:
+        if tenant_id and lesson_tenant_id != tenant_id:
+            problems.append(f'long_term_memory contains foreign tenant_id {lesson_tenant_id}')
+
+    for observation in context.get('confirmed_observations') or []:
+        if not isinstance(observation, dict) or observation.get('tool') != 'get_order':
+            continue
+        result = observation.get('result') if isinstance(observation.get('result'), dict) else {}
+        observed_order_id = result.get('name')
+        if order_id and observed_order_id and observed_order_id != order_id:
+            problems.append(f'confirmed_observations contains get_order result for {observed_order_id}, expected {order_id}')
+
+    removed_paths = isolation.get('task_context_removed_scope_paths') or []
+    if removed_paths:
+        warnings.append(f'task_context foreign scope fields were removed: {removed_paths}')
+
+    return {
+        'allowed': not problems,
+        'problems': problems,
+        'warnings': warnings,
     }
 
 

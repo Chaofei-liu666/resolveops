@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 from .config import settings
-from .context import CaseContextBuilder
+from .context import CaseContextBuilder, validate_case_context_isolation
 from .erpnext import ERPNextAdapter
 from .main import emit
 from .models import Approval, Base, Case, Invocation, Task
@@ -83,6 +83,13 @@ def investigate_with_agent(db, c, task_context):
     observations=[]
     tool_surface=BusinessReadTools(erp, c.event_type)
     case_context=CaseContextBuilder(db).build(c.id, task_context or {})
+    isolation=validate_case_context_isolation(case_context)
+    if not isolation['allowed']:
+        c.status='manual_review'
+        emit(db,c.id,'context_isolation_failed','Case context isolation guard blocked investigation before LLM planning.',isolation)
+        return
+    if isolation['warnings']:
+        emit(db,c.id,'context_isolation_sanitized','Scheduler task context contained foreign scope fields; they were removed before LLM planning.',isolation)
     def observe(name, args, result, tool_result=None):
         metadata=tool_surface.metadata(name)
         observation={'tool':name,'arguments':args,'result':result,'metadata':metadata}

@@ -18,7 +18,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from production.context import CaseContextBuilder
+from production.context import CaseContextBuilder, build_case_context, validate_case_context_isolation
 from production.main import LogisticsLaneIn, OperatorIdentity, audit_out, eval_case_out, eval_summary_out, require_role
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
 from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, PriceReview, SupplierFollowup, Task
@@ -434,6 +434,53 @@ def test_case_context_builder_isolates_concurrent_case_state():
     assert all(ref['case_id'] == 'case-a' for ref in context['approval_refs'])
     assert all(ref['case_id'] == 'case-a' for ref in context['invocation_refs'])
     assert all(ref['case_id'] == 'case-a' for ref in context['task_refs'])
+    assert validate_case_context_isolation(context)['allowed'] is True
+
+
+def test_case_context_sanitizes_foreign_scheduler_payload_scope_before_llm():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        case = Case(id='case-a', tenant_id='tenant-a', order_id='SO-A', status='replanning', plan_version=2)
+        db.add(case); db.commit()
+        context = CaseContextBuilder(db).build('case-a', {
+            'reason': 'preflight failed',
+            'previous_plan': {
+                'case_id': 'case-b',
+                'tenant_id': 'tenant-b',
+                'order_id': 'SO-B',
+                'actions': [{
+                    'action_type': 'transfer_stock',
+                    'input': {'sku': 'SKU-A12', 'quantity': 10},
+                }],
+            },
+        })
+
+    previous_plan = context['task_context']['previous_plan']
+    assert 'case_id' not in previous_plan
+    assert 'tenant_id' not in previous_plan
+    assert 'order_id' not in previous_plan
+    assert previous_plan['actions'][0]['input']['sku'] == 'SKU-A12'
+    isolation = validate_case_context_isolation(context)
+    assert isolation['allowed'] is True
+    assert isolation['warnings']
+    assert '$.previous_plan.case_id' in context['isolation']['task_context_removed_scope_paths']
+
+
+def test_case_context_isolation_guard_blocks_mixed_durable_records():
+    case = Case(id='case-a', tenant_id='tenant-a', order_id='SO-A', status='queued', plan_version=0)
+    context = build_case_context(
+        case=case,
+        events=[Event(case_id='case-b', kind='tool_observation', message='foreign event', data={})],
+        approvals=[],
+        invocations=[],
+        tasks=[],
+        lessons=[],
+    )
+
+    isolation = validate_case_context_isolation(context)
+    assert isolation['allowed'] is False
+    assert any('other cases' in problem for problem in isolation['problems'])
 
 
 def test_verified_case_lessons_are_generated_only_from_verified_resolved_case():

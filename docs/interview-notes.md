@@ -24,7 +24,7 @@ case_lessons
 任务领取：SELECT ... FOR UPDATE SKIP LOCKED
 写操作幂等：idempotency_key 唯一约束
 共享库存写入：PostgreSQL advisory transaction lock
-上下文隔离：CaseContextBuilder 只按 case_id 取状态
+上下文隔离：CaseContextBuilder 只按 case_id 取状态，进入 LLM 前清洗 task_context 并校验 durable refs
 ```
 
 ## 2. Redis 还是数据库？
@@ -87,6 +87,13 @@ ToolScheduler
 - long_term_memory
 
 完整审计仍保留在数据库 event log 中；给模型的是压缩后的执行上下文。
+
+为了避免多 Case 并发时串上下文，当前还做了 Context Isolation Guard：
+
+- scheduler 传入的 `task_context` 不是身份来源，foreign `case_id / tenant_id / order_id` 会被移除；
+- approvals、tool_invocations、tasks、events 必须都属于当前 `case_id`；
+- Verified Case Lessons 只能来自同一 `tenant_id`；
+- 如果校验失败，Case 进入 `manual_review`，不会继续让模型规划。
 
 ## 6. 什么时候拆多个 Agent？
 
