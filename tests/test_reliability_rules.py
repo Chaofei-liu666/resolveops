@@ -19,11 +19,11 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from production.context import CaseContextBuilder, build_case_context, validate_case_context_isolation
-from production.main import LogisticsLaneIn, OperatorIdentity, audit_out, eval_case_out, eval_summary_out, require_role
+from production.main import LogisticsLaneIn, OperatorIdentity, audit_out, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_role
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
 import production.migrations as migration_module
 from production.migrations import apply_migrations
-from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, PriceReview, SupplierFollowup, Task
+from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, Operator, PriceReview, SupplierFollowup, Task
 from production.policy import action_policy, allow_read_tool
 from production.tool_result import ToolResult
 from production.tool_scheduler import ReadToolCall, ReadToolScheduler, tool_signature
@@ -793,6 +793,36 @@ def test_config_write_requires_config_admin_role():
     with pytest.raises(HTTPException) as exc:
         require_role(OperatorIdentity(subject='sales', role='sales_manager'), 'config_admin', 'ops_admin')
     assert exc.value.status_code == 403
+
+
+def test_operator_identity_comes_from_database_not_request_role_header():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        db.add(Operator(
+            tenant_id='demo',
+            subject='alice',
+            role='sales_manager',
+            api_key_hash=operator_key_hash('alice-key'),
+            status='active',
+        ))
+        db.add(Operator(
+            tenant_id='demo',
+            subject='disabled',
+            role='ops_admin',
+            api_key_hash=operator_key_hash('disabled-key'),
+            status='disabled',
+        ))
+        db.commit()
+
+        identity = operator_identity_from_db(db, 'alice-key')
+        with pytest.raises(HTTPException) as exc:
+            operator_identity_from_db(db, 'disabled-key')
+
+    assert identity.subject == 'alice'
+    assert identity.role == 'sales_manager'
+    assert identity.tenant_id == 'demo'
+    assert exc.value.status_code == 401
 
 
 def test_audit_log_serializes_actor_role_and_resource():

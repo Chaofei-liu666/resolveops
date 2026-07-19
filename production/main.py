@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import hashlib, hmac, json
 from pathlib import Path
+from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -13,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import settings
 from .migrations import apply_migrations
-from .models import AuditLog, Base, Approval, Case, Event, Invocation, LogisticsLane, Task
+from .models import AuditLog, Base, Approval, Case, Event, Invocation, LogisticsLane, Operator, Task
 
 SUPPORTED_EVENTS={'inventory_shortage','price_mismatch','delivery_delay','supplier_delay'}
 
@@ -30,6 +31,7 @@ class LogisticsLaneIn(BaseModel):
 class OperatorIdentity:
     subject: str
     role: str
+    tenant_id: str = 'demo'
 
 engine=create_engine(settings.database_url, pool_pre_ping=True)
 STATIC_DIR=Path(__file__).resolve().parent.parent/'static'
@@ -40,6 +42,7 @@ def bootstrap_schema():
         try:
             Base.metadata.create_all(db)
             apply_migrations(db)
+            seed_default_operator(db)
         finally:
             db.execute(text("SELECT pg_advisory_unlock(hashtext('resolveops_schema_bootstrap'))"))
 
@@ -53,9 +56,44 @@ if STATIC_DIR.exists():
     app.mount('/static', StaticFiles(directory=STATIC_DIR), name='static')
 def emit(db, case_id, kind, message, data=None): db.add(Event(case_id=case_id,kind=kind,message=message,data=data or {}))
 def audit(db, identity: OperatorIdentity, action: str, resource_type: str, resource_id: str, data=None, case_id: str|None=None):
-    db.add(AuditLog(actor=identity.subject,role=identity.role,action=action,resource_type=resource_type,resource_id=resource_id,case_id=case_id,data=data or {}))
+    db.add(AuditLog(actor=identity.subject,role=identity.role,action=action,resource_type=resource_type,resource_id=resource_id,case_id=case_id,data={**(data or {}),'tenant_id':identity.tenant_id}))
+def operator_key_hash(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+def seed_default_operator(db):
+    """Local bootstrap only. Production should provision operators through IAM/admin workflow."""
+    if not settings.operator_api_key:
+        return
+    seeds=[('local-ops-admin','ops_admin',settings.operator_api_key)]
+    for raw_seed in (settings.operator_seed_keys or '').split(';'):
+        if not raw_seed.strip():
+            continue
+        parts=raw_seed.split(':',2)
+        if len(parts) != 3 or not all(parts):
+            continue
+        seeds.append((parts[0],parts[1],parts[2]))
+    for subject, role, key in seeds:
+        key_hash=operator_key_hash(key)
+        db.execute(
+            text(
+                """
+                INSERT INTO operators(id, tenant_id, subject, role, api_key_hash, status)
+                VALUES (:id, 'demo', :subject, :role, :api_key_hash, 'active')
+                ON CONFLICT (api_key_hash)
+                DO UPDATE SET subject = EXCLUDED.subject, role = EXCLUDED.role, status = 'active'
+                """
+            ),
+            {'id':str(uuid4()),'subject':subject,'role':role,'api_key_hash':key_hash},
+        )
+def operator_identity_from_db(db, key: str|None) -> OperatorIdentity:
+    if not key:
+        raise HTTPException(401, 'operator authentication failed')
+    key_hash=operator_key_hash(key)
+    operator=db.scalar(select(Operator).where(Operator.api_key_hash==key_hash, Operator.status=='active'))
+    if not operator:
+        raise HTTPException(401, 'operator authentication failed')
+    return OperatorIdentity(subject=operator.subject, role=operator.role, tenant_id=operator.tenant_id)
 def operator_identity(key: str|None, subject: str|None=None, role: str|None=None) -> OperatorIdentity:
-    """Temporary API-key auth boundary; production should receive identity from SSO/API Gateway."""
+    """Legacy compatibility for unit tests only; request role is not trusted by API routes."""
     if not key or not hmac.compare_digest(key, settings.operator_api_key): raise HTTPException(401, 'operator authentication failed')
     return OperatorIdentity(subject=subject or 'authenticated-operator', role=role or 'operator')
 def require_role(identity: OperatorIdentity, *roles: str) -> None:
@@ -193,9 +231,9 @@ async def erp_webhook(request: Request, x_resolveops_signature: str=Header(...))
         db.add(Task(case_id=case.id,kind='investigate')); db.commit(); return {'case_id':case.id,'status':'queued','duplicate':False}
 @app.get('/v1/cases')
 def case_list(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), limit:int=50):
-    operator_identity(x_operator_key,x_operator,x_operator_role)
     limit=max(1,min(limit,100))
     with Session(engine) as db:
+        operator_identity_from_db(db,x_operator_key)
         cases=db.scalars(select(Case).order_by(Case.updated_at.desc()).limit(limit)).all()
         result=[]
         for case in cases:
@@ -215,16 +253,16 @@ def case_list(x_operator_key:str|None=Header(default=None), x_operator:str|None=
         return result
 @app.get('/v1/config/logistics-lanes')
 def logistics_lanes(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), tenant_id:str='demo', active:bool|None=None):
-    operator_identity(x_operator_key,x_operator,x_operator_role)
     with Session(engine) as db:
+        operator_identity_from_db(db,x_operator_key)
         query=select(LogisticsLane).where(LogisticsLane.tenant_id==tenant_id).order_by(LogisticsLane.source_warehouse,LogisticsLane.target_warehouse)
         if active is not None: query=query.where(LogisticsLane.active.is_(active))
         return [lane_out(lane) for lane in db.scalars(query).all()]
 @app.post('/v1/config/logistics-lanes')
 def upsert_logistics_lane(payload: LogisticsLaneIn, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
-    identity=operator_identity(x_operator_key,x_operator,x_operator_role)
-    require_role(identity,'config_admin','ops_admin')
     with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        require_role(identity,'config_admin','ops_admin')
         lane=db.scalar(select(LogisticsLane).where(
             LogisticsLane.tenant_id==payload.tenant_id,
             LogisticsLane.source_warehouse==payload.source_warehouse,
@@ -239,19 +277,19 @@ def upsert_logistics_lane(payload: LogisticsLaneIn, x_operator_key:str|None=Head
         db.commit(); db.refresh(lane); return lane_out(lane)
 @app.get('/v1/audit')
 def audit_logs(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), case_id:str|None=None, limit:int=100):
-    identity=operator_identity(x_operator_key,x_operator,x_operator_role)
-    require_role(identity,'ops_admin','config_admin')
     limit=max(1,min(limit,200))
     with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        require_role(identity,'ops_admin','config_admin')
         query=select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
         if case_id: query=select(AuditLog).where(AuditLog.case_id==case_id).order_by(AuditLog.created_at.desc()).limit(limit)
         return [audit_out(log) for log in db.scalars(query).all()]
 @app.get('/v1/evals/summary')
 def eval_summary(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), limit:int=50):
-    identity=operator_identity(x_operator_key,x_operator,x_operator_role)
-    require_role(identity,'ops_admin','config_admin')
     limit=max(1,min(limit,200))
     with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        require_role(identity,'ops_admin','config_admin')
         cases=db.scalars(select(Case).order_by(Case.updated_at.desc()).limit(limit)).all()
         rows=[]
         for case in cases:
@@ -263,8 +301,8 @@ def eval_summary(x_operator_key:str|None=Header(default=None), x_operator:str|No
         return eval_summary_out(rows)
 @app.get('/v1/cases/{case_id}')
 def case_detail(case_id:str, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
-    operator_identity(x_operator_key,x_operator,x_operator_role)
     with Session(engine) as db:
+        operator_identity_from_db(db,x_operator_key)
         case=db.get(Case,case_id)
         if not case: raise HTTPException(404,'case not found')
         events=db.scalars(select(Event).where(Event.case_id==case_id).order_by(Event.created_at)).all()
@@ -282,8 +320,8 @@ def case_detail(case_id:str, x_operator_key:str|None=Header(default=None), x_ope
         }
 @app.post('/v1/approvals/{approval_id}/approve')
 def approve(approval_id:str, x_operator_key:str|None=Header(default=None, alias='X-Operator-Key'), x_operator:str|None=Header(default=None, alias='X-Operator'), x_operator_role:str|None=Header(default=None, alias='X-Operator-Role')):
-    identity=operator_identity(x_operator_key,x_operator,x_operator_role)
     with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
         a=db.get(Approval,approval_id)
         if not a or a.status!='pending': raise HTTPException(409,'approval unavailable')
         role=identity.role; required=set(a.required_roles or ['warehouse_manager'])

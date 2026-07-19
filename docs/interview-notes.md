@@ -40,6 +40,19 @@ Redis 更适合：
 
 但审批、计划、工具调用、验证结果必须进数据库，因为这些数据需要恢复和审计。
 
+## 2.1 Operator 身份和权限怎么做？
+
+当前本地版本不是完整 SSO，但已经不信任调用方自报角色。
+
+```text
+X-Operator-Key
+→ sha256
+→ operators.api_key_hash
+→ subject / role / tenant_id
+```
+
+审批时使用数据库中的 `role` 判断是否满足 required_roles。`X-Operator-Role` 即使被伪造为 `ops_admin`，也不会影响授权结果。生产环境应把这层替换成 SSO / IAM / API Gateway 写入的身份上下文，或由管理员流程管理 operators 表。
+
 ## 3. Plan-and-Solve 和 ReAct 的区别？
 
 ResolveOps 是混合式：

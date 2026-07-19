@@ -89,11 +89,17 @@ POST /v1/approvals/{approval_id}/approve
 
 ```text
 X-Operator-Key: <OPERATOR_API_KEY>
-X-Operator: <operator name>
-X-Operator-Role: warehouse_manager / procurement_manager / sales_manager / ops_admin
 ```
 
-高金额或 VIP Case 可能需要多个角色审批。
+Operator 的 `subject / role / tenant_id` 从数据库 `operators` 表按 API key hash 查询。`X-Operator-Role` 不再作为授权来源；即使调用方伪造该 header，也不会改变后端识别出的角色。
+
+本地开发可通过 `.env` 的 `OPERATOR_SEED_KEYS` seed 多个测试 operator：
+
+```text
+subject:role:key;subject:role:key
+```
+
+高金额或 VIP Case 可能需要多个数据库角色分别审批。
 
 ## 6. 查看 Case
 

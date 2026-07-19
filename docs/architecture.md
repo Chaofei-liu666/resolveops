@@ -27,6 +27,7 @@ PostgreSQL
     ├─ tasks
     ├─ case_events
     ├─ approvals
+    ├─ operators
     ├─ tool_invocations
     ├─ schema_migrations
     ├─ price_reviews
@@ -196,6 +197,17 @@ Action Plan
 ## Policy / Approval
 
 Policy Engine 根据 action_type、订单金额、客户等级等信号决定需要哪些角色审批。
+
+Operator 身份从 `operators` 表读取：
+
+```text
+X-Operator-Key
+→ sha256
+→ operators.api_key_hash
+→ subject / role / tenant_id
+```
+
+API 路由不再信任调用方传入的 `X-Operator-Role`。本地开发可以通过 `OPERATOR_SEED_KEYS` seed 测试 operator；生产环境应由 SSO / IAM / API Gateway 或管理员流程写入 operators 表。
 
 当前策略示例：
 

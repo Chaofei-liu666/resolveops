@@ -76,6 +76,16 @@ class AuditLog(Base):
     data: Mapped[dict]=mapped_column(JSON, default=dict)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), server_default=func.now())
 
+class Operator(Base):
+    __tablename__='operators'
+    id: Mapped[str]=mapped_column(String, primary_key=True, default=lambda:str(uuid4()))
+    tenant_id: Mapped[str]=mapped_column(String(80), index=True, default='demo')
+    subject: Mapped[str]=mapped_column(String(140), index=True)
+    role: Mapped[str]=mapped_column(String(80), index=True)
+    api_key_hash: Mapped[str]=mapped_column(String(64), unique=True, index=True)
+    status: Mapped[str]=mapped_column(String(20), default='active', index=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), server_default=func.now())
+
 class CaseLesson(Base):
     __tablename__='case_lessons'
     id: Mapped[str]=mapped_column(String, primary_key=True, default=lambda:str(uuid4()))

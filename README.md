@@ -30,6 +30,7 @@ ERP 异常事件
 - 按 `event_type` 动态暴露 read tools，避免价格异常误调用库存/采购工具。
 - 按 `event_type` 动态暴露 write Action schemas，避免 planner 提出不属于当前业务异常的行动。
 - 写操作也是工具，但只能作为 Action Plan 被提出，由 Policy、Approval、Executor 控制执行。
+- Operator 身份和角色从 `operators` 表按 API key hash 查询，审批不信任请求头自报角色。
 - 审批绑定 `case_id + plan_version + action_hash`，防止参数篡改和审批重放。
 - 写操作带 idempotency key，避免重复创建业务记录。
 - PostgreSQL `FOR UPDATE SKIP LOCKED` 领取任务，支持多 Worker 并发。
@@ -89,7 +90,7 @@ python -m pytest -q
 当前本地回归：
 
 ```text
-53 passed, 1 skipped
+54 passed, 1 skipped
 ```
 
 ## 文档
