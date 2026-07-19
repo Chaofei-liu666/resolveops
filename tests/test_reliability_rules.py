@@ -568,13 +568,60 @@ def test_expired_approval_blocks_executor_before_write_invocation():
         execute(db, case, approval.id)
         db.commit()
 
+        refreshed_case = db.get(Case, case.id)
+        refreshed_approval = db.get(Approval, approval.id)
         invocations = db.scalars(select(Invocation).where(Invocation.case_id == case.id)).all()
         events = db.scalars(select(Event).where(Event.case_id == case.id)).all()
 
-    assert case.status == 'manual_review'
-    assert approval.status == 'expired'
+    assert refreshed_case.status == 'manual_review'
+    assert refreshed_approval.status == 'expired'
     assert invocations == []
     assert [event.kind for event in events] == ['approval_expired']
+
+
+def test_revoked_approval_blocks_executor_before_write_invocation():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    action = normalize_proposal({
+        'action_type': 'create_price_review_ticket',
+        'input': {
+            'sku': 'SKU-A12',
+            'order_rate': 5000,
+            'reference_rate': 4500,
+            'difference': 500,
+            'reason': 'contract mismatch',
+        },
+        'risk': 'medium',
+    }, 'Price mismatch must be reviewed before changing the sales order.')
+    plan = {'actions': [action], 'rationale': 'test'}
+
+    with Session(engine) as db:
+        case = Case(id='case-revoked', tenant_id='demo', event_type='price_mismatch', order_id='SO-1', status='approved', plan_version=1, plan=plan)
+        approval = Approval(
+            case_id=case.id,
+            plan_version=case.plan_version,
+            action_hash=digest(action, case.plan_version),
+            action=action,
+            status='revoked',
+            required_roles=['sales_manager'],
+            approved_roles=['sales_manager'],
+            revoked_at=datetime.now(UTC),
+            revoked_by='sales-manager',
+            revocation_reason='new customer constraint',
+        )
+        db.add_all([case, approval])
+        db.commit()
+
+        execute(db, case, approval.id)
+        db.commit()
+
+        refreshed_case = db.get(Case, case.id)
+        invocations = db.scalars(select(Invocation).where(Invocation.case_id == case.id)).all()
+        events = db.scalars(select(Event).where(Event.case_id == case.id)).all()
+
+    assert refreshed_case.status == 'manual_review'
+    assert invocations == []
+    assert [event.kind for event in events] == ['approval_revoked']
 
 
 def test_case_context_sanitizes_foreign_scheduler_payload_scope_before_llm():

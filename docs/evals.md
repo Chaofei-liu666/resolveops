@@ -8,7 +8,7 @@ Run on every change:
 python -m pytest -q
 ```
 
-Current local regression:
+Last full local regression before the approval-lifecycle patch:
 
 ```text
 56 passed, 1 skipped
@@ -46,6 +46,7 @@ Computed signals:
 | Tool Failure Rate | failed `ToolResult` / total read-tool observations |
 | Verification Pass Rate | `tool_invocations` plus `verification_passed` / `verification_failed` events |
 | Approval Waiting Cases | pending `approvals` |
+| Approval Expired / Revoked Cases | expired or revoked approvals plus `approval_expired` / `approval_revoked` events |
 | Recovery Count | `replan_requested`, `task_requeued`, `manual_review_required` events |
 | Policy Denial Count | `policy_denied` events |
 | Evidence Grounding Pass Count | `evidence_grounding_passed` events |
@@ -88,6 +89,8 @@ Run in the isolated ERPNext test tenant.
 | FI-06 | One role approves a dual-role request | Approval remains pending; no execute Task |
 | FI-07 | Action parameters change after approval | Action hash mismatch; execution denied |
 | FI-08 | Source inventory changes after one action in a multi-action plan is approved | Approved action is invalidated before write; no Invocation; Agent replans the whole Case |
+| FI-09 | Approval expires before execution | Case enters `manual_review`; approval becomes `expired`; no Invocation |
+| FI-10 | Approval is revoked before execution | Case enters `manual_review`; approval becomes `revoked`; no Invocation |
 | AI-01 | Customer does not allow partial delivery | Agent may still propose internal split fulfillment only if all actions complete before delivery date; it must not justify customer partial delivery |
 
 Record each integration run with: Case ID, injected condition, event trail, business document ID if any, and final Case state.
@@ -104,6 +107,8 @@ Record each integration run with: Case ID, injected condition, event trail, busi
 | FI-06 | `b2cb3317-b88e-43d2-8e70-6f05d26009c1` | The first approval emitted `approval_partial` and left the action blocked. Only the second required approval created the execute Task. |
 | FI-07 | `fi07-0c2257f9-aa9c-44cf-a8b8-502cdda62352` | An approval bound to transfer quantity 30 was executed against a tampered current plan with quantity 31. The action-hash check stopped execution, placed the Case in `manual_review`, and created zero write invocations. |
 | FI-08 | `b7f61c90-b9d7-4aa0-9252-7db66c24c8d8` | A multi-action plan was approved, then source inventory was changed before write. The Worker re-read source inventory, invalidated the approval, created no ERP Invocation, and queued reinvestigation. |
+| FI-09 | `approval-expiry-smoke-*` | A temporary approved action with an expired `expires_at` was sent to the Worker execute boundary. The Worker emitted `approval_expired`, set the Case to `manual_review`, changed approval status to `expired`, and created zero invocations. Temporary data was cleaned up after the smoke run. |
+| FI-10 | `approval-revoke-smoke-*` | A temporary pending approval was revoked through `POST /v1/approvals/{approval_id}/revoke`. The API returned `revoked`, set the Case to `manual_review`, emitted `approval_revoked`, and left write invocation count at zero. Temporary data was cleaned up after the smoke run. |
 | AI-01 | `89fdc843-68ca-4c19-b3a3-e6604cc1944f` | Customer `allows_partial_delivery=false` was read from ERPNext. The Agent still proposed internal transfer + purchase because both actions complete before the delivery date, and its rationale did not rely on customer partial delivery. No write was approved during this evaluation run. |
 | ENV-01 | `4ac6e175-88cc-4e97-82db-f602da4fec66` | Real webhook regression was triggered while ERPNext was unavailable from the Worker container. The Agent preserved the failure as `ToolResult(status=failed, retryable=true, evidence_usable=false)`, produced no Action Plan, created no approval, and stopped at `manual_review`. |
 | E2E-01 | `4fb78244-ad8b-4690-bd7f-226f9c782833` | Real `inventory_shortage` run after restoring ERPNext services and preparing test stock with `MAT-RECO-2026-00004`. The Agent gathered read-tool evidence, proposed `transfer_stock`, required warehouse + sales approvals for the high-value order, created verified draft transfer `MAT-STE-2026-00007`, closed the Case as `resolved`, and emitted `lessons_recorded` with three Verified Case Lessons. |

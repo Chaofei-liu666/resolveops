@@ -89,7 +89,7 @@ http://localhost:8090
 python -m pytest -q
 ```
 
-当前本地回归：
+上一次完整本地回归：
 
 ```text
 56 passed, 1 skipped
