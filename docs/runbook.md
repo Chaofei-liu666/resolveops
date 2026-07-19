@@ -180,6 +180,8 @@ production
 
 `local` 允许本地 operator seed 和缺失 LLM，但会在 runtime status 中给 warning。`staging` / `production` 会把占位密钥、缺失 LLM 配置和 `OPERATOR_SEED_KEYS` 判定为配置错误，并使 `/readyz` 返回 degraded。
 
+更完整的上线前检查、环境边界、回滚和应急停止流程见 [部署与上线安全清单](deployment.md)。
+
 ## 9. 常见问题
 
 ### PowerShell profile.ps1 报错
