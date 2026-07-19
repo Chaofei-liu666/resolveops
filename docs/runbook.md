@@ -164,3 +164,23 @@ Conclusion: Agent 安全停止，没有生成写计划，没有 ERP 写入
 
 这是有效的安全行为：外部系统不可达时，Agent 不应该编造事实或继续执行。
 
+2026-07-19 服务恢复后真实闭环：
+
+```text
+Stock setup: MAT-RECO-2026-00004
+Case: 4fb78244-ad8b-4690-bd7f-226f9c782833
+Order: SAL-ORD-2026-00002
+Action: transfer_stock
+Approval: warehouse_manager + sales_manager
+ERP draft: MAT-STE-2026-00007
+Result: resolved
+Memory: lessons_recorded, 3 lessons
+```
+
+随后触发记忆检查：
+
+```text
+Case: fe692874-cada-4b87-a0a7-ac2f0ecb6dda
+Result: waiting_approval
+Memory: CaseContextBuilder returned 1 same-tenant Verified Case Lesson from the previous resolved Case
+```
