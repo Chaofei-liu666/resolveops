@@ -13,6 +13,7 @@ from .models import Approval, Base, Case, Invocation, Task
 from .tools import BusinessReadTools
 from .agent import InvestigationAgent
 from .actions import action_types_for_case, definition_for, normalize_plan, normalize_proposal
+from .approval_state import approval_expiry, approval_is_expired
 from .evidence import validate_plan_grounding
 from .executors import executor_for
 from .memory import record_verified_lessons
@@ -71,8 +72,8 @@ def investigate(db, c, task_context=None):
     c.plan_version+=1; source=choices[0][0]
     action=normalize_proposal({'action_type':'transfer_stock','arguments':{'source':source,'target':target,'sku':item['item_code'],'quantity':shortage},'risk':'medium'},'Deterministic pilot fallback selected the first safe alternative warehouse.')
     c.plan=action; c.status='waiting_approval'
-    a=Approval(case_id=c.id,plan_version=c.plan_version,action=action,action_hash=digest(action,c.plan_version),required_roles=['warehouse_manager']); db.add(a); db.flush()
-    emit(db,c.id,'approval_requested','Plan-bound approval created.',{'approval_id':a.id,'action_hash':a.action_hash})
+    a=Approval(case_id=c.id,plan_version=c.plan_version,action=action,action_hash=digest(action,c.plan_version),required_roles=['warehouse_manager'],expires_at=approval_expiry(settings.approval_ttl_seconds)); db.add(a); db.flush()
+    emit(db,c.id,'approval_requested','Plan-bound approval created.',{'approval_id':a.id,'action_hash':a.action_hash,'expires_at':a.expires_at.isoformat() if a.expires_at else None})
 
 def investigate_with_agent(db, c, task_context):
     observations=[]
@@ -124,7 +125,7 @@ def investigate_with_agent(db, c, task_context):
             c.plan=plan; c.status='manual_review'; emit(db,c.id,'policy_denied','Policy Engine denied an action in the recommended plan.',{'action_id':action['action_id'],**decision}); return
     c.plan_version+=1; c.plan=plan; c.status='waiting_approval'; approvals=[]
     for action in plan['actions']:
-        a=Approval(case_id=c.id,plan_version=c.plan_version,action=action,action_hash=digest(action,c.plan_version),required_roles=action['policy']['required_roles']); db.add(a); db.flush(); approvals.append({'approval_id':a.id,'action_id':action['action_id'],'action_type':action['action_type']})
+        a=Approval(case_id=c.id,plan_version=c.plan_version,action=action,action_hash=digest(action,c.plan_version),required_roles=action['policy']['required_roles'],expires_at=approval_expiry(settings.approval_ttl_seconds)); db.add(a); db.flush(); approvals.append({'approval_id':a.id,'action_id':action['action_id'],'action_type':action['action_type'],'expires_at':a.expires_at.isoformat() if a.expires_at else None})
     emit(db,c.id,'agent_plan_created','Agent produced a multi-action plan from observed tool evidence; policy created bound approvals.',{'approvals':approvals,'alternatives':conclusion.get('alternatives',[])})
 def execute(db,c,approval_id):
     a=db.get(Approval,approval_id)
@@ -132,6 +133,15 @@ def execute(db,c,approval_id):
     actions=plan.get('actions') if isinstance(plan,dict) else None
     actions=actions if isinstance(actions,list) else [plan]
     action=next((item for item in actions if item.get('action_id')==a.action.get('action_id')),None) if a else None
+    if a and a.status=='revoked':
+        c.status='manual_review'
+        emit(db,c.id,'approval_revoked','Approval was revoked before execution; automation stopped.',{'approval_id':a.id,'revoked_by':a.revoked_by,'revoked_at':a.revoked_at.isoformat() if a.revoked_at else None,'reason':a.revocation_reason})
+        return
+    if a and approval_is_expired(a):
+        a.status='expired'
+        c.status='manual_review'
+        emit(db,c.id,'approval_expired','Approval expired before execution; automation stopped.',{'approval_id':a.id,'expires_at':a.expires_at.isoformat() if a.expires_at else None})
+        return
     if not a or not action or a.status!='approved' or a.action_hash!=digest(action,c.plan_version): c.status='manual_review'; emit(db,c.id,'handoff','Approval no longer matches its plan action.'); return
     definition=definition_for(action.get('action_type'))
     if not definition or not definition.executable:

@@ -32,7 +32,7 @@ ERP 异常事件
 - 按 `event_type` 动态暴露 write Action schemas，避免 planner 提出不属于当前业务异常的行动。
 - 写操作也是工具，但只能作为 Action Plan 被提出，由 Policy、Approval、Executor 控制执行。
 - Operator 身份和角色从 `operators` 表按 API key hash 查询，审批不信任请求头自报角色。
-- 审批绑定 `case_id + plan_version + action_hash`，防止参数篡改和审批重放。
+- 审批绑定 `case_id + plan_version + action_hash`，防止参数篡改和审批重放；审批带 `expires_at`，支持撤销，Worker 执行前会再次校验审批生命周期。
 - 写操作带 idempotency key，避免重复创建业务记录。
 - PostgreSQL `FOR UPDATE SKIP LOCKED` 领取任务，支持多 Worker 并发。
 - PostgreSQL advisory transaction lock 控制共享库存写入。
@@ -62,6 +62,7 @@ OPERATOR_API_KEY
 LLM_BASE_URL
 LLM_API_KEY
 LLM_MODEL
+APPROVAL_TTL_SECONDS
 ```
 
 启动服务：

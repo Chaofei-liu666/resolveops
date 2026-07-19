@@ -1,5 +1,5 @@
 import os
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 os.environ.setdefault('ERPNEXT_BASE_URL', 'https://erp.invalid')
 os.environ.setdefault('ERPNEXT_API_KEY', 'test')
@@ -15,7 +15,7 @@ from production.agent import InvestigationAgent
 from production.evidence import validate_plan_grounding
 from production.executors import executor_for
 from fastapi import HTTPException
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from production.context import CaseContextBuilder, build_case_context, validate_case_context_isolation
@@ -29,6 +29,7 @@ from production.policy import action_policy, allow_read_tool
 from production.tool_result import ToolResult
 from production.tool_scheduler import ReadToolCall, ReadToolScheduler, tool_signature
 from production.tools import BusinessReadTools, ToolSpec, summarize_customer_profile
+from production.worker import digest, execute
 
 
 def future_required_by(days: int = 10) -> str:
@@ -531,6 +532,49 @@ def test_case_context_builder_isolates_concurrent_case_state():
     assert all(ref['case_id'] == 'case-a' for ref in context['invocation_refs'])
     assert all(ref['case_id'] == 'case-a' for ref in context['task_refs'])
     assert validate_case_context_isolation(context)['allowed'] is True
+
+
+def test_expired_approval_blocks_executor_before_write_invocation():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    action = normalize_proposal({
+        'action_type': 'create_price_review_ticket',
+        'input': {
+            'sku': 'SKU-A12',
+            'order_rate': 5000,
+            'reference_rate': 4500,
+            'difference': 500,
+            'reason': 'contract mismatch',
+        },
+        'risk': 'medium',
+    }, 'Price mismatch must be reviewed before changing the sales order.')
+    plan = {'actions': [action], 'rationale': 'test'}
+
+    with Session(engine) as db:
+        case = Case(id='case-expired', tenant_id='demo', event_type='price_mismatch', order_id='SO-1', status='approved', plan_version=1, plan=plan)
+        approval = Approval(
+            case_id=case.id,
+            plan_version=case.plan_version,
+            action_hash=digest(action, case.plan_version),
+            action=action,
+            status='approved',
+            required_roles=['sales_manager'],
+            approved_roles=['sales_manager'],
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+        db.add_all([case, approval])
+        db.commit()
+
+        execute(db, case, approval.id)
+        db.commit()
+
+        invocations = db.scalars(select(Invocation).where(Invocation.case_id == case.id)).all()
+        events = db.scalars(select(Event).where(Event.case_id == case.id)).all()
+
+    assert case.status == 'manual_review'
+    assert approval.status == 'expired'
+    assert invocations == []
+    assert [event.kind for event in events] == ['approval_expired']
 
 
 def test_case_context_sanitizes_foreign_scheduler_payload_scope_before_llm():

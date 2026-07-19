@@ -38,6 +38,10 @@ class Approval(Base):
     status: Mapped[str]=mapped_column(String(20), default='pending'); approver: Mapped[str|None]=mapped_column(String, nullable=True)
     required_roles: Mapped[list]=mapped_column(JSON, default=list)
     approved_roles: Mapped[list]=mapped_column(JSON, default=list)
+    expires_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by: Mapped[str|None]=mapped_column(String(140), nullable=True)
+    revocation_reason: Mapped[str|None]=mapped_column(Text, nullable=True)
 
 class Task(Base):
     __tablename__='tasks'

@@ -83,6 +83,7 @@ X-ResolveOps-Signature: sha256=<HMAC_SHA256(body, WEBHOOK_SECRET)>
 
 ```text
 POST /v1/approvals/{approval_id}/approve
+POST /v1/approvals/{approval_id}/revoke
 ```
 
 需要 Header：
@@ -100,6 +101,8 @@ subject:role:key;subject:role:key
 ```
 
 高金额或 VIP Case 可能需要多个数据库角色分别审批。
+
+审批不是永久授权。每条审批会带 `expires_at`，默认由 `APPROVAL_TTL_SECONDS` 控制；过期审批不能继续批准，已经批准但尚未执行的审批在 Worker 执行前也会被重新校验。需要人工停止时，调用 revoke 接口会把 Case 转入 `manual_review`，即使队列里还残留 execute task，Worker 也会在执行入口阻断写操作。
 
 ## 6. 查看 Case
 

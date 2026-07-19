@@ -13,6 +13,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import settings
+from .approval_state import approval_is_expired, utc_now
 from .migrations import apply_migrations
 from .models import AuditLog, Base, Approval, Case, Event, Invocation, LogisticsLane, Operator, Task
 
@@ -26,6 +27,9 @@ class LogisticsLaneIn(BaseModel):
     cost_per_unit: float = Field(ge=0)
     currency: str = Field(default='CNY', min_length=1, max_length=12)
     active: bool = True
+
+class ApprovalRevokeIn(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
 
 @dataclass(frozen=True)
 class OperatorIdentity:
@@ -100,7 +104,7 @@ def require_role(identity: OperatorIdentity, *roles: str) -> None:
     if identity.role not in roles: raise HTTPException(403, f'operator role must be one of: {", ".join(roles)}')
 def event_out(e: Event): return {'id':e.id,'kind':e.kind,'message':e.message,'data':e.data,'created_at':e.created_at.isoformat() if e.created_at else None}
 def approval_out(a: Approval):
-    return {'id':a.id,'case_id':a.case_id,'plan_version':a.plan_version,'status':a.status,'action_hash':a.action_hash,'action':a.action,'required_roles':a.required_roles,'approved_roles':a.approved_roles,'approver':a.approver}
+    return {'id':a.id,'case_id':a.case_id,'plan_version':a.plan_version,'status':a.status,'action_hash':a.action_hash,'action':a.action,'required_roles':a.required_roles,'approved_roles':a.approved_roles,'approver':a.approver,'expires_at':a.expires_at.isoformat() if a.expires_at else None,'revoked_at':a.revoked_at.isoformat() if a.revoked_at else None,'revoked_by':a.revoked_by,'revocation_reason':a.revocation_reason}
 def invocation_out(i: Invocation):
     return {'id':i.id,'case_id':i.case_id,'tool':i.tool,'status':i.status,'external_id':i.external_id,'idempotency_key':i.idempotency_key}
 def task_out(t: Task):
@@ -127,13 +131,13 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
     verification_passes=sum(1 for kind in kinds if kind=='verification_passed')
     verification_failures=sum(1 for kind in kinds if kind=='verification_failed')
     recovery_events=[kind for kind in kinds if kind in {'replan_requested','task_requeued','manual_review_required'}]
-    blocked_events=[kind for kind in kinds if kind in {'context_isolation_failed','evidence_grounding_failed','policy_denied','handoff','worker_failure','verification_failed'}]
+    blocked_events=[kind for kind in kinds if kind in {'context_isolation_failed','evidence_grounding_failed','policy_denied','handoff','worker_failure','verification_failed','approval_expired','approval_revoked'}]
     stage_sequence=[
         kind for kind in kinds
         if kind in {
             'case_created','context_built','context_isolation_sanitized','context_isolation_failed',
             'tool_scheduled','tool_observation','evidence_grounding_passed','evidence_grounding_failed',
-            'agent_plan_created','approval_requested','approval_partial','approval_granted',
+            'agent_plan_created','approval_requested','approval_partial','approval_granted','approval_expired','approval_revoked',
             'execution_started','replan_requested','verification_passed','verification_failed',
             'lessons_recorded','handoff','manual_review_required','worker_failure',
         }
@@ -153,6 +157,8 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'tool_scheduler_sources':scheduler_sources,
         'approval_count':len(approvals),
         'pending_approval_count':sum(1 for approval in approvals if approval.status=='pending'),
+        'expired_approval_count':sum(1 for approval in approvals if approval.status=='expired'),
+        'revoked_approval_count':sum(1 for approval in approvals if approval.status=='revoked'),
         'write_invocation_count':write_count,
         'verification_pass_count':verification_passes,
         'verification_failed_count':verification_failures,
@@ -166,6 +172,8 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'has_context_isolation_failure':'context_isolation_failed' in kinds,
         'has_context_isolation_sanitized':'context_isolation_sanitized' in kinds,
         'has_replan':'replan_requested' in kinds,
+        'has_approval_expired':'approval_expired' in kinds,
+        'has_approval_revoked':'approval_revoked' in kinds,
         'has_manual_handoff':any(kind in {'handoff','manual_review_required'} for kind in kinds),
         'stage_sequence':stage_sequence,
         'event_kinds':kinds,
@@ -187,6 +195,8 @@ def eval_summary_out(rows):
         'tool_failure_rate':tool_failures/tool_calls if tool_calls else 0,
         'tool_failures':tool_failures,
         'approval_waiting_cases':sum(1 for row in rows if row.get('pending_approval_count',0)>0),
+        'approval_expired_cases':sum(1 for row in rows if row.get('expired_approval_count',0)>0 or row.get('has_approval_expired')),
+        'approval_revoked_cases':sum(1 for row in rows if row.get('revoked_approval_count',0)>0 or row.get('has_approval_revoked')),
         'cases_with_writes':sum(1 for row in rows if row['write_invocation_count']>0),
         'verified_write_cases':verified,
         'verification_pass_rate':verified/sum(1 for row in rows if row['write_invocation_count']>0) if any(row['write_invocation_count']>0 for row in rows) else 1,
@@ -322,17 +332,48 @@ def case_detail(case_id:str, x_operator_key:str|None=Header(default=None), x_ope
 def approve(approval_id:str, x_operator_key:str|None=Header(default=None, alias='X-Operator-Key'), x_operator:str|None=Header(default=None, alias='X-Operator'), x_operator_role:str|None=Header(default=None, alias='X-Operator-Role')):
     with Session(engine) as db:
         identity=operator_identity_from_db(db,x_operator_key)
-        a=db.get(Approval,approval_id)
-        if not a or a.status!='pending': raise HTTPException(409,'approval unavailable')
+        a=db.scalar(select(Approval).where(Approval.id==approval_id).with_for_update())
+        if not a: raise HTTPException(404,'approval not found')
+        case=db.get(Case,a.case_id)
+        if a.status!='pending': raise HTTPException(409,'approval unavailable')
+        if approval_is_expired(a):
+            a.status='expired'
+            if case: case.status='manual_review'
+            data={'approval_id':a.id,'expires_at':a.expires_at.isoformat() if a.expires_at else None,'action_hash':a.action_hash,'plan_version':a.plan_version}
+            emit(db,a.case_id,'approval_expired','Approval expired before all required roles approved it.',data)
+            audit(db,identity,'approval_expired','approval',a.id,data,case_id=a.case_id)
+            db.commit()
+            raise HTTPException(409,'approval expired')
         role=identity.role; required=set(a.required_roles or ['warehouse_manager'])
         if role not in required:
             audit(db,identity,'approval_rejected','approval',a.id,{'reason':'role_not_required','required_roles':sorted(required),'action_hash':a.action_hash,'plan_version':a.plan_version,'action_type':a.action.get('action_type')},case_id=a.case_id)
             db.commit()
             raise HTTPException(403,'operator role is not required for this approval')
-        approved=set(a.approved_roles or []); approved.add(role); a.approved_roles=sorted(approved); a.approver=identity.subject; case=db.get(Case,a.case_id)
+        approved=set(a.approved_roles or []); approved.add(role); a.approved_roles=sorted(approved); a.approver=identity.subject
         audit_data={'approval_id':a.id,'role':role,'approved_roles':a.approved_roles,'required_roles':sorted(required),'action_hash':a.action_hash,'plan_version':a.plan_version,'action_type':a.action.get('action_type')}
         if required <= approved:
             a.status='approved'; case.status='approved'; db.add(Task(case_id=case.id,kind='execute',payload={'approval_id':a.id})); emit(db,case.id,'approval_granted','All required roles approved the bound action.',audit_data); audit(db,identity,'approval_granted','approval',a.id,audit_data,case_id=case.id); result='queued'
         else:
             audit_data['remaining_roles']=sorted(required-approved); emit(db,case.id,'approval_partial','One required role approved; action remains blocked.',audit_data); audit(db,identity,'approval_partial','approval',a.id,audit_data,case_id=case.id); result='pending'
         db.commit(); return {'status':result,'approved_roles':a.approved_roles,'required_roles':sorted(required)}
+
+@app.post('/v1/approvals/{approval_id}/revoke')
+def revoke_approval(approval_id:str, payload: ApprovalRevokeIn|None=None, x_operator_key:str|None=Header(default=None, alias='X-Operator-Key'), x_operator:str|None=Header(default=None, alias='X-Operator'), x_operator_role:str|None=Header(default=None, alias='X-Operator-Role')):
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        a=db.scalar(select(Approval).where(Approval.id==approval_id).with_for_update())
+        if not a: raise HTTPException(404,'approval not found')
+        if a.status in {'consumed','expired','revoked'}: raise HTTPException(409,'approval cannot be revoked')
+        required=set(a.required_roles or ['warehouse_manager'])
+        if identity.role!='ops_admin' and identity.role not in required:
+            audit(db,identity,'approval_revoke_rejected','approval',a.id,{'reason':'role_not_allowed','required_roles':sorted(required),'status':a.status},case_id=a.case_id)
+            db.commit()
+            raise HTTPException(403,'operator role cannot revoke this approval')
+        case=db.get(Case,a.case_id)
+        a.status='revoked'; a.revoked_at=utc_now(); a.revoked_by=identity.subject; a.revocation_reason=(payload.reason if payload else None)
+        if case: case.status='manual_review'
+        data={'approval_id':a.id,'revoked_by':a.revoked_by,'revoked_at':a.revoked_at.isoformat(),'reason':a.revocation_reason,'action_hash':a.action_hash,'plan_version':a.plan_version,'previous_approved_roles':a.approved_roles}
+        emit(db,a.case_id,'approval_revoked','Approval was revoked; automatic execution is stopped until a new plan is approved.',data)
+        audit(db,identity,'approval_revoked','approval',a.id,data,case_id=a.case_id)
+        db.commit()
+        return {'status':'revoked','approval':approval_out(a)}

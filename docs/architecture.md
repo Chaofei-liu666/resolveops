@@ -250,9 +250,10 @@ plan_version
 action_hash
 action input
 required_roles
+expires_at
 ```
 
-执行前重新校验 action_hash，防止审批被复用或参数被篡改。
+执行前重新校验 action_hash、审批状态和 expires_at，防止审批被复用、参数被篡改或旧审批长期有效。审批也可以被撤销；撤销后 Case 进入 manual_review，Worker 不会继续执行残留的 execute task。
 
 ## Executor / Verification
 
