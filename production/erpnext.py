@@ -1,6 +1,7 @@
 """Narrow, API-first ERPNext boundary. No browser automation or DB access."""
 from __future__ import annotations
 import json
+from datetime import date, datetime
 from typing import Any
 import httpx
 
@@ -14,6 +15,17 @@ class ERPNextAdapter:
         response = httpx.get(self.base_url + path, headers=self.headers, params=params, timeout=15)
         response.raise_for_status()
         return response.json()['data']
+
+    def _post_resource(self, doctype: str, payload: dict[str, Any], timeout: int = 20) -> dict:
+        response = httpx.post(self.base_url + f'/api/resource/{doctype}', headers=self.headers, json=payload, timeout=timeout)
+        response.raise_for_status()
+        return response.json()['data']
+
+    def _submit(self, doctype: str, name: str) -> dict:
+        doc = self._get(f'/api/resource/{doctype}/{name}')
+        response = httpx.post(self.base_url + '/api/method/frappe.client.submit', headers=self.headers, json={'doc': doc}, timeout=20)
+        response.raise_for_status()
+        return response.json().get('message') or response.json()
 
     def sales_order(self, name: str) -> dict:
         return self._get(f'/api/resource/Sales Order/{name}')
@@ -29,9 +41,7 @@ class ERPNextAdapter:
         payload = {'stock_entry_type': 'Material Transfer', 'purpose': 'Material Transfer',
                    'custom_resolveops_idempotency_key': idempotency_key,
                    'items': [{'s_warehouse': source, 't_warehouse': target, 'item_code': item_code, 'qty': qty}]}
-        response = httpx.post(self.base_url + '/api/resource/Stock Entry', headers=self.headers, json=payload, timeout=20)
-        response.raise_for_status()
-        return response.json()['data']['name']
+        return self._post_resource('Stock Entry', payload)['name']
 
     def stock_entry(self, name: str) -> dict:
         return self._get(f'/api/resource/Stock Entry/{name}')
@@ -46,9 +56,7 @@ class ERPNextAdapter:
         }
         if company:
             payload['company'] = company
-        response = httpx.post(self.base_url + '/api/resource/Material Request', headers=self.headers, json=payload, timeout=20)
-        response.raise_for_status()
-        return response.json()['data']['name']
+        return self._post_resource('Material Request', payload)['name']
 
     def material_request(self, name: str) -> dict:
         return self._get(f'/api/resource/Material Request/{name}')
@@ -112,6 +120,43 @@ class ERPNextAdapter:
                         'status': header.get('status'),
                     })
         return inbound
+
+    def set_stock_balance_for_fault_injection(
+        self,
+        *,
+        item_code: str,
+        warehouse: str,
+        qty: float,
+        company: str,
+        difference_account: str,
+        valuation_rate: float,
+    ) -> dict:
+        """Change ERPNext sandbox stock through official REST APIs.
+
+        This helper creates and submits a Stock Reconciliation, so ERPNext
+        remains the system of record for the changed business state. It should
+        only be called through ResolveOps' fault-injection safety gate.
+        """
+        payload = {
+            'purpose': 'Stock Reconciliation',
+            'company': company,
+            'posting_date': date.today().isoformat(),
+            'posting_time': datetime.now().strftime('%H:%M:%S'),
+            'difference_account': difference_account,
+            'items': [{
+                'item_code': item_code,
+                'warehouse': warehouse,
+                'qty': qty,
+                'valuation_rate': valuation_rate,
+            }],
+        }
+        created = self._post_resource('Stock Reconciliation', payload)
+        submitted = self._submit('Stock Reconciliation', created['name'])
+        return {
+            'stock_reconciliation': created['name'],
+            'submitted': True,
+            'docstatus': submitted.get('docstatus') if isinstance(submitted, dict) else None,
+        }
 
 
 # Backward-compatible alias. The Agent tool layer should depend on

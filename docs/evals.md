@@ -101,6 +101,41 @@ Run in the isolated ERPNext test tenant.
 
 Record each integration run with: Case ID, injected condition, event trail, business document ID if any, and final Case state.
 
+### CLI/API-driven business-state fault injection
+
+Business-state faults do not require opening the ERPNext web UI. A CLI can call ResolveOps, and ResolveOps then changes the ERPNext sandbox through `ERPNextAdapter` and ERPNext REST APIs:
+
+```text
+resolveops fi run inventory_changed_before_execution
+→ POST /v1/fault-injections/run
+→ ResolveOps permission / environment gate
+→ ERPNextAdapter.set_stock_balance_for_fault_injection(...)
+→ ERPNext Stock Reconciliation submitted through REST API
+→ Case event `fault_injected` + audit log
+```
+
+This keeps ERPNext as the system of record while still making the fault reproducible from a terminal. The CLI must not call ERPNext directly with raw ERP credentials; otherwise it bypasses ResolveOps audit, role checks and the production safety gate.
+
+Example payload:
+
+```json
+{
+  "fault_type": "inventory_changed_before_execution",
+  "case_id": "CASE-xxx",
+  "item_code": "SKU-A12",
+  "warehouse": "重庆仓 - ROPS",
+  "new_qty": 0,
+  "reason": "simulate stock consumed before approval execution"
+}
+```
+
+Safety boundary:
+
+- forbidden when `APP_ENV=production`;
+- disabled unless `ENABLE_FAULT_INJECTION=true`;
+- requires `ops_admin` or `config_admin`;
+- records an audit log and, when `case_id` is provided, a Case event.
+
 ## Executed runs
 
 | ID | Case | Result |

@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     agent_read_tool_parallelism: int = 4
     agent_max_replans: int = 2
     approval_ttl_seconds: int = 3600
+    enable_fault_injection: bool = False
+    erpnext_company: str | None = None
+    erpnext_stock_difference_account: str | None = None
+    erpnext_default_valuation_rate: float = 100
 
 
 settings = Settings()

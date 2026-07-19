@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import hashlib, hmac, json
 from pathlib import Path
+from typing import Literal
 from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -18,6 +19,7 @@ from .migrations import apply_migrations
 from .models import AuditLog, Base, Approval, Case, Event, Invocation, LogisticsLane, Operator, Task
 from .runtime_status import build_runtime_status
 from .tool_trace import build_tool_trace
+from .erpnext import ERPNextAdapter
 
 SUPPORTED_EVENTS={'inventory_shortage','price_mismatch','delivery_delay','supplier_delay'}
 
@@ -31,6 +33,17 @@ class LogisticsLaneIn(BaseModel):
     active: bool = True
 
 class ApprovalRevokeIn(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+class FaultInjectionRunIn(BaseModel):
+    fault_type: Literal['inventory_changed_before_execution']
+    case_id: str | None = Field(default=None, max_length=120)
+    item_code: str = Field(min_length=1, max_length=140)
+    warehouse: str = Field(min_length=1, max_length=140)
+    new_qty: float = Field(ge=0)
+    company: str | None = Field(default=None, min_length=1, max_length=140)
+    difference_account: str | None = Field(default=None, min_length=1, max_length=140)
+    valuation_rate: float | None = Field(default=None, ge=0)
     reason: str | None = Field(default=None, max_length=500)
 
 @dataclass(frozen=True)
@@ -104,6 +117,12 @@ def operator_identity(key: str|None, subject: str|None=None, role: str|None=None
     return OperatorIdentity(subject=subject or 'authenticated-operator', role=role or 'operator')
 def require_role(identity: OperatorIdentity, *roles: str) -> None:
     if identity.role not in roles: raise HTTPException(403, f'operator role must be one of: {", ".join(roles)}')
+def require_fault_injection_enabled() -> None:
+    env=(settings.app_env or 'local').strip().lower()
+    if env == 'production':
+        raise HTTPException(403, 'fault injection is forbidden in production')
+    if not settings.enable_fault_injection:
+        raise HTTPException(403, 'fault injection is disabled; set ENABLE_FAULT_INJECTION=true in local/test/staging')
 def event_out(e: Event): return {'id':e.id,'kind':e.kind,'message':e.message,'data':e.data,'created_at':e.created_at.isoformat() if e.created_at else None}
 def approval_out(a: Approval):
     return {'id':a.id,'case_id':a.case_id,'plan_version':a.plan_version,'status':a.status,'action_hash':a.action_hash,'action':a.action,'required_roles':a.required_roles,'approved_roles':a.approved_roles,'approver':a.approver,'expires_at':a.expires_at.isoformat() if a.expires_at else None,'revoked_at':a.revoked_at.isoformat() if a.revoked_at else None,'revoked_by':a.revoked_by,'revocation_reason':a.revocation_reason}
@@ -336,6 +355,68 @@ def eval_summary(x_operator_key:str|None=Header(default=None), x_operator:str|No
             tasks=db.scalars(select(Task).where(Task.case_id==case.id)).all()
             rows.append(eval_case_out(case,events,approvals,invocations,tasks))
         return eval_summary_out(rows)
+
+@app.get('/v1/fault-injections')
+def fault_injection_catalog(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        require_role(identity,'ops_admin','config_admin')
+        return {
+            'enabled': bool(settings.enable_fault_injection),
+            'app_env': settings.app_env,
+            'faults': [{
+                'fault_type': 'inventory_changed_before_execution',
+                'description': 'Use ERPNext Stock Reconciliation through ResolveOps to change sandbox stock before an approved write executes.',
+                'required_fields': ['item_code', 'warehouse', 'new_qty'],
+                'optional_fields': ['case_id', 'company', 'difference_account', 'valuation_rate', 'reason'],
+                'safety': 'Forbidden in production; requires ENABLE_FAULT_INJECTION=true and ops_admin/config_admin.',
+            }],
+        }
+
+@app.post('/v1/fault-injections/run')
+def run_fault_injection(payload: FaultInjectionRunIn, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
+    require_fault_injection_enabled()
+    company=payload.company or settings.erpnext_company
+    difference_account=payload.difference_account or settings.erpnext_stock_difference_account
+    valuation_rate=payload.valuation_rate if payload.valuation_rate is not None else settings.erpnext_default_valuation_rate
+    if not company:
+        raise HTTPException(422, 'company is required for ERPNext Stock Reconciliation')
+    if not difference_account:
+        raise HTTPException(422, 'difference_account is required for ERPNext Stock Reconciliation')
+    erp=ERPNextAdapter(settings.erpnext_base_url,settings.erpnext_api_key,settings.erpnext_api_secret)
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        require_role(identity,'ops_admin','config_admin')
+        case=None
+        if payload.case_id:
+            case=db.get(Case,payload.case_id)
+            if not case:
+                raise HTTPException(404,'case not found')
+        before=erp.stock(payload.item_code,payload.warehouse)
+        result=erp.set_stock_balance_for_fault_injection(
+            item_code=payload.item_code,
+            warehouse=payload.warehouse,
+            qty=payload.new_qty,
+            company=company,
+            difference_account=difference_account,
+            valuation_rate=valuation_rate,
+        )
+        after=erp.stock(payload.item_code,payload.warehouse)
+        data={
+            'fault_type': payload.fault_type,
+            'item_code': payload.item_code,
+            'warehouse': payload.warehouse,
+            'new_qty': payload.new_qty,
+            'before': before,
+            'after': after,
+            'erpnext_result': result,
+            'reason': payload.reason,
+        }
+        if case:
+            emit(db,case.id,'fault_injected','Fault injection changed ERPNext sandbox business state through ResolveOps.',data)
+        audit(db,identity,'fault_injection_run','fault_injection',payload.fault_type,data,case_id=case.id if case else None)
+        db.commit()
+        return {'status':'applied', **data}
 @app.get('/v1/cases/{case_id}')
 def case_detail(case_id:str, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
     with Session(engine) as db:

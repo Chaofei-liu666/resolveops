@@ -205,6 +205,18 @@ queues.failed
 
 这些限制必须通过 Policy / Executor 边界控制，而不是只靠 prompt。
 
+### 故障注入开关
+
+`ENABLE_FAULT_INJECTION` 只能用于 local / test / staging。该能力允许用户从 CLI/API 触发 ResolveOps，再由 `ERPNextAdapter` 通过 ERPNext REST API 修改沙箱业务状态，例如提交 Stock Reconciliation 来模拟库存变化。
+
+生产环境必须满足：
+
+```text
+ENABLE_FAULT_INJECTION=false
+```
+
+如果 `APP_ENV=production` 仍开启故障注入，runtime readiness 会标记为 degraded，故障注入 API 也会直接拒绝请求。
+
 ## 6. 回滚和停止
 
 ### 停止 Worker

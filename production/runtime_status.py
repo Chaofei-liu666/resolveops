@@ -50,6 +50,7 @@ def _configuration_check() -> dict[str, Any]:
     webhook_secret_configured = _has_required_secret(settings.webhook_secret)
     operator_bootstrap_configured = _has_required_secret(settings.operator_api_key)
     operator_seed_keys_enabled = bool(settings.operator_seed_keys)
+    fault_injection_enabled = bool(settings.enable_fault_injection)
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -64,11 +65,15 @@ def _configuration_check() -> dict[str, Any]:
             errors.append('operator_api_key_missing_or_placeholder')
         if operator_seed_keys_enabled:
             errors.append('operator_seed_keys_not_allowed_in_production_like_env')
+        if fault_injection_enabled:
+            errors.append('fault_injection_not_allowed_in_production_like_env')
     else:
         if not llm_configured:
             warnings.append('llm_not_configured_agent_may_use_deterministic_fallback')
         if operator_seed_keys_enabled:
             warnings.append('operator_seed_keys_enabled_for_local_development')
+        if fault_injection_enabled:
+            warnings.append('fault_injection_enabled_for_non_production_env')
 
     return {
         'ok': not errors,
@@ -79,6 +84,7 @@ def _configuration_check() -> dict[str, Any]:
         'webhook_secret_configured': webhook_secret_configured,
         'operator_bootstrap_configured': operator_bootstrap_configured,
         'operator_seed_keys_enabled': operator_seed_keys_enabled,
+        'fault_injection_enabled': fault_injection_enabled,
         'errors': errors,
         'warnings': warnings,
     }

@@ -11,6 +11,7 @@ import pytest
 
 from production.actions import action_tool_spec, action_types_for_case, normalize_plan, normalize_proposal, planner_action_catalog, planner_action_instructions, registered_action_types
 import production.agent as agent_module
+import production.main as main_module
 import production.runtime_status as runtime_status_module
 from production.agent import InvestigationAgent
 from production.evidence import validate_plan_grounding
@@ -20,7 +21,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from production.context import CaseContextBuilder, build_case_context, validate_case_context_isolation
-from production.main import LogisticsLaneIn, OperatorIdentity, audit_out, case_tool_trace, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_role
+from production.main import FaultInjectionRunIn, LogisticsLaneIn, OperatorIdentity, audit_out, case_tool_trace, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_fault_injection_enabled, require_role, run_fault_injection
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
 import production.migrations as migration_module
 from production.migrations import apply_migrations, ensure_schema_migrations_table
@@ -1062,6 +1063,100 @@ def test_config_write_requires_config_admin_role():
     with pytest.raises(HTTPException) as exc:
         require_role(OperatorIdentity(subject='sales', role='sales_manager'), 'config_admin', 'ops_admin')
     assert exc.value.status_code == 403
+
+
+def test_fault_injection_requires_non_production_explicit_enable(monkeypatch):
+    monkeypatch.setattr(main_module.settings, 'app_env', 'production')
+    monkeypatch.setattr(main_module.settings, 'enable_fault_injection', True)
+    with pytest.raises(HTTPException) as exc:
+        require_fault_injection_enabled()
+    assert exc.value.status_code == 403
+
+    monkeypatch.setattr(main_module.settings, 'app_env', 'local')
+    monkeypatch.setattr(main_module.settings, 'enable_fault_injection', False)
+    with pytest.raises(HTTPException) as exc:
+        require_fault_injection_enabled()
+    assert exc.value.status_code == 403
+
+
+def test_runtime_status_blocks_fault_injection_in_production(monkeypatch):
+    monkeypatch.setattr(runtime_status_module.settings, 'app_env', 'production')
+    monkeypatch.setattr(runtime_status_module.settings, 'erpnext_base_url', 'https://erp.example.com')
+    monkeypatch.setattr(runtime_status_module.settings, 'erpnext_api_key', 'real-key')
+    monkeypatch.setattr(runtime_status_module.settings, 'erpnext_api_secret', 'real-secret')
+    monkeypatch.setattr(runtime_status_module.settings, 'webhook_secret', 'real-webhook')
+    monkeypatch.setattr(runtime_status_module.settings, 'operator_api_key', 'real-operator')
+    monkeypatch.setattr(runtime_status_module.settings, 'operator_seed_keys', None)
+    monkeypatch.setattr(runtime_status_module.settings, 'llm_base_url', 'https://llm.example.com/v1')
+    monkeypatch.setattr(runtime_status_module.settings, 'llm_api_key', 'real-llm-key')
+    monkeypatch.setattr(runtime_status_module.settings, 'llm_model', 'model')
+    monkeypatch.setattr(runtime_status_module.settings, 'enable_fault_injection', True)
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        status = build_runtime_status(db)
+    assert status['status'] == 'degraded'
+    assert 'fault_injection_not_allowed_in_production_like_env' in status['checks']['configuration']['errors']
+
+
+def test_fault_injection_api_changes_erpnext_through_adapter_and_audits(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+    monkeypatch.setattr(main_module.settings, 'app_env', 'local')
+    monkeypatch.setattr(main_module.settings, 'enable_fault_injection', True)
+    monkeypatch.setattr(main_module.settings, 'erpnext_company', 'ResolveOps Co')
+    monkeypatch.setattr(main_module.settings, 'erpnext_stock_difference_account', 'Temporary Opening - ROPS')
+    monkeypatch.setattr(main_module.settings, 'erpnext_default_valuation_rate', 100)
+
+    calls = []
+
+    class FakeERP:
+        def __init__(self, *_args):
+            self.qty = 10
+
+        def stock(self, item_code, warehouse):
+            return {'item_code': item_code, 'warehouse': warehouse, 'actual_qty': self.qty, 'reserved_qty': 0}
+
+        def set_stock_balance_for_fault_injection(self, **kwargs):
+            calls.append(kwargs)
+            self.qty = kwargs['qty']
+            return {'stock_reconciliation': 'MAT-RECO-TEST', 'submitted': True, 'docstatus': 1}
+
+    monkeypatch.setattr(main_module, 'ERPNextAdapter', FakeERP)
+    with Session(engine) as db:
+        db.add(Operator(
+            tenant_id='demo',
+            subject='ops',
+            role='ops_admin',
+            api_key_hash=operator_key_hash('ops-key'),
+            status='active',
+        ))
+        case = Case(id='case-fi', tenant_id='demo', order_id='SO-1', status='waiting_for_approval')
+        db.add(case)
+        db.commit()
+
+    payload = FaultInjectionRunIn(
+        fault_type='inventory_changed_before_execution',
+        case_id='case-fi',
+        item_code='SKU-A12',
+        warehouse='重庆仓 - ROPS',
+        new_qty=0,
+        reason='simulate stock consumed before approval execution',
+    )
+    result = run_fault_injection(payload, x_operator_key='ops-key')
+
+    assert result['status'] == 'applied'
+    assert result['before']['actual_qty'] == 10
+    assert result['after']['actual_qty'] == 0
+    assert calls[0]['company'] == 'ResolveOps Co'
+    assert calls[0]['difference_account'] == 'Temporary Opening - ROPS'
+    with Session(engine) as db:
+        event = db.scalar(select(Event).where(Event.case_id == 'case-fi', Event.kind == 'fault_injected'))
+        audit_log = db.scalar(select(AuditLog).where(AuditLog.action == 'fault_injection_run'))
+    assert event is not None
+    assert audit_log is not None
+    assert audit_log.case_id == 'case-fi'
 
 
 def test_operator_identity_comes_from_database_not_request_role_header():
