@@ -297,6 +297,7 @@ ResolveOps 不用“答案相似度”评估 Agent，而是从真实 Case 事件
 - `tool_call_count`：read tool 调用次数。
 - `tool_failure_count`：失败或不可用的 read tool 结果。
 - `tool_scheduler_sources`：工具结果来自 executed、cache、deduped 还是 unknown。
+- `tool_trace`：确定性工具调用解释，包含证据编号、工具目的、参数、结果摘要、失败状态，以及每条证据支撑的 Action。
 - `pending_approval_count`：是否卡在审批。
 - `verification_complete`：写入是否完成独立回读验证。
 - `blocked_event_count`：是否因证据不足、策略拒绝、上下文隔离失败、验证失败或人工接管而停止。

@@ -16,6 +16,7 @@ from .config import settings
 from .approval_state import approval_is_expired, utc_now
 from .migrations import apply_migrations
 from .models import AuditLog, Base, Approval, Case, Event, Invocation, LogisticsLane, Operator, Task
+from .tool_trace import build_tool_trace
 
 SUPPORTED_EVENTS={'inventory_shortage','price_mismatch','delivery_delay','supplier_delay'}
 
@@ -113,10 +114,17 @@ def lane_out(lane: LogisticsLane):
     return {'id':lane.id,'tenant_id':lane.tenant_id,'source_warehouse':lane.source_warehouse,'target_warehouse':lane.target_warehouse,'transit_days':lane.transit_days,'cost_per_unit':lane.cost_per_unit,'currency':lane.currency,'active':lane.active}
 def audit_out(log: AuditLog):
     return {'id':log.id,'actor':log.actor,'role':log.role,'action':log.action,'resource_type':log.resource_type,'resource_id':log.resource_id,'case_id':log.case_id,'data':log.data,'created_at':log.created_at.isoformat() if log.created_at else None}
+def case_tool_trace(case: Case):
+    evidence=case.evidence if isinstance(case.evidence,dict) else {}
+    if isinstance(evidence.get('tool_trace'),dict):
+        return evidence['tool_trace']
+    plan=case.plan if isinstance(case.plan,dict) else {}
+    return build_tool_trace(evidence.get('observations') or [],plan,plan.get('evidence_grounding') if isinstance(plan,dict) else None)
 def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], invocations: list[Invocation], tasks: list[Task]):
     kinds=[event.kind for event in events]
     plan_actions=(case.plan or {}).get('actions',[]) if isinstance(case.plan,dict) else []
     tool_events=[event for event in events if event.kind=='tool_observation']
+    tool_trace=case_tool_trace(case)
     scheduled_events=[event for event in events if event.kind=='tool_scheduled']
     failed_tool_events=[
         event for event in tool_events
@@ -155,6 +163,8 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'scheduled_tool_call_count':len(scheduled_events),
         'tool_failure_count':len(failed_tool_events),
         'tool_scheduler_sources':scheduler_sources,
+        'tool_trace_summary':tool_trace.get('summary',{}),
+        'action_evidence':tool_trace.get('action_evidence',{}),
         'approval_count':len(approvals),
         'pending_approval_count':sum(1 for approval in approvals if approval.status=='pending'),
         'expired_approval_count':sum(1 for approval in approvals if approval.status=='expired'),
@@ -322,6 +332,7 @@ def case_detail(case_id:str, x_operator_key:str|None=Header(default=None), x_ope
         return {
             'id':case.id,'tenant_id':case.tenant_id,'source_event_id':case.source_event_id,'event_type':case.event_type,'order_id':case.order_id,
             'status':case.status,'plan_version':case.plan_version,'plan':case.plan,'evidence':case.evidence,
+            'tool_trace':case_tool_trace(case),
             'created_at':case.created_at.isoformat() if case.created_at else None,'updated_at':case.updated_at.isoformat() if case.updated_at else None,
             'approvals':[approval_out(a) for a in approvals],
             'invocations':[invocation_out(i) for i in invocations],

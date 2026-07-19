@@ -18,6 +18,7 @@ from .evidence import validate_plan_grounding
 from .executors import executor_for
 from .memory import record_verified_lessons
 from .policy import action_policy
+from .tool_trace import build_tool_trace
 engine=create_engine(settings.database_url,pool_pre_ping=True); erp=ERPNextAdapter(settings.erpnext_base_url,settings.erpnext_api_key,settings.erpnext_api_secret)
 def ensure_schema():
     """Worker may start before the API container; migrations must not rely on order."""
@@ -115,6 +116,7 @@ def investigate_with_agent(db, c, task_context):
     except (ValueError, TypeError) as exc:
         c.status='manual_review'; emit(db,c.id,'handoff','Agent proposal failed Action Plan validation.',{'error':str(exc)}); return
     grounding=validate_plan_grounding(plan,observations,c.event_type)
+    c.evidence['tool_trace']=build_tool_trace(observations,plan,grounding)
     if not grounding['allowed']:
         c.plan=plan; c.status='manual_review'; emit(db,c.id,'evidence_grounding_failed','Agent plan is not sufficiently supported by read-tool evidence.',grounding); return
     plan['evidence_grounding']=grounding

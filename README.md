@@ -38,6 +38,7 @@ ERP 异常事件
 - PostgreSQL advisory transaction lock 控制共享库存写入。
 - SQL migration runner 按 `production/migrations/*.sql` 顺序应用版本化变更，并记录到 `schema_migrations`。
 - ToolResult 统一表示工具成功、失败、可重试性和证据可用性。
+- Case 详情返回确定性 `tool_trace`，展示每次工具调用的目的、参数、结果摘要、证据编号，以及它支撑了哪些 Action。
 - CaseContextBuilder 按 `case_id` 构建上下文，并在进入 LLM 前清洗/校验 task context，避免多个 Case 串状态。
 - Verified Case Lessons 只从 `resolved + verification passed` 的 Case 沉淀，并且只作为规划提示。
 - 执行轨迹评估：Case Resolution、平均 read tool 次数、工具失败率、Verification Pass、Replan、Policy Denial、Handoff 等指标。

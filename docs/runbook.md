@@ -115,6 +115,7 @@ GET /v1/cases/{case_id}
 
 - `status`
 - `evidence.observations`
+- `tool_trace`
 - `evidence.case_context`
 - `plan.actions`
 - `approvals`

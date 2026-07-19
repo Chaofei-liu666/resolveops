@@ -19,7 +19,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from production.context import CaseContextBuilder, build_case_context, validate_case_context_isolation
-from production.main import LogisticsLaneIn, OperatorIdentity, audit_out, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_role
+from production.main import LogisticsLaneIn, OperatorIdentity, audit_out, case_tool_trace, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_role
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
 import production.migrations as migration_module
 from production.migrations import apply_migrations
@@ -29,6 +29,7 @@ from production.policy import action_policy, allow_read_tool
 from production.tool_result import ToolResult
 from production.tool_scheduler import ReadToolCall, ReadToolScheduler, tool_signature
 from production.tools import BusinessReadTools, ToolSpec, summarize_customer_profile
+from production.tool_trace import build_tool_trace
 from production.worker import digest, execute
 
 
@@ -213,6 +214,48 @@ def test_price_mismatch_grounding_accepts_supported_review_action():
     result = validate_plan_grounding(plan, price_mismatch_observations(), 'price_mismatch')
     assert result['allowed']
     assert result['case_type'] == 'price_mismatch'
+
+
+def test_tool_trace_links_observations_to_supported_action():
+    plan = normalize_plan([
+        {'action_type':'create_price_review_ticket','input':{
+            'sku':'SKU-A12',
+            'order_rate':5000,
+            'reference_rate':4500,
+            'difference':500,
+            'reason':'Order rate exceeds reference price.',
+        }},
+    ], 'grounded price mismatch')
+    grounding = validate_plan_grounding(plan, price_mismatch_observations(), 'price_mismatch')
+    trace = build_tool_trace(price_mismatch_observations(), plan, grounding)
+    action_id = plan['actions'][0]['action_id']
+
+    assert trace['summary']['observation_count'] == 2
+    assert trace['summary']['failed_observation_count'] == 0
+    assert trace['summary']['grounding_allowed'] is True
+    assert trace['action_evidence'][action_id] == ['E-001', 'E-002']
+    assert trace['observations'][1]['tool'] == 'get_reference_price'
+    assert trace['observations'][1]['result_summary']['reference_rate'] == 4500
+    assert trace['observations'][1]['supports_actions'] == [action_id]
+
+
+def test_case_tool_trace_is_derived_for_legacy_case_without_stored_trace():
+    plan = normalize_plan([
+        {'action_type':'create_price_review_ticket','input':{
+            'sku':'SKU-A12',
+            'order_rate':5000,
+            'reference_rate':4500,
+            'difference':500,
+        }},
+    ], 'grounded price mismatch')
+    plan['evidence_grounding'] = {'allowed': True, 'reason': 'grounded'}
+    case = Case(id='case-trace', tenant_id='demo', event_type='price_mismatch', order_id='SO-PRICE-1', plan=plan, evidence={'observations':price_mismatch_observations()})
+
+    trace = case_tool_trace(case)
+
+    assert trace['summary']['tools_used'] == ['get_order', 'get_reference_price']
+    assert trace['summary']['grounding_allowed'] is True
+    assert trace['action_evidence'][plan['actions'][0]['action_id']] == ['E-001', 'E-002']
 
 
 def test_price_mismatch_grounding_rejects_missing_reference_price():
