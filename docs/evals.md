@@ -8,10 +8,16 @@ Run on every change:
 python -m pytest -q
 ```
 
-Last full local regression before the approval-lifecycle patch:
+Containerized regression entrypoint:
+
+```powershell
+docker compose --profile test run --rm test
+```
+
+Current containerized regression:
 
 ```text
-56 passed, 1 skipped
+60 passed, 1 skipped
 ```
 
 | Risk | Test | Expected safe outcome |

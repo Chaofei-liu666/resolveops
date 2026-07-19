@@ -8,15 +8,28 @@ services:
     volumes: [postgres_data:/var/lib/postgresql/data]
     healthcheck: {test: ["CMD-SHELL", "pg_isready -U resolveops -d resolveops"], interval: 5s, timeout: 3s, retries: 10}
   api:
-    build: .
+    build:
+      context: .
+      target: runtime
     env_file: .env
     ports: ["8090:8080"]
     depends_on: {postgres: {condition: service_healthy}}
     networks: [default, erpnext]
   worker:
-    build: .
+    build:
+      context: .
+      target: runtime
     env_file: .env
     command: ["python","-m","production.worker"]
+    depends_on: {postgres: {condition: service_healthy}}
+    networks: [default, erpnext]
+  test:
+    profiles: ["test"]
+    build:
+      context: .
+      target: test
+    env_file: .env
+    command: ["python","-m","pytest","-q"]
     depends_on: {postgres: {condition: service_healthy}}
     networks: [default, erpnext]
 volumes: {postgres_data: {}}

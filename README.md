@@ -90,10 +90,22 @@ http://localhost:8090
 python -m pytest -q
 ```
 
-上一次完整本地回归：
+Docker 隔离测试入口：
+
+```powershell
+.\scripts\test.ps1
+```
+
+等价命令：
+
+```powershell
+docker compose --profile test run --rm test
+```
+
+当前容器化回归：
 
 ```text
-56 passed, 1 skipped
+60 passed, 1 skipped
 ```
 
 ## 文档
