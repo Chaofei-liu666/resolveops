@@ -24,6 +24,7 @@ from production.memory import candidate_lessons_from_verified_action, record_ver
 from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, PriceReview, SupplierFollowup, Task
 from production.policy import action_policy, allow_read_tool
 from production.tool_result import ToolResult
+from production.tool_scheduler import ReadToolCall, ReadToolScheduler, tool_signature
 from production.tools import BusinessReadTools, ToolSpec, summarize_customer_profile
 
 
@@ -397,6 +398,51 @@ def test_tool_result_preserves_business_data_and_runtime_status():
     failed = ToolResult.failure('warehouse_out_of_scope', retryable=False, source_system='WMSAdapter')
     assert failed.observation_result()['error'] == 'warehouse_out_of_scope'
     assert failed.to_dict()['evidence_usable'] is False
+
+
+def test_read_tool_scheduler_deduplicates_batch_calls_and_reuses_cache():
+    class FakeTools:
+        def __init__(self):
+            self.calls = []
+
+        def execute_result(self, name, arguments, order_id):
+            self.calls.append((name, arguments, order_id))
+            return ToolResult.success({'name': name, 'arguments': arguments, 'order_id': order_id}, source_system='FakeAdapter')
+
+    tools = FakeTools()
+    scheduler = ReadToolScheduler(tools, max_workers=4)
+    seen = {}
+    calls = [
+        ReadToolCall('call-1', 'get_order', {}),
+        ReadToolCall('call-2', 'get_order', {}),
+        ReadToolCall('call-3', 'get_customer_profile', {'customer_id': 'CUST-1'}),
+    ]
+
+    first = scheduler.execute_batch(calls, 'SO-1', seen)
+    second = scheduler.execute_batch([ReadToolCall('call-4', 'get_order', {})], 'SO-1', seen)
+
+    assert len(tools.calls) == 2
+    assert [item.result.status for item in first] == ['success', 'success', 'success']
+    assert first[0].result.data == first[1].result.data
+    assert second[0].source == 'cache'
+    assert tool_signature('get_order', {}) in seen
+
+
+def test_read_tool_scheduler_converts_runtime_exceptions_to_tool_result():
+    class ExplodingTools:
+        def execute_result(self, _name, _arguments, _order_id):
+            raise TimeoutError('upstream timeout')
+
+    result = ReadToolScheduler(ExplodingTools(), max_workers=2).execute_batch(
+        [ReadToolCall('call-1', 'get_order', {})],
+        'SO-1',
+        {},
+    )[0].result
+
+    assert result.status == 'failed'
+    assert result.error_code == 'tool_scheduler_failed'
+    assert result.error_type == 'TimeoutError'
+    assert result.retryable is True
 
 
 def test_case_context_builder_isolates_concurrent_case_state():

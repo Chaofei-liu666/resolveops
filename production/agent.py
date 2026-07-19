@@ -7,6 +7,7 @@ import httpx
 from .actions import planner_action_catalog, planner_action_instructions, registered_action_types
 from .config import settings
 from .tool_result import ToolResult
+from .tool_scheduler import ReadToolCall, ReadToolScheduler
 SYSTEM='''You are ResolveOps' investigation agent for ERP business exceptions.
 Use a deliberate loop: form a hypothesis, call the single most useful read tool, and update your hypothesis from its result. Never invent facts or propose direct ERP writes.
 Investigate dynamically from case_context.scope.event_type:
@@ -36,6 +37,7 @@ class InvestigationAgent:
         failed_tools=[]
         observations=[]
         budget_exhausted=False
+        scheduler=ReadToolScheduler(self.tools, max_workers=settings.agent_read_tool_parallelism)
         max_turns=max(1, settings.agent_max_investigation_turns)
         max_read_tool_calls=max(1, settings.agent_max_read_tool_calls)
         for _ in range(max_turns):
@@ -47,18 +49,37 @@ class InvestigationAgent:
             message=r.json()['choices'][0]['message']; messages.append(message); calls=message.get('tool_calls') or []
             if not calls:
                 break
+            batch=[]
+            malformed=[]
             for call in calls:
                 if len(observations) >= max_read_tool_calls:
                     budget_exhausted=True
                     break
-                args=json.loads(call['function']['arguments']); signature=(call['function']['name'],json.dumps(args,sort_keys=True,ensure_ascii=False))
-                tool_result=seen[signature] if signature in seen else self._execute_tool(call['function']['name'],args,order_id)
-                seen[signature]=tool_result
+                try:
+                    args=json.loads(call['function']['arguments'] or '{}')
+                    if not isinstance(args, dict):
+                        raise ValueError('tool arguments must be a JSON object')
+                except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                    malformed.append((call, ToolResult.failure('invalid_tool_arguments', error_type=type(exc).__name__)))
+                    continue
+                batch.append(ReadToolCall(call_id=call['id'],name=call['function']['name'],arguments=args))
+            for call, tool_result in malformed:
+                failed_tools.append(call['function']['name'])
                 result=tool_result.observation_result()
-                on_observation(call['function']['name'],args,result,tool_result.to_dict())
-                observations.append({'tool':call['function']['name'],'arguments':args,'result':result,'tool_result':tool_result.to_dict()})
-                if result.get('error'): failed_tools.append(call['function']['name'])
+                on_observation(call['function']['name'],{},result,tool_result.to_dict())
+                observations.append({'tool':call['function']['name'],'arguments':{},'result':result,'tool_result':tool_result.to_dict(),'scheduler':{'source':'invalid_arguments'}})
                 messages.append({'role':'tool','tool_call_id':call['id'],'content':json.dumps(tool_result.to_dict(),ensure_ascii=False)})
+            for execution in scheduler.execute_batch(batch, order_id, seen):
+                call=execution.call
+                tool_result=execution.result
+                result=tool_result.observation_result()
+                scheduler_meta={'source':execution.source,'signature':execution.signature}
+                tool_result_dict=tool_result.to_dict()
+                tool_result_dict['scheduler'] = scheduler_meta
+                on_observation(call.name,call.arguments,result,tool_result_dict)
+                observations.append({'tool':call.name,'arguments':call.arguments,'result':result,'tool_result':tool_result_dict,'scheduler':scheduler_meta})
+                if result.get('error'): failed_tools.append(call.name)
+                messages.append({'role':'tool','tool_call_id':call.call_id,'content':json.dumps(tool_result_dict,ensure_ascii=False)})
             if budget_exhausted:
                 break
         return self._plan(order_id, observations, failed_tools, context, budget_exhausted)
@@ -112,14 +133,6 @@ class InvestigationAgent:
             return result
         except (ValueError,json.JSONDecodeError):
             return {'status':'handoff','recommended_actions':[],'alternatives':[],'rationale':'Model conclusion did not meet the required JSON schema.','missing_information':[]}
-
-    def _execute_tool(self, name: str, args: dict[str, Any], order_id: str) -> ToolResult:
-        if hasattr(self.tools, 'execute_result'):
-            return self.tools.execute_result(name, args, order_id)
-        result = self.tools.execute(name, args, order_id)
-        if isinstance(result, dict) and result.get('error'):
-            return ToolResult.failure(result.get('error'), error_type=result.get('error_type'))
-        return ToolResult.success(result if isinstance(result, dict) else {'value': result})
 
     @staticmethod
     def _context_text(context: str | dict[str, Any]) -> str:

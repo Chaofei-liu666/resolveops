@@ -11,7 +11,7 @@ python -m pytest -q
 Current local regression:
 
 ```text
-49 passed, 1 skipped
+51 passed, 1 skipped
 ```
 
 | Risk | Test | Expected safe outcome |
@@ -23,6 +23,7 @@ Current local regression:
 | Budget exhaustion | Agent read-tool budget is exhausted | Recorded in `missing_information`; plan uses only collected evidence |
 | Ungrounded model plan | Action lacks required tool evidence | `evidence_grounding_failed`; no approval or write |
 | Context leakage | Foreign Case identifiers appear in scheduler task context | Scope fields are removed before LLM planning; mixed durable records are blocked |
+| Read tool scheduling | Duplicate read tool calls or upstream exception in a batch | Duplicate calls share one execution; exception becomes structured `ToolResult` |
 | Evaluation semantics | Case with write invocation has verification event | `verification_complete=true` |
 
 ## Runtime evaluation API

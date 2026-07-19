@@ -26,6 +26,7 @@ ERP 异常事件
 
 - 真实 ERPNext API 接入，而不是 mock 系统。
 - LLM 只允许调用只读业务工具，不能直接写 ERP。
+- 只读工具通过 ReadToolScheduler 调度，支持批量并发、去重缓存和异常统一封装。
 - 按 `event_type` 动态暴露 read tools，避免价格异常误调用库存/采购工具。
 - 按 `event_type` 动态暴露 write Action schemas，避免 planner 提出不属于当前业务异常的行动。
 - 写操作也是工具，但只能作为 Action Plan 被提出，由 Policy、Approval、Executor 控制执行。
@@ -87,7 +88,7 @@ python -m pytest -q
 当前本地回归：
 
 ```text
-49 passed, 1 skipped
+51 passed, 1 skipped
 ```
 
 ## 文档

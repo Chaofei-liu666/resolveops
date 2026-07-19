@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     llm_model: str | None = None
     agent_max_investigation_turns: int = 8
     agent_max_read_tool_calls: int = 12
+    agent_read_tool_parallelism: int = 4
     agent_max_replans: int = 2
 
 
