@@ -68,15 +68,34 @@ def print_status(data: dict[str, Any]) -> None:
                 print(f"  warning: {warning}")
     queues = data.get('queues') or {}
     if queues:
-        print(f"queues: queued={queues.get('queued', 0)} running={queues.get('running', 0)} failed={queues.get('failed', 0)}")
+        active = queues.get('active') or {}
+        history = queues.get('history') or {}
+        if active or history:
+            print(
+                f"queues: active_queued={active.get('queued', queues.get('queued', 0))} "
+                f"active_running={active.get('running', queues.get('running', 0))}"
+            )
+            if history:
+                print(
+                    f"history: done={history.get('done', 0)} "
+                    f"failed_total={history.get('failed', queues.get('failed', 0))}"
+                )
+        else:
+            print(f"queues: queued={queues.get('queued', 0)} running={queues.get('running', 0)} failed={queues.get('failed', 0)}")
 
 
 def print_case_summary(case: dict[str, Any]) -> None:
     print(f"Case: {case.get('id')}")
-    print(f"type: {case.get('event_type')}  order: {case.get('order_id')}  status: {case.get('status')}  plan_version: {case.get('plan_version')}")
+    status = case.get('status')
+    print(f"type: {case.get('event_type')}  order: {case.get('order_id')}  status: {status}  plan_version: {case.get('plan_version')}")
     actions = (case.get('plan') or {}).get('actions') or []
     if actions:
-        print('\n[Plan]')
+        approvals = case.get('approvals') or []
+        stale_plan = status == 'manual_review' and approvals and all(
+            approval.get('status') in {'invalidated', 'expired', 'revoked'}
+            for approval in approvals
+        )
+        print('\n[Last Plan]' if stale_plan else '\n[Plan]')
         for idx, action in enumerate(actions, 1):
             action_type = action.get('action_type')
             rationale = action.get('rationale') or action.get('reason') or ''
@@ -89,12 +108,43 @@ def print_case_summary(case: dict[str, Any]) -> None:
         for approval in approvals:
             action = approval.get('action') or {}
             print(f"- {approval.get('id')} status={approval.get('status')} action={action.get('action_type')} required={approval.get('required_roles')}")
+    events = case.get('events') or []
+    manual_events = [
+        event for event in events
+        if event.get('kind') in {'handoff', 'manual_review_required', 'replan_requested'}
+    ]
+    if status == 'manual_review' and manual_events:
+        latest = manual_events[-1]
+        print('\n[Manual Review]')
+        print(f"reason: {latest.get('message')}")
+        data = latest.get('data') or {}
+        conclusion = data.get('conclusion') if isinstance(data, dict) else None
+        if isinstance(conclusion, dict):
+            missing = conclusion.get('missing_information') or []
+            rationale = conclusion.get('rationale')
+            if rationale:
+                print(f"rationale: {rationale}")
+            if missing:
+                print(f"missing_information={', '.join(str(item) for item in missing)}")
     trace = case.get('tool_trace') or {}
     summary = trace.get('summary') or {}
     if summary:
         print('\n[Tool Trace]')
-        print(f"read_tools={summary.get('read_tool_count', 0)} actions={summary.get('action_count', 0)}")
-    events = case.get('events') or []
+        read_count = summary.get('read_tool_count', summary.get('observation_count', 0))
+        action_count = summary.get('action_count', len(actions))
+        tools_used = summary.get('tools_used') or []
+        print(f"read_tools={read_count} actions={action_count}")
+        if tools_used:
+            print(f"tools_used={', '.join(tools_used)}")
+        grounding = summary.get('grounding_allowed')
+        if grounding is not None:
+            print(f"grounding_allowed={grounding}")
+    action_evidence = trace.get('action_evidence') or {}
+    if action_evidence:
+        print('\n[Action Evidence]')
+        for action_id, evidence_ids in action_evidence.items():
+            evidence_text = ', '.join(evidence_ids) if evidence_ids else 'none'
+            print(f"- {action_id}: {evidence_text}")
     if events:
         print('\n[Recent Events]')
         for event in events[-8:]:
@@ -166,6 +216,9 @@ def cmd_fi_run(args: argparse.Namespace, client: ApiClient) -> int:
         'item_code': args.item_code,
         'warehouse': args.warehouse,
         'new_qty': args.new_qty,
+        'company': args.company,
+        'difference_account': args.difference_account,
+        'valuation_rate': args.valuation_rate,
         'reason': args.reason,
     }
     data = client.request('POST', '/v1/fault-injections/run', {k: v for k, v in payload.items() if v is not None})
@@ -232,6 +285,9 @@ def build_parser() -> argparse.ArgumentParser:
     fi_run.add_argument('--item', dest='item_code', required=True)
     fi_run.add_argument('--warehouse', required=True)
     fi_run.add_argument('--new-qty', type=float, required=True)
+    fi_run.add_argument('--company')
+    fi_run.add_argument('--difference-account')
+    fi_run.add_argument('--valuation-rate', type=float)
     fi_run.add_argument('--reason')
     fi_run.set_defaults(handler=cmd_fi_run)
 

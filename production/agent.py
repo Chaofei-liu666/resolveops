@@ -26,6 +26,11 @@ For price_mismatch, compare the Sales Order item rate with get_reference_price.r
 For price_mismatch, do not use inventory or replenishment actions.
 For delivery_delay, compare Sales Order delivery_date with inbound purchase schedule_date. If schedule_date is later, propose create_supplier_followup_task. Never propose changing ERP delivery dates directly.
 Return handoff only when no executable plan can be safely proposed from the evidence.'''
+REPAIR_SYSTEM='''You repair ResolveOps planner output into valid JSON only.
+Do not add new business facts. Do not invent tool results. Use only the provided evidence and available action schemas.
+Return exactly one JSON object with keys: status, recommended_actions, alternatives, rationale, missing_information, evidence_summary.
+status must be "ready" or "handoff"; recommended_actions, alternatives, missing_information, and evidence_summary must be arrays.
+Each recommended action must use action_type and input matching one available action schema.'''
 class InvestigationAgent:
     def __init__(self, tools, llm_gateway: LLMGateway | None = None):
         self.tools=tools
@@ -98,14 +103,54 @@ class InvestigationAgent:
         llm_result=self.llm.chat(payload)
         if not llm_result.ok:
             return {'status':'handoff','recommended_actions':[],'alternatives':[],'rationale':'LLM planning call failed; automation stopped before write planning.','missing_information':[llm_result.error_code or 'llm_error'],'llm':llm_result.telemetry()}
-        conclusion=self._parse_conclusion((llm_result.first_message() or {}).get('content'))
+        raw_content=(llm_result.first_message() or {}).get('content')
+        conclusion=self._parse_conclusion(raw_content)
         conclusion['llm']=llm_result.telemetry()
+        if self._needs_schema_repair(conclusion):
+            repaired=self._repair_conclusion(raw_content,evidence,planner_system,conclusion)
+            if repaired:
+                conclusion=repaired
+                conclusion['llm']=llm_result.telemetry()
         if failed_tools:
             unknown=[f'{name} unavailable: its business fact remains unknown.' for name in sorted(set(failed_tools))]
             conclusion['missing_information']=list(dict.fromkeys((conclusion.get('missing_information') or [])+unknown))
         if budget_exhausted:
             conclusion['missing_information']=list(dict.fromkeys((conclusion.get('missing_information') or [])+['read-tool budget exhausted; plan uses only collected evidence']))
         return conclusion
+
+    def _repair_conclusion(self, raw_content: Any, evidence: dict[str, Any], planner_system: str, parse_error: dict[str, Any]) -> dict[str, Any] | None:
+        payload={
+            'messages':[
+                {'role':'system','content':REPAIR_SYSTEM},
+                {'role':'user','content':json.dumps({
+                    'planner_system': planner_system,
+                    'parse_error': parse_error,
+                    'invalid_output': raw_content,
+                    'evidence': evidence,
+                },ensure_ascii=False)},
+            ],
+            'response_format':{'type':'json_object'},
+            'temperature':0,
+        }
+        repair_result=self.llm.chat(payload)
+        if not repair_result.ok:
+            parse_error['schema_repair']={
+                'status':'failed',
+                'reason':repair_result.error_code or 'llm_error',
+                'llm':repair_result.telemetry(),
+            }
+            return None
+        repaired=self._parse_conclusion((repair_result.first_message() or {}).get('content'))
+        repaired['llm_repair']=repair_result.telemetry()
+        if self._needs_schema_repair(repaired):
+            parse_error['schema_repair']={
+                'status':'failed',
+                'reason':'repair_output_invalid',
+                'llm':repair_result.telemetry(),
+            }
+            return None
+        repaired['schema_repair']={'status':'repaired','reason':'planner_output_repaired_once'}
+        return repaired
 
     @staticmethod
     def _parse_conclusion(content):
@@ -139,7 +184,11 @@ class InvestigationAgent:
             if result.get('status') not in {'ready','handoff'}: raise ValueError('unsupported status')
             return result
         except (ValueError,json.JSONDecodeError):
-            return {'status':'handoff','recommended_actions':[],'alternatives':[],'rationale':'Model conclusion did not meet the required JSON schema.','missing_information':[]}
+            return {'status':'handoff','recommended_actions':[],'alternatives':[],'rationale':'Model conclusion did not meet the required JSON schema.','missing_information':[],'parse_error':'required_json_schema_mismatch'}
+
+    @staticmethod
+    def _needs_schema_repair(conclusion: dict[str, Any]) -> bool:
+        return conclusion.get('parse_error') == 'required_json_schema_mismatch'
 
     @staticmethod
     def _context_text(context: str | dict[str, Any]) -> str:

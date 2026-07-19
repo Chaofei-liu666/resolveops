@@ -8,6 +8,7 @@ os.environ.setdefault('WEBHOOK_SECRET', 'test')
 os.environ.setdefault('OPERATOR_API_KEY', 'test')
 
 import pytest
+import httpx
 
 from production.actions import action_tool_spec, action_types_for_case, normalize_plan, normalize_proposal, planner_action_catalog, planner_action_instructions, registered_action_types
 import production.agent as agent_module
@@ -234,6 +235,8 @@ def test_tool_trace_links_observations_to_supported_action():
     action_id = plan['actions'][0]['action_id']
 
     assert trace['summary']['observation_count'] == 2
+    assert trace['summary']['read_tool_count'] == 2
+    assert trace['summary']['action_count'] == 1
     assert trace['summary']['failed_observation_count'] == 0
     assert trace['summary']['grounding_allowed'] is True
     assert trace['action_evidence'][action_id] == ['E-001', 'E-002']
@@ -259,6 +262,36 @@ def test_case_tool_trace_is_derived_for_legacy_case_without_stored_trace():
     assert trace['summary']['tools_used'] == ['get_order', 'get_reference_price']
     assert trace['summary']['grounding_allowed'] is True
     assert trace['action_evidence'][plan['actions'][0]['action_id']] == ['E-001', 'E-002']
+
+
+def test_case_tool_trace_does_not_attach_failed_replan_observations_to_stale_plan():
+    plan = normalize_plan([
+        {'action_type':'create_price_review_ticket','input':{
+            'sku':'SKU-A12',
+            'order_rate':5000,
+            'reference_rate':4500,
+            'difference':500,
+        }},
+    ], 'old grounded price mismatch')
+    plan['evidence_grounding'] = {'allowed': True, 'reason': 'grounded'}
+    case = Case(
+        id='case-replan-handoff',
+        tenant_id='demo',
+        event_type='price_mismatch',
+        order_id='SO-PRICE-1',
+        plan=plan,
+        evidence={
+            'observations': price_mismatch_observations(),
+            'conclusion': {'status': 'handoff', 'recommended_actions': []},
+        },
+    )
+
+    trace = case_tool_trace(case)
+
+    assert trace['summary']['observation_count'] == 2
+    assert trace['summary']['action_count'] == 0
+    assert trace['summary']['grounding_allowed'] is None
+    assert trace['action_evidence'] == {}
 
 
 def test_price_mismatch_grounding_rejects_missing_reference_price():
@@ -340,6 +373,56 @@ def test_tool_error_is_unknown_not_negative_fact():
     conclusion = InvestigationAgent._parse_conclusion('not json')
     assert conclusion['status'] == 'handoff'
     assert 'schema' in conclusion['rationale'].lower()
+
+
+def test_planner_schema_repair_retries_once_before_handoff():
+    class RepairingGateway:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, payload):
+            self.calls.append(payload)
+            if len(self.calls) == 1:
+                return LLMResult(status='success', response={
+                    'choices':[{'message':{'content':'not json'}}],
+                    'usage': {'total_tokens': 3},
+                }, model='fake-model', latency_ms=1, usage={'total_tokens': 3})
+            return LLMResult(status='success', response={
+                'choices':[{'message':{'content':'{"status":"ready","recommended_actions":[{"action_type":"create_price_review_ticket","input":{"sku":"SKU-A12","order_rate":5000,"reference_rate":4500,"difference":500}}],"alternatives":[],"rationale":"reference price mismatch is supported","missing_information":[],"evidence_summary":["order and reference price observed"]}'}}],
+                'usage': {'total_tokens': 9},
+            }, model='fake-model', latency_ms=1, usage={'total_tokens': 9})
+
+    conclusion = InvestigationAgent(None, llm_gateway=RepairingGateway())._plan(
+        'SO-1',
+        price_mismatch_observations(),
+        [],
+        {'scope': {'event_type': 'price_mismatch'}},
+    )
+
+    assert conclusion['status'] == 'ready'
+    assert conclusion['recommended_actions'][0]['action_type'] == 'create_price_review_ticket'
+    assert conclusion['schema_repair']['status'] == 'repaired'
+    assert conclusion['llm']['usage']['total_tokens'] == 3
+    assert conclusion['llm_repair']['usage']['total_tokens'] == 9
+
+
+def test_planner_schema_repair_failure_preserves_safe_handoff():
+    class BrokenRepairGateway:
+        def chat(self, _payload):
+            return LLMResult(status='success', response={
+                'choices':[{'message':{'content':'not json'}}],
+            }, model='fake-model', latency_ms=1, usage={})
+
+    conclusion = InvestigationAgent(None, llm_gateway=BrokenRepairGateway())._plan(
+        'SO-1',
+        price_mismatch_observations(),
+        [],
+        {'scope': {'event_type': 'price_mismatch'}},
+    )
+
+    assert conclusion['status'] == 'handoff'
+    assert conclusion['parse_error'] == 'required_json_schema_mismatch'
+    assert conclusion['schema_repair']['status'] == 'failed'
 
 
 def test_tool_budget_exhaustion_is_preserved_as_missing_information():
@@ -556,6 +639,8 @@ def test_runtime_status_reports_ready_when_migrations_are_complete():
         db.add_all([
             Task(case_id='case-ready', kind='investigate', status='queued'),
             Task(case_id='case-ready', kind='execute', status='running'),
+            Task(case_id='case-old', kind='investigate', status='done'),
+            Task(case_id='case-old', kind='execute', status='failed'),
         ])
         db.commit()
         status = build_runtime_status(db)
@@ -564,6 +649,9 @@ def test_runtime_status_reports_ready_when_migrations_are_complete():
     assert status['checks']['migrations']['pending_versions'] == []
     assert status['queues']['queued'] == 1
     assert status['queues']['running'] == 1
+    assert status['queues']['failed'] == 1
+    assert status['queues']['active'] == {'queued': 1, 'running': 1, 'total': 2}
+    assert status['queues']['history'] == {'done': 1, 'failed': 1, 'total': 2}
 
 
 def test_runtime_status_reports_degraded_when_migration_is_missing():
@@ -1194,6 +1282,53 @@ def test_fault_injection_api_changes_erpnext_through_adapter_and_audits(monkeypa
     assert event is not None
     assert audit_log is not None
     assert audit_log.case_id == 'case-fi'
+
+
+def test_fault_injection_converts_erpnext_permission_error_to_gateway_error(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+    monkeypatch.setattr(main_module.settings, 'app_env', 'local')
+    monkeypatch.setattr(main_module.settings, 'enable_fault_injection', True)
+    monkeypatch.setattr(main_module.settings, 'erpnext_company', 'ResolveOps Co')
+    monkeypatch.setattr(main_module.settings, 'erpnext_stock_difference_account', 'Temporary Opening - ROPS')
+    monkeypatch.setattr(main_module.settings, 'erpnext_default_valuation_rate', 100)
+
+    class ForbiddenERP:
+        def __init__(self, *_args):
+            pass
+
+        def stock(self, item_code, warehouse):
+            return {'item_code': item_code, 'warehouse': warehouse, 'actual_qty': 10, 'reserved_qty': 0}
+
+        def set_stock_balance_for_fault_injection(self, **_kwargs):
+            request = httpx.Request('POST', 'https://erp.invalid/api/resource/Stock%20Reconciliation')
+            response = httpx.Response(403, request=request)
+            raise httpx.HTTPStatusError('forbidden', request=request, response=response)
+
+    monkeypatch.setattr(main_module, 'ERPNextAdapter', ForbiddenERP)
+    with Session(engine) as db:
+        db.add(Operator(
+            tenant_id='demo',
+            subject='ops',
+            role='ops_admin',
+            api_key_hash=operator_key_hash('ops-key'),
+            status='active',
+        ))
+        db.commit()
+
+    payload = FaultInjectionRunIn(
+        fault_type='inventory_changed_before_execution',
+        item_code='SKU-A12',
+        warehouse='重庆仓 - ROPS',
+        new_qty=0,
+    )
+    with pytest.raises(HTTPException) as exc:
+        run_fault_injection(payload, x_operator_key='ops-key')
+
+    assert exc.value.status_code == 502
+    assert exc.value.detail['error'] == 'erpnext_fault_injection_failed'
+    assert exc.value.detail['erpnext_status_code'] == 403
 
 
 def test_operator_identity_comes_from_database_not_request_role_header():

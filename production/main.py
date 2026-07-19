@@ -6,6 +6,7 @@ import hashlib, hmac, json
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
+import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -146,6 +147,9 @@ def case_tool_trace(case: Case):
     evidence=case.evidence if isinstance(case.evidence,dict) else {}
     if isinstance(evidence.get('tool_trace'),dict):
         return evidence['tool_trace']
+    conclusion=evidence.get('conclusion') if isinstance(evidence.get('conclusion'),dict) else {}
+    if conclusion and conclusion.get('status') != 'ready':
+        return build_tool_trace(evidence.get('observations') or [],None,None)
     plan=case.plan if isinstance(case.plan,dict) else {}
     return build_tool_trace(evidence.get('observations') or [],plan,plan.get('evidence_grounding') if isinstance(plan,dict) else None)
 def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], invocations: list[Invocation], tasks: list[Task]):
@@ -431,15 +435,26 @@ def run_fault_injection(payload: FaultInjectionRunIn, x_operator_key:str|None=He
             if not case:
                 raise HTTPException(404,'case not found')
         before=erp.stock(payload.item_code,payload.warehouse)
-        result=erp.set_stock_balance_for_fault_injection(
-            item_code=payload.item_code,
-            warehouse=payload.warehouse,
-            qty=payload.new_qty,
-            company=company,
-            difference_account=difference_account,
-            valuation_rate=valuation_rate,
-        )
-        after=erp.stock(payload.item_code,payload.warehouse)
+        try:
+            result=erp.set_stock_balance_for_fault_injection(
+                item_code=payload.item_code,
+                warehouse=payload.warehouse,
+                qty=payload.new_qty,
+                company=company,
+                difference_account=difference_account,
+                valuation_rate=valuation_rate,
+            )
+            after=erp.stock(payload.item_code,payload.warehouse)
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            raise HTTPException(
+                502,
+                {
+                    'error': 'erpnext_fault_injection_failed',
+                    'erpnext_status_code': status_code,
+                    'message': 'ERPNext rejected the Stock Reconciliation request. Check the API user permissions and required accounting fields.',
+                },
+            ) from exc
         data={
             'fault_type': payload.fault_type,
             'item_code': payload.item_code,

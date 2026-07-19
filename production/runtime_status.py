@@ -97,6 +97,16 @@ def build_runtime_status(db: Any) -> dict[str, Any]:
     applied = sorted(applied_versions(db))
     pending = [version for version in expected if version not in applied]
     tasks_by_status = _task_counts(db)
+    active_queue = {
+        'queued': tasks_by_status.get('queued', 0),
+        'running': tasks_by_status.get('running', 0),
+        'total': tasks_by_status.get('queued', 0) + tasks_by_status.get('running', 0),
+    }
+    terminal_history = {
+        'done': tasks_by_status.get('done', 0),
+        'failed': tasks_by_status.get('failed', 0),
+        'total': tasks_by_status.get('done', 0) + tasks_by_status.get('failed', 0),
+    }
     configuration = _configuration_check()
     checks = {
         'database': {'ok': True},
@@ -114,8 +124,11 @@ def build_runtime_status(db: Any) -> dict[str, Any]:
         'checks': checks,
         'queues': {
             'tasks_by_status': tasks_by_status,
-            'queued': tasks_by_status.get('queued', 0),
-            'running': tasks_by_status.get('running', 0),
-            'failed': tasks_by_status.get('failed', 0),
+            'active': active_queue,
+            'history': terminal_history,
+            # Backward-compatible flat fields for older CLI/tests.
+            'queued': active_queue['queued'],
+            'running': active_queue['running'],
+            'failed': terminal_history['failed'],
         },
     }

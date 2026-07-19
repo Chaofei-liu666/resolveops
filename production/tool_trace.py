@@ -172,12 +172,15 @@ def build_tool_trace(
         })
 
     failed = [row for row in rows if row['status'] != 'success' or row['evidence_usable'] is False]
+    tools_used = sorted({row['tool'] for row in rows})
     return {
         'summary': {
             'observation_count': len(rows),
+            'read_tool_count': len(rows),
+            'action_count': len(actions),
             'successful_observation_count': len(rows) - len(failed),
             'failed_observation_count': len(failed),
-            'tools_used': sorted({row['tool'] for row in rows}),
+            'tools_used': tools_used,
             'grounding_allowed': grounding.get('allowed') if isinstance(grounding, dict) else None,
             'grounding_reason': grounding.get('reason') if isinstance(grounding, dict) else None,
         },
