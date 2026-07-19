@@ -104,6 +104,7 @@ python resolveops.py status
 查看 Case：
 
 ```powershell
+python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-00002 --reason "manual CLI test"
 python resolveops.py case list
 python resolveops.py case show <case-id>
 ```

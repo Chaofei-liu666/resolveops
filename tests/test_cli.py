@@ -80,6 +80,38 @@ def test_cli_fault_injection_posts_resolveops_payload(monkeypatch, capsys):
     assert 'MAT-RECO-TEST' in capsys.readouterr().out
 
 
+def test_cli_case_create_posts_resolveops_payload(monkeypatch, capsys):
+    calls = []
+
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json})
+        return FakeResponse(data={'case_id': 'CASE-1', 'status': 'queued', 'duplicate': False})
+
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
+    result = cli.main([
+        '--base-url', 'http://api.local',
+        '--operator-key', 'sales-key',
+        'case', 'create',
+        '--type', 'inventory_shortage',
+        '--order', 'SAL-ORD-2026-00002',
+        '--source-event-id', 'cli-event-1',
+        '--reason', 'created from terminal',
+    ])
+
+    assert result == 0
+    assert calls[0]['method'] == 'POST'
+    assert calls[0]['url'] == 'http://api.local/v1/cases'
+    assert calls[0]['headers'] == {'X-Operator-Key': 'sales-key'}
+    assert calls[0]['json'] == {
+        'tenant_id': 'demo',
+        'event_type': 'inventory_shortage',
+        'order_id': 'SAL-ORD-2026-00002',
+        'source_event_id': 'cli-event-1',
+        'reason': 'created from terminal',
+    }
+    assert 'CASE-1' in capsys.readouterr().out
+
+
 def test_cli_returns_error_for_failed_api(monkeypatch, capsys):
     monkeypatch.setattr(cli.httpx, 'request', lambda *args, **kwargs: FakeResponse(status_code=403, data={'detail': 'disabled'}))
 

@@ -121,6 +121,24 @@ def cmd_case_list(args: argparse.Namespace, client: ApiClient) -> int:
     return 0
 
 
+def cmd_case_create(args: argparse.Namespace, client: ApiClient) -> int:
+    payload = {
+        'tenant_id': args.tenant_id,
+        'event_type': args.event_type,
+        'order_id': args.order_id,
+        'source_event_id': args.source_event_id,
+        'reason': args.reason,
+    }
+    data = client.request('POST', '/v1/cases', {k: v for k, v in payload.items() if v is not None})
+    if args.json:
+        print_json(data)
+    else:
+        duplicate = ' duplicate=true' if data.get('duplicate') else ''
+        print(f"case created: {data.get('case_id')} status={data.get('status')}{duplicate}")
+        print(f"next: python resolveops.py case show {data.get('case_id')}")
+    return 0
+
+
 def cmd_case_show(args: argparse.Namespace, client: ApiClient) -> int:
     data = client.request('GET', f'/v1/cases/{args.case_id}')
     if args.json:
@@ -190,6 +208,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     case = sub.add_parser('case', help='Case commands')
     case_sub = case.add_subparsers(dest='case_command', required=True)
+    case_create = case_sub.add_parser('create', help='Create a Case and queue investigation')
+    case_create.add_argument('--type', dest='event_type', choices=['inventory_shortage', 'price_mismatch', 'delivery_delay', 'supplier_delay'], required=True)
+    case_create.add_argument('--order', dest='order_id', required=True)
+    case_create.add_argument('--tenant', dest='tenant_id', default='demo')
+    case_create.add_argument('--source-event-id')
+    case_create.add_argument('--reason')
+    case_create.set_defaults(handler=cmd_case_create)
     case_list = case_sub.add_parser('list', help='List cases')
     case_list.add_argument('--limit', type=int, default=20)
     case_list.set_defaults(handler=cmd_case_list)

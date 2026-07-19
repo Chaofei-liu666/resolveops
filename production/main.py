@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import hashlib, hmac, json
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -34,6 +34,14 @@ class LogisticsLaneIn(BaseModel):
 
 class ApprovalRevokeIn(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
+
+class CaseCreateIn(BaseModel):
+    tenant_id: str = Field(default='demo', min_length=1, max_length=80)
+    event_type: str = Field(min_length=1, max_length=80)
+    order_id: str = Field(min_length=1, max_length=160)
+    source_event_id: str | None = Field(default=None, max_length=160)
+    reason: str | None = Field(default=None, max_length=500)
+    context: dict[str, Any] = Field(default_factory=dict)
 
 class FaultInjectionRunIn(BaseModel):
     fault_type: Literal['inventory_changed_before_execution']
@@ -307,6 +315,36 @@ def case_list(x_operator_key:str|None=Header(default=None), x_operator:str|None=
                 'latest_event':{'kind':latest.kind,'message':latest.message,'created_at':latest.created_at.isoformat() if latest.created_at else None} if latest else None,
             })
         return result
+@app.post('/v1/cases')
+def create_case(payload: CaseCreateIn, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
+    event_type = 'delivery_delay' if payload.event_type == 'supplier_delay' else payload.event_type
+    if payload.event_type not in SUPPORTED_EVENTS or event_type == 'supplier_delay':
+        raise HTTPException(422,'unsupported event_type')
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        require_role(identity,'ops_admin','config_admin','sales_manager','warehouse_manager','procurement_manager','finance_manager')
+        if payload.source_event_id:
+            existing=db.scalar(select(Case).where(Case.tenant_id==payload.tenant_id, Case.source_event_id==payload.source_event_id))
+            if existing:
+                audit(db,identity,'case_create_duplicate','case',existing.id,{'source_event_id':payload.source_event_id,'event_type':event_type},case_id=existing.id)
+                db.commit()
+                return {'case_id':existing.id,'status':existing.status,'duplicate':True}
+        case=Case(tenant_id=payload.tenant_id,source_event_id=payload.source_event_id,event_type=event_type,order_id=payload.order_id)
+        db.add(case)
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            if not payload.source_event_id:
+                raise
+            existing=db.scalar(select(Case).where(Case.tenant_id==payload.tenant_id, Case.source_event_id==payload.source_event_id))
+            return {'case_id':existing.id,'status':existing.status,'duplicate':True}
+        data={'source':'api','event_type':event_type,'requested_event_type':payload.event_type,'order_id':payload.order_id,'reason':payload.reason,'context':payload.context}
+        emit(db,case.id,'case_created','Operator-created Case received.',data)
+        audit(db,identity,'case_created','case',case.id,data,case_id=case.id)
+        db.add(Task(case_id=case.id,kind='investigate',payload={'source':'api','context':payload.context,'reason':payload.reason}))
+        db.commit()
+        return {'case_id':case.id,'status':'queued','duplicate':False}
 @app.get('/v1/config/logistics-lanes')
 def logistics_lanes(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), tenant_id:str='demo', active:bool|None=None):
     with Session(engine) as db:

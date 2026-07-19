@@ -21,7 +21,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from production.context import CaseContextBuilder, build_case_context, validate_case_context_isolation
-from production.main import FaultInjectionRunIn, LogisticsLaneIn, OperatorIdentity, audit_out, case_tool_trace, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_fault_injection_enabled, require_role, run_fault_injection
+from production.main import CaseCreateIn, FaultInjectionRunIn, LogisticsLaneIn, OperatorIdentity, audit_out, case_tool_trace, create_case, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_fault_injection_enabled, require_role, run_fault_injection
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
 import production.migrations as migration_module
 from production.migrations import apply_migrations, ensure_schema_migrations_table
@@ -1063,6 +1063,43 @@ def test_config_write_requires_config_admin_role():
     with pytest.raises(HTTPException) as exc:
         require_role(OperatorIdentity(subject='sales', role='sales_manager'), 'config_admin', 'ops_admin')
     assert exc.value.status_code == 403
+
+
+def test_operator_case_create_queues_investigation_and_is_idempotent(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+    with Session(engine) as db:
+        db.add(Operator(
+            tenant_id='demo',
+            subject='sales',
+            role='sales_manager',
+            api_key_hash=operator_key_hash('sales-key'),
+            status='active',
+        ))
+        db.commit()
+
+    payload = CaseCreateIn(
+        event_type='inventory_shortage',
+        order_id='SAL-ORD-2026-00002',
+        source_event_id='cli-event-1',
+        reason='created from CLI',
+    )
+    first = create_case(payload, x_operator_key='sales-key')
+    second = create_case(payload, x_operator_key='sales-key')
+
+    assert first['duplicate'] is False
+    assert second == {'case_id': first['case_id'], 'status': 'queued', 'duplicate': True}
+    with Session(engine) as db:
+        case = db.get(Case, first['case_id'])
+        tasks = db.scalars(select(Task).where(Task.case_id == first['case_id'])).all()
+        events = db.scalars(select(Event).where(Event.case_id == first['case_id'])).all()
+        audit_logs = db.scalars(select(AuditLog).where(AuditLog.case_id == first['case_id'])).all()
+    assert case.event_type == 'inventory_shortage'
+    assert case.order_id == 'SAL-ORD-2026-00002'
+    assert [task.kind for task in tasks] == ['investigate']
+    assert any(event.kind == 'case_created' for event in events)
+    assert any(log.action == 'case_created' for log in audit_logs)
 
 
 def test_fault_injection_requires_non_production_explicit_enable(monkeypatch):
