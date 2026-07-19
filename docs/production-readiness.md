@@ -150,10 +150,10 @@ ERPNext 沙箱试运行：可以
 
 生产前应补齐：
 
-- 云厂商 Secret Manager / Vault
+- Secret Manager / Vault
 - 密钥轮换机制
 - Secret 注入流水线
-- 禁止 `.env` 进入生产镜像或服务器
+- 禁止 `.env` 进入生产镜像或运行环境
 - 日志脱敏检查
 
 ### 2.3 监控告警还不完整
@@ -265,5 +265,3 @@ ERPNext 沙箱试运行：可以
 > ResolveOps 当前已经达到 ERPNext 沙箱可运行和求职展示级别，具备真实业务系统接入、工具调用、Case 状态持久化、调用级审批、结果验证、故障注入和容器化回归测试。它还没有直接进入真实生产写操作，因为生产环境还需要补齐企业 IAM、Secret 管理、监控告警、备份恢复和压测数据。我没有把“能跑 Docker”包装成“已生产上线”，而是按环境分层明确了上线边界。
 
 这比直接说“项目已上线”更可信。
-
-如果需要对外展示，可以先做 hosted sandbox demo，而不是生产 SaaS。云端 Demo 的范围和安全边界见 [Cloud Demo Plan](cloud-demo-plan.md)。
