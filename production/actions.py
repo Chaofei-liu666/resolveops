@@ -1,0 +1,269 @@
+"""Action tools and Action Plan normalization.
+
+Write operations are tools too, but they are not directly callable by the LLM.
+The LLM may propose them in an Action Plan; ResolveOps executes them only after
+policy checks, bound approvals, idempotency control, and verification.
+"""
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Any, Callable
+from uuid import uuid4
+from .tools import ToolSpec, object_schema
+
+Validator = Callable[[dict[str, Any]], dict[str, Any]]
+ResourceKeys = Callable[[dict[str, Any]], list[str]]
+
+
+@dataclass(frozen=True)
+class ActionDefinition:
+    action_type: str
+    title: str
+    executor: str | None
+    approval_policy: str
+    validator: Validator | None = None
+    resource_keys: ResourceKeys | None = None
+    verification: dict[str, Any] | None = None
+    compensation: dict[str, Any] | None = None
+    tool_spec: ToolSpec | None = None
+
+    @property
+    def executable(self) -> bool:
+        return self.executor is not None
+
+
+def transfer_input(data: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError('transfer_stock input must be an object')
+    required = {'source', 'target', 'sku', 'quantity'}
+    if not required <= data.keys() or any(data[k] in (None, '') for k in required):
+        raise ValueError('transfer_stock requires source, target, sku and quantity')
+    quantity = float(data['quantity'])
+    if quantity <= 0:
+        raise ValueError('transfer_stock quantity must be positive')
+    return {'source': str(data['source']), 'target': str(data['target']), 'sku': str(data['sku']), 'quantity': quantity}
+
+
+def purchase_request_input(data: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError('create_purchase_request input must be an object')
+    required = {'target', 'sku', 'quantity', 'required_by'}
+    if not required <= data.keys() or any(data[k] in (None, '') for k in required):
+        raise ValueError('create_purchase_request requires target, sku, quantity and required_by')
+    quantity = float(data['quantity'])
+    if quantity <= 0:
+        raise ValueError('create_purchase_request quantity must be positive')
+    return {'target': str(data['target']), 'sku': str(data['sku']), 'quantity': quantity, 'required_by': str(data['required_by'])}
+
+
+ACTION_TOOL_SPECS: dict[str, ToolSpec] = {
+    'transfer_stock': ToolSpec(
+        name='transfer_stock',
+        description='Create a draft inventory transfer between permitted warehouses.',
+        parameters=object_schema(
+            {
+                'source': {'type': 'string'},
+                'target': {'type': 'string'},
+                'sku': {'type': 'string'},
+                'quantity': {'type': 'number'},
+            },
+            ['source', 'target', 'sku', 'quantity'],
+        ),
+        permission='inventory:transfer:create_draft',
+        side_effect='create_draft_record',
+        risk_level='medium',
+        source_system='ERPNextAdapter',
+        executor_ref='erp.transfer_stock',
+        llm_callable=False,
+        requires_approval=True,
+        idempotency_required=True,
+        resource_keys=['inventory:{source}:{sku}'],
+        verification={'tool': 'get_stock_entry', 'assertions': ['draft', 'source', 'target', 'sku', 'quantity']},
+        compensation={'strategy': 'cancel_draft_transfer'},
+    ),
+    'create_purchase_request': ToolSpec(
+        name='create_purchase_request',
+        description='Create a draft replenishment request; never creates a Purchase Order.',
+        parameters=object_schema(
+            {
+                'target': {'type': 'string'},
+                'sku': {'type': 'string'},
+                'quantity': {'type': 'number'},
+                'required_by': {'type': 'string'},
+            },
+            ['target', 'sku', 'quantity', 'required_by'],
+        ),
+        permission='procurement:material_request:create_draft',
+        side_effect='create_draft_record',
+        risk_level='medium',
+        source_system='ERPNextAdapter',
+        executor_ref='erp.create_purchase_request',
+        llm_callable=False,
+        requires_approval=True,
+        idempotency_required=True,
+        resource_keys=['replenishment:{target}:{sku}'],
+        verification={'tool': 'get_material_request', 'assertions': ['draft', 'target', 'sku', 'quantity', 'required_by']},
+        compensation={'strategy': 'cancel_draft_purchase_request'},
+    ),
+    'draft_customer_notification': ToolSpec(
+        name='draft_customer_notification',
+        description='Draft a customer-facing notification without sending it.',
+        parameters=object_schema(),
+        permission='customer_communication:draft',
+        side_effect='create_draft_record',
+        risk_level='medium',
+        source_system='CommunicationAdapter',
+        executor_ref=None,
+        llm_callable=False,
+        requires_approval=True,
+    ),
+    'create_manual_ticket': ToolSpec(
+        name='create_manual_ticket',
+        description='Create a human handoff ticket for unresolved business exceptions.',
+        parameters=object_schema(),
+        permission='ticket:create',
+        side_effect='create_task_record',
+        risk_level='low',
+        source_system='TicketAdapter',
+        executor_ref=None,
+        llm_callable=False,
+        requires_approval=False,
+    ),
+}
+
+
+REGISTRY: dict[str, ActionDefinition] = {
+    'transfer_stock': ActionDefinition(
+        action_type='transfer_stock',
+        title='Create transfer draft',
+        executor=ACTION_TOOL_SPECS['transfer_stock'].executor_ref,
+        approval_policy='warehouse_manager',
+        validator=transfer_input,
+        resource_keys=lambda x: [f"inventory:{x['source']}:{x['sku']}"],
+        verification=ACTION_TOOL_SPECS['transfer_stock'].verification,
+        compensation=ACTION_TOOL_SPECS['transfer_stock'].compensation,
+        tool_spec=ACTION_TOOL_SPECS['transfer_stock'],
+    ),
+    'create_purchase_request': ActionDefinition(
+        action_type='create_purchase_request',
+        title='Create purchase request draft',
+        executor=ACTION_TOOL_SPECS['create_purchase_request'].executor_ref,
+        approval_policy='procurement_manager',
+        validator=purchase_request_input,
+        verification=ACTION_TOOL_SPECS['create_purchase_request'].verification,
+        compensation=ACTION_TOOL_SPECS['create_purchase_request'].compensation,
+        tool_spec=ACTION_TOOL_SPECS['create_purchase_request'],
+    ),
+    'draft_customer_notification': ActionDefinition(
+        'draft_customer_notification',
+        'Draft customer notification',
+        None,
+        'sales_owner',
+        tool_spec=ACTION_TOOL_SPECS['draft_customer_notification'],
+    ),
+    'create_manual_ticket': ActionDefinition(
+        'create_manual_ticket',
+        'Create manual handoff ticket',
+        None,
+        'none',
+        tool_spec=ACTION_TOOL_SPECS['create_manual_ticket'],
+    ),
+}
+
+
+def normalize_proposal(proposal: dict[str, Any], rationale: str, evidence_refs: list[str] | None = None) -> dict[str, Any]:
+    """Make every proposed write operation a governed Action Tool envelope."""
+    action_type = proposal.get('action_type', 'transfer_stock')
+    definition = REGISTRY.get(action_type)
+    if not definition:
+        raise ValueError(f'action_type not registered: {action_type}')
+    raw_input = proposal.get('input') or proposal.get('arguments') or {k: proposal.get(k) for k in ('source', 'target', 'sku', 'quantity') if k in proposal}
+    inputs = definition.validator(raw_input) if definition.validator else raw_input
+    return {
+        'action_id': str(uuid4()),
+        'action_type': action_type,
+        'title': proposal.get('title', definition.title),
+        'evidence_refs': evidence_refs or [],
+        'input': inputs,
+        'preconditions': proposal.get('preconditions', []),
+        'expected_effect': proposal.get('expected_effect', []),
+        'risk': {'level': proposal.get('risk', definition.tool_spec.risk_level if definition.tool_spec else 'medium'), 'approval_policy': definition.approval_policy},
+        'execution': {
+            'executor': definition.executor,
+            'idempotency_scope': 'case + action version',
+            'resource_keys': definition.resource_keys(inputs) if definition.resource_keys else [],
+        },
+        'verification': definition.verification or {},
+        'compensation': definition.compensation or {},
+        'tool': definition.tool_spec.metadata() if definition.tool_spec else {},
+        'rationale': rationale,
+        'executable': definition.executable,
+    }
+
+
+def normalize_plan(proposals: list[dict[str, Any]], rationale: str, evidence_refs: list[str] | None = None) -> dict[str, Any]:
+    """A plan may contain one action or a coordinated set of actions."""
+    if not isinstance(proposals, list) or not proposals or len(proposals) > 3:
+        raise ValueError('recommended_actions must contain between one and three actions')
+    actions = [normalize_proposal(proposal, rationale, evidence_refs) for proposal in proposals]
+    action_types = [action['action_type'] for action in actions]
+    if len(set(action_types)) != len(action_types):
+        raise ValueError('a plan may not repeat the same action type')
+    return {'plan_id': str(uuid4()), 'actions': actions, 'rationale': rationale, 'state': 'proposed'}
+
+
+def definition_for(action_type: str) -> ActionDefinition | None:
+    return REGISTRY.get(action_type)
+
+
+def action_tool_spec(action_type: str) -> ToolSpec | None:
+    return ACTION_TOOL_SPECS.get(action_type)
+
+
+def planner_action_catalog() -> list[dict[str, Any]]:
+    """Return write Action Schemas visible to the planner but not executable by it.
+
+    This is the single source of truth for actions the LLM may propose.  The
+    same registry is later used by normalize_plan(), Policy Engine, Executor,
+    and Verification.  This avoids prompt-only action definitions drifting away
+    from runtime validation.
+    """
+    catalog = []
+    for definition in REGISTRY.values():
+        spec = definition.tool_spec
+        if not spec:
+            continue
+        catalog.append({
+            'action_type': definition.action_type,
+            'title': definition.title,
+            'description': spec.description,
+            'input_schema': spec.parameters,
+            'executable': definition.executable,
+            'llm_directly_callable': spec.llm_callable,
+            'requires_approval': spec.requires_approval,
+            'side_effect': spec.side_effect,
+            'risk_level': spec.risk_level,
+            'approval_policy': definition.approval_policy,
+            'verification': spec.verification or {},
+            'compensation': spec.compensation or {},
+        })
+    return catalog
+
+
+def planner_action_instructions() -> str:
+    """Compact planner instructions generated from the Action Registry."""
+    lines = [
+        'Available write actions are Action Plan schemas, not directly callable tools.',
+        'Return them only inside recommended_actions. Do not attempt direct ERP writes.',
+        'Each recommended action must use action_type and input matching one schema below:',
+    ]
+    for item in planner_action_catalog():
+        required = item['input_schema'].get('required', [])
+        properties = item['input_schema'].get('properties', {})
+        fields = ', '.join(f'{name}:{properties.get(name, {}).get("type", "any")}' for name in required) or 'no input'
+        executable = 'executable after policy/approval' if item['executable'] else 'planning/handoff only'
+        lines.append(f"- {item['action_type']} input={{ {fields} }}; {executable}; side_effect={item['side_effect']}; approval={item['approval_policy']}")
+    return '\n'.join(lines)
+
+
+def registered_action_types() -> set[str]:
+    return set(REGISTRY)

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ResolveOps Console</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="mark">R</div>
+        <div>
+          <h1>ResolveOps</h1>
+          <p>Enterprise exception agent</p>
+        </div>
+      </div>
+      <label class="key-label" for="operator-key">Operator API key</label>
+      <input id="operator-key" type="password" autocomplete="off" placeholder="X-Operator-Key">
+      <label class="key-label" for="operator-name">Operator</label>
+      <input id="operator-name" type="text" autocomplete="off" placeholder="operator name">
+      <label class="key-label" for="operator-role">Role</label>
+      <select id="operator-role">
+        <option value="operator">operator</option>
+        <option value="warehouse_manager">warehouse_manager</option>
+        <option value="sales_manager">sales_manager</option>
+        <option value="procurement_manager">procurement_manager</option>
+        <option value="config_admin">config_admin</option>
+        <option value="ops_admin">ops_admin</option>
+      </select>
+      <div class="toolbar">
+        <button id="save-key">Save</button>
+        <button id="refresh" class="ghost">Refresh</button>
+      </div>
+      <div class="section-title">Cases</div>
+      <div id="case-list" class="case-list"></div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">CASE CONTROL CENTER</p>
+          <h2 id="page-title">Select a case</h2>
+        </div>
+        <div id="status-chip" class="status muted">idle</div>
+      </header>
+
+      <section id="detail" class="detail empty">
+        Select a Case from the left panel.
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

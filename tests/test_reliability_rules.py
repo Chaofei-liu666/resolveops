@@ -1,0 +1,540 @@
+import os
+from datetime import date, timedelta
+
+os.environ.setdefault('ERPNEXT_BASE_URL', 'https://erp.invalid')
+os.environ.setdefault('ERPNEXT_API_KEY', 'test')
+os.environ.setdefault('ERPNEXT_API_SECRET', 'test')
+os.environ.setdefault('WEBHOOK_SECRET', 'test')
+os.environ.setdefault('OPERATOR_API_KEY', 'test')
+
+import pytest
+
+from production.actions import action_tool_spec, normalize_plan, normalize_proposal, planner_action_catalog, planner_action_instructions, registered_action_types
+import production.agent as agent_module
+from production.agent import InvestigationAgent
+from production.evidence import validate_plan_grounding
+from production.executors import executor_for
+from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from production.context import CaseContextBuilder
+from production.main import LogisticsLaneIn, OperatorIdentity, audit_out, eval_case_out, eval_summary_out, require_role
+from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
+from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, Task
+from production.policy import action_policy, allow_read_tool
+from production.tool_result import ToolResult
+from production.tools import BusinessReadTools, ToolSpec, summarize_customer_profile
+
+
+def future_required_by(days: int = 10) -> str:
+    return (date.today() + timedelta(days=days)).isoformat()
+
+
+def test_illegal_action_plan_cannot_be_normalized():
+    with pytest.raises(ValueError):
+        normalize_proposal({'action_type': 'transfer_stock', 'input': {'sku': 'A'}}, 'bad model output')
+
+
+def test_unregistered_action_type_is_rejected():
+    with pytest.raises(ValueError):
+        normalize_proposal({'action_type': 'delete_sales_order', 'input': {}}, 'unsafe request')
+
+
+def test_read_tool_cannot_escape_warehouse_scope():
+    order = {'items': [{'warehouse': '成都仓 - ROPS'}]}
+    allowed, reason = allow_read_tool('get_inventory', {'warehouse': '海外仓', 'item_code': 'SKU-A12'}, order)
+    assert not allowed
+    assert reason == 'warehouse_out_of_scope'
+
+
+def test_high_amount_requires_two_roles():
+    plan = {'action_type': 'transfer_stock'}
+    evidence = {'observations': [{'tool': 'get_order', 'result': {'grand_total': 150000}}, {'tool': 'get_customer_profile', 'result': {}}]}
+    decision = action_policy(plan, evidence)
+    assert decision['allowed']
+    assert set(decision['required_roles']) == {'warehouse_manager', 'sales_manager'}
+
+
+def test_purchase_request_has_a_strict_action_contract():
+    action = normalize_proposal({
+        'action_type': 'create_purchase_request',
+        'input': {'target': 'Stores - ROPS', 'sku': 'SKU-A12', 'quantity': 30, 'required_by': '2026-07-20'},
+    }, 'No safe transfer source remains.')
+    assert action['executable']
+    assert action['execution']['executor'] == 'erp.create_purchase_request'
+    assert action['tool']['llm_callable'] is False
+    assert action['tool']['requires_approval'] is True
+    assert action['tool']['idempotency_required'] is True
+
+
+def test_purchase_request_requires_procurement_approval():
+    plan = {'action_type': 'create_purchase_request'}
+    evidence = {'observations': [{'tool': 'get_order', 'result': {'grand_total': 1}}, {'tool': 'get_customer_profile', 'result': {}}]}
+    assert action_policy(plan, evidence)['required_roles'] == ['procurement_manager']
+
+
+def test_policy_tolerates_empty_customer_group():
+    plan = {'action_type': 'transfer_stock'}
+    evidence = {'observations': [{'tool': 'get_order', 'result': {'grand_total': 1}}, {'tool': 'get_customer_profile', 'result': {'customer_group': None}}]}
+    assert action_policy(plan, evidence)['required_roles'] == ['warehouse_manager']
+
+
+def test_plan_can_coordinate_transfer_and_purchase_without_hardcoding_it():
+    plan = normalize_plan([
+        {'action_type': 'transfer_stock', 'input': {'source': '重庆仓 - ROPS', 'target': 'Stores - ROPS', 'sku': 'SKU-A12', 'quantity': 10}},
+        {'action_type': 'create_purchase_request', 'input': {'target': 'Stores - ROPS', 'sku': 'SKU-A12', 'quantity': 20, 'required_by': '2026-07-20'}},
+    ], 'Combined action is preferred for this evidence set.')
+    assert [action['action_type'] for action in plan['actions']] == ['transfer_stock', 'create_purchase_request']
+    assert len({action['action_id'] for action in plan['actions']}) == 2
+
+
+def grounded_observations():
+    required_by = future_required_by()
+    return [
+        {'tool':'get_order','arguments':{},'result':{
+            'name':'SO-1',
+            'delivery_date': required_by,
+            'items':[{'item_code':'SKU-A12','warehouse':'Stores - ROPS','qty':30}],
+        }},
+        {'tool':'get_inventory','arguments':{'item_code':'SKU-A12','warehouse':'Stores - ROPS'},'result':{
+            'warehouse':'Stores - ROPS','item_code':'SKU-A12','actual_qty':0,'reserved_qty':0,
+        }},
+        {'tool':'get_inventory','arguments':{'item_code':'SKU-A12','warehouse':'重庆仓 - ROPS'},'result':{
+            'warehouse':'重庆仓 - ROPS','item_code':'SKU-A12','actual_qty':10,'reserved_qty':0,
+        }},
+        {'tool':'get_transfer_options','arguments':{'item_code':'SKU-A12','target':'Stores - ROPS'},'result':{
+            'lanes':[{'source':'重庆仓 - ROPS','target':'Stores - ROPS','transit_days':2,'cost_per_unit':8,'currency':'CNY'}],
+        }},
+        {'tool':'get_item_supply_profile','arguments':{'item_code':'SKU-A12'},'result':{
+            'item_code':'SKU-A12','lead_time_days':3,
+        }},
+        {'tool':'get_inbound_purchase','arguments':{'item_code':'SKU-A12'},'result':{
+            'purchase_items':[],
+        }},
+    ]
+
+
+def test_evidence_grounding_accepts_supported_multi_action_plan():
+    required_by = future_required_by()
+    plan = normalize_plan([
+        {'action_type':'transfer_stock','input':{'source':'重庆仓 - ROPS','target':'Stores - ROPS','sku':'SKU-A12','quantity':10}},
+        {'action_type':'create_purchase_request','input':{'target':'Stores - ROPS','sku':'SKU-A12','quantity':20,'required_by': required_by}},
+    ], 'grounded')
+    result = validate_plan_grounding(plan, grounded_observations())
+    assert result['allowed']
+    assert result['shortage'] == 30
+    assert result['covered_quantity'] == 30
+
+
+def test_evidence_grounding_rejects_transfer_without_lane_evidence():
+    required_by = future_required_by()
+    plan = normalize_plan([
+        {'action_type':'transfer_stock','input':{'source':'重庆仓 - ROPS','target':'Stores - ROPS','sku':'SKU-A12','quantity':10}},
+        {'action_type':'create_purchase_request','input':{'target':'Stores - ROPS','sku':'SKU-A12','quantity':20,'required_by': required_by}},
+    ], 'not grounded')
+    observations = [item for item in grounded_observations() if item['tool'] != 'get_transfer_options']
+    result = validate_plan_grounding(plan, observations)
+    assert not result['allowed']
+    assert any('missing transfer lane evidence' in problem for problem in result['problems'])
+
+
+def test_known_model_schema_variant_is_normalized_before_policy_checks():
+    result = InvestigationAgent._parse_conclusion('{"status":"shortage","recommended_actions":[{"action":"transfer_stock","input":{}}],"alternatives":[],"rationale":"x","missing_information":[]}')
+    assert result['status'] == 'ready'
+    assert result['recommended_actions'][0]['action_type'] == 'transfer_stock'
+
+
+def test_known_model_tool_field_variant_is_normalized_before_policy_checks():
+    result = InvestigationAgent._parse_conclusion('{"status":"ready","recommended_actions":[{"tool":"create_purchase_request","input":{}}],"alternatives":[],"rationale":"x","missing_information":[]}')
+    assert result['recommended_actions'][0]['action_type'] == 'create_purchase_request'
+
+
+def test_tool_error_is_unknown_not_negative_fact():
+    conclusion = InvestigationAgent._parse_conclusion('not json')
+    assert conclusion['status'] == 'handoff'
+    assert 'schema' in conclusion['rationale'].lower()
+
+
+def test_tool_budget_exhaustion_is_preserved_as_missing_information(monkeypatch):
+    class Response:
+        def raise_for_status(self): pass
+        def json(self):
+            return {'choices':[{'message':{'content':'{"status":"ready","recommended_actions":[],"alternatives":[],"rationale":"enough evidence","missing_information":[],"evidence_summary":[]}'}}]}
+
+    monkeypatch.setattr('production.agent.httpx.post', lambda *args, **kwargs: Response())
+    conclusion = InvestigationAgent(None)._plan(
+        'SO-1',
+        [{'tool':'get_order','arguments':{},'result':{'name':'SO-1'}}],
+        [],
+        '',
+        budget_exhausted=True,
+    )
+    assert 'read-tool budget exhausted; plan uses only collected evidence' in conclusion['missing_information']
+
+
+def test_customer_custom_field_is_normalized_as_business_evidence():
+    profile = summarize_customer_profile({
+        'customer_name': 'Acme',
+        'customer_group': 'Commercial',
+        'custom_\u5141\u8bb8\u62c6\u5355\u53d1\u8d27': 1,
+    })
+    assert profile['allows_partial_delivery'] is True
+    assert profile['evidence_fields']['allows_partial_delivery'] == 'custom_\u5141\u8bb8\u62c6\u5355\u53d1\u8d27'
+
+
+def test_tool_spec_generates_llm_function_schema():
+    spec = ToolSpec(
+        name='get_inventory',
+        description='Read inventory.',
+        llm_description='Read stock.',
+        parameters={'type':'object','properties':{'sku':{'type':'string'}},'required':['sku'],'additionalProperties':False},
+        permission='inventory:read',
+        side_effect='none',
+        risk_level='low',
+        source_system='WMSAdapter',
+        executor=lambda _args, _order_id: {},
+    )
+    schema = spec.to_openai_tool()
+    assert schema['type'] == 'function'
+    assert schema['function']['name'] == 'get_inventory'
+    assert schema['function']['description'] == 'Read stock.'
+    assert schema['function']['parameters']['additionalProperties'] is False
+    assert spec.metadata()['source_system'] == 'WMSAdapter'
+
+
+def test_llm_tool_schema_excludes_runtime_governance_metadata():
+    class FakeAdapter:
+        pass
+
+    tool = next(item for item in BusinessReadTools(FakeAdapter()).definitions() if item['function']['name'] == 'get_inventory')
+    payload = tool['function']
+    assert set(payload.keys()) == {'name', 'description', 'parameters'}
+    dumped = str(tool)
+    assert 'permission' not in dumped
+    assert 'side_effect' not in dumped
+    assert 'source_system' not in dumped
+    assert 'requires_approval' not in dumped
+    assert 'verification' not in dumped
+    assert len(payload['description']) <= 80
+
+
+def test_business_read_tools_expose_business_names_not_erpnext_doctypes():
+    class FakeAdapter:
+        pass
+
+    names = {item['function']['name'] for item in BusinessReadTools(FakeAdapter()).definitions()}
+    assert {'get_order', 'get_inventory', 'get_customer_profile'} <= names
+    assert not {'Sales Order', 'Bin', 'Stock Entry', 'Material Request'} & names
+
+
+def test_business_read_tool_metadata_exposes_runtime_boundaries():
+    class FakeAdapter:
+        pass
+
+    metadata = BusinessReadTools(FakeAdapter()).metadata('get_inventory')
+    assert metadata['permission'] == 'inventory:read'
+    assert metadata['side_effect'] == 'none'
+    assert metadata['risk_level'] == 'low'
+    assert metadata['source_system'] == 'ERPNextAdapter'
+
+
+def test_tool_result_preserves_business_data_and_runtime_status():
+    result = ToolResult.success({'actual_qty': 10}, source_system='WMSAdapter')
+    assert result.observation_result() == {'actual_qty': 10}
+    assert result.to_dict()['status'] == 'success'
+    failed = ToolResult.failure('warehouse_out_of_scope', retryable=False, source_system='WMSAdapter')
+    assert failed.observation_result()['error'] == 'warehouse_out_of_scope'
+    assert failed.to_dict()['evidence_usable'] is False
+
+
+def test_case_context_builder_isolates_concurrent_case_state():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        case_a = Case(id='case-a', tenant_id='demo', order_id='SO-A', status='replanning', plan_version=2, evidence={'observations':[{'tool':'get_order','result':{'name':'SO-A'}}]})
+        case_b = Case(id='case-b', tenant_id='demo', order_id='SO-B', status='waiting_approval', plan_version=1, evidence={'observations':[{'tool':'get_order','result':{'name':'SO-B'}}]})
+        db.add_all([case_a, case_b])
+        db.add_all([
+            Event(case_id='case-a', kind='replan_requested', message='A changed', data={'reason':'inventory changed'}),
+            Event(case_id='case-b', kind='tool_observation', message='B read', data={'secret':'do not leak'}),
+        ])
+        db.add_all([
+            Approval(case_id='case-a', plan_version=2, action_hash='hash-a', action={'action_type':'transfer_stock'}, status='pending'),
+            Approval(case_id='case-b', plan_version=1, action_hash='hash-b', action={'action_type':'transfer_stock'}, status='pending'),
+        ])
+        db.add_all([
+            Invocation(case_id='case-a', idempotency_key='case-a:action:v2', tool='create_transfer_draft', status='succeeded'),
+            Invocation(case_id='case-b', idempotency_key='case-b:action:v1', tool='create_transfer_draft', status='succeeded'),
+        ])
+        db.add_all([
+            Task(case_id='case-a', kind='investigate', status='running', attempts=1),
+            Task(case_id='case-b', kind='execute', status='queued', attempts=0),
+        ])
+        db.commit()
+
+        context = CaseContextBuilder(db).build('case-a', {'reason':'fresh inventory required'})
+
+    assert context['scope']['case_id'] == 'case-a'
+    assert context['scope']['order_id'] == 'SO-A'
+    assert context['confirmed_observations'][0]['result']['name'] == 'SO-A'
+    assert context['last_failure']['kind'] == 'replan_requested'
+    assert context['isolation']['case_ids_present'] == ['case-a']
+    assert all(ref['case_id'] == 'case-a' for ref in context['approval_refs'])
+    assert all(ref['case_id'] == 'case-a' for ref in context['invocation_refs'])
+    assert all(ref['case_id'] == 'case-a' for ref in context['task_refs'])
+
+
+def test_verified_case_lessons_are_generated_only_from_verified_resolved_case():
+    case = Case(
+        id='case-lesson-1',
+        tenant_id='demo',
+        order_id='SO-1',
+        status='resolved',
+        plan_version=1,
+        evidence={'observations':[
+            {'tool':'get_order','result':{'name':'SO-1','customer':'CUST-1','items':[{'item_code':'SKU-A12','warehouse':'Stores - ROPS','qty':30}]}},
+            {'tool':'get_customer_profile','result':{'allows_partial_delivery':True}},
+        ]},
+    )
+    action = {'action_type':'transfer_stock','input':{'source':'重庆仓 - ROPS','target':'Stores - ROPS','sku':'SKU-A12','quantity':10}}
+    lessons = candidate_lessons_from_verified_action(case, action, {'verified':True,'event_data':{'external_id':'MAT-STE-1'}})
+    assert {lesson['lesson_type'] for lesson in lessons} >= {'resolution_pattern', 'operational_lesson', 'customer_preference'}
+    assert all('planning hint' in lesson['content'] or 'Re-check' in lesson['content'] or 'Before executing' in lesson['content'] for lesson in lessons)
+
+    unresolved = Case(id='case-lesson-2', tenant_id='demo', order_id='SO-2', status='waiting_approval', plan_version=1, evidence=case.evidence)
+    assert candidate_lessons_from_verified_action(unresolved, action, {'verified':True}) == []
+    assert candidate_lessons_from_verified_action(case, action, {'verified':False}) == []
+
+
+def test_case_context_includes_only_same_tenant_active_lessons_as_hints():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        case = Case(
+            id='case-memory-a',
+            tenant_id='tenant-a',
+            order_id='SO-A',
+            status='queued',
+            plan_version=0,
+            evidence={'observations':[{'tool':'get_order','result':{'name':'SO-A','customer':'CUST-A','items':[{'item_code':'SKU-A12','warehouse':'Stores - ROPS'}]}}]},
+        )
+        db.add(case)
+        db.add_all([
+            CaseLesson(
+                tenant_id='tenant-a',
+                lesson_type='resolution_pattern',
+                subject_type='sku',
+                subject_id='SKU-A12',
+                content='Tenant A SKU lesson.',
+                evidence_case_id='old-case-a',
+                source_action_type='create_purchase_request',
+                status='active',
+            ),
+            CaseLesson(
+                tenant_id='tenant-b',
+                lesson_type='resolution_pattern',
+                subject_type='sku',
+                subject_id='SKU-A12',
+                content='Tenant B lesson must not leak.',
+                evidence_case_id='old-case-b',
+                source_action_type='create_purchase_request',
+                status='active',
+            ),
+            CaseLesson(
+                tenant_id='tenant-a',
+                lesson_type='resolution_pattern',
+                subject_type='sku',
+                subject_id='SKU-A12',
+                content='Inactive lesson must not appear.',
+                evidence_case_id='old-case-c',
+                source_action_type='create_purchase_request',
+                status='retired',
+            ),
+        ])
+        db.commit()
+
+        lessons = relevant_lessons_for_case(db, case)
+        context = CaseContextBuilder(db).build('case-memory-a')
+
+    assert [lesson['content'] for lesson in lessons] == ['Tenant A SKU lesson.']
+    memory = context['long_term_memory']
+    assert memory['type'] == 'verified_case_lessons'
+    assert memory['lessons'][0]['tenant_id'] == 'tenant-a'
+    assert memory['lessons'][0]['content'] == 'Tenant A SKU lesson.'
+    assert context['isolation']['lesson_tenant_ids_present'] == ['tenant-a']
+
+
+def test_record_verified_lessons_is_idempotent_per_evidence_case():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        case = Case(
+            id='case-memory-record',
+            tenant_id='demo',
+            order_id='SO-1',
+            status='resolved',
+            plan_version=1,
+            evidence={'observations':[{'tool':'get_order','result':{'name':'SO-1','items':[{'item_code':'SKU-A12','warehouse':'Stores - ROPS'}]}}]},
+        )
+        db.add(case); db.commit()
+        action = {'action_type':'create_purchase_request','input':{'target':'Stores - ROPS','sku':'SKU-A12','quantity':20,'required_by':future_required_by()}}
+        first = record_verified_lessons(db, case, action, {'verified':True,'event_data':{'external_id':'MAT-MR-1'}})
+        second = record_verified_lessons(db, case, action, {'verified':True,'event_data':{'external_id':'MAT-MR-1'}})
+        db.commit()
+
+    assert len(first) == 1
+    assert second == []
+
+
+def test_write_action_tools_share_schema_but_are_not_llm_callable():
+    spec = action_tool_spec('transfer_stock')
+    assert spec is not None
+    assert spec.permission == 'inventory:transfer:create_draft'
+    assert spec.side_effect == 'create_draft_record'
+    assert spec.requires_approval is True
+    assert spec.idempotency_required is True
+    with pytest.raises(ValueError):
+        spec.to_openai_tool()
+
+
+def test_executor_registry_maps_action_type_to_write_adapter_tool():
+    transfer = executor_for('transfer_stock')
+    purchase = executor_for('create_purchase_request')
+    assert transfer is not None
+    assert transfer.invocation_tool == 'create_transfer_draft'
+    assert purchase is not None
+    assert purchase.invocation_tool == 'create_purchase_request_draft'
+    assert executor_for('draft_customer_notification') is None
+
+
+def test_transfer_executor_preflight_detects_source_inventory_change():
+    class FakeDb:
+        def scalar(self, *_args, **_kwargs): return True
+    class FakeErp:
+        def stock(self, sku, source):
+            return {'item_code':sku,'warehouse':source,'actual_qty':5,'reserved_qty':0}
+
+    executor = executor_for('transfer_stock')
+    result = executor.preflight(FakeDb(), FakeErp(), {'source':'WH-A','target':'WH-B','sku':'SKU-1','quantity':10})
+    assert not result['ok']
+    assert result['reason'] == 'source_inventory_changed'
+    assert result['fresh_inventory']['actual_qty'] == 5
+
+
+def test_purchase_executor_context_reads_company_from_order():
+    class FakeErp:
+        def sales_order(self, order_id):
+            return {'name':order_id,'company':'ResolveOps Co'}
+
+    executor = executor_for('create_purchase_request')
+    assert executor.context(FakeErp(), 'SO-1', {}) == {'company':'ResolveOps Co'}
+
+
+def test_planner_action_catalog_is_generated_from_action_registry():
+    catalog = planner_action_catalog()
+    by_type = {item['action_type']: item for item in catalog}
+    assert registered_action_types() <= set(by_type)
+    assert by_type['transfer_stock']['input_schema'] == action_tool_spec('transfer_stock').parameters
+    assert by_type['transfer_stock']['llm_directly_callable'] is False
+    assert by_type['create_purchase_request']['requires_approval'] is True
+
+
+def test_planner_instructions_are_generated_not_handwritten():
+    instructions = planner_action_instructions()
+    assert 'transfer_stock input=' in instructions
+    assert 'create_purchase_request input=' in instructions
+    assert 'directly callable tools' in instructions
+    assert 'source:string' in instructions
+    assert 'required_by:string' in instructions
+
+
+def test_agent_planner_base_prompt_does_not_hardcode_action_input_contracts():
+    assert 'transfer_stock uses input=' not in agent_module.PLANNER_SYSTEM_BASE
+    assert 'create_purchase_request uses input=' not in agent_module.PLANNER_SYSTEM_BASE
+
+
+def test_logistics_lane_config_rejects_invalid_transit_time():
+    with pytest.raises(ValueError):
+        LogisticsLaneIn(
+            source_warehouse='Source - ROPS',
+            target_warehouse='Target - ROPS',
+            transit_days=0,
+            cost_per_unit=1,
+        )
+
+
+def test_config_write_requires_config_admin_role():
+    require_role(OperatorIdentity(subject='ops', role='config_admin'), 'config_admin', 'ops_admin')
+    with pytest.raises(HTTPException) as exc:
+        require_role(OperatorIdentity(subject='sales', role='sales_manager'), 'config_admin', 'ops_admin')
+    assert exc.value.status_code == 403
+
+
+def test_audit_log_serializes_actor_role_and_resource():
+    log = AuditLog(
+        actor='alice',
+        role='warehouse_manager',
+        action='approval_granted',
+        resource_type='approval',
+        resource_id='ap-1',
+        case_id='case-1',
+        data={'action_hash':'abc','plan_version':2},
+    )
+    result = audit_out(log)
+    assert result['actor'] == 'alice'
+    assert result['role'] == 'warehouse_manager'
+    assert result['resource_type'] == 'approval'
+    assert result['data']['plan_version'] == 2
+
+
+def test_eval_case_requires_write_verification():
+    case = Case(id='case-1', tenant_id='demo', order_id='SO-1', status='resolved', plan_version=1, plan={'actions':[{'action_type':'transfer_stock'}]})
+    events = [
+        Event(case_id='case-1', kind='tool_observation', message='read', data={}),
+        Event(case_id='case-1', kind='verification_passed', message='ok', data={}),
+    ]
+    approvals = [Approval(case_id='case-1', plan_version=1, action_hash='abc', action={}, status='consumed')]
+    invocations = [Invocation(case_id='case-1', idempotency_key='k', tool='create_transfer_draft', status='succeeded')]
+    tasks = [Task(case_id='case-1', kind='execute', status='done')]
+    result = eval_case_out(case, events, approvals, invocations, tasks)
+    assert result['resolved'] is True
+    assert result['write_invocation_count'] == 1
+    assert result['verification_complete'] is True
+    assert result['tool_call_count'] == 1
+
+
+def test_eval_summary_counts_recovery_and_failure_signals():
+    rows = [
+        {
+            'resolved': True,
+            'manual_review': False,
+            'write_invocation_count': 1,
+            'verification_complete': True,
+            'verification_failed_count': 0,
+            'has_policy_denial': False,
+            'has_evidence_grounding_failure': False,
+            'has_replan': True,
+            'has_manual_handoff': False,
+            'task_failure_count': 0,
+        },
+        {
+            'resolved': False,
+            'manual_review': True,
+            'write_invocation_count': 0,
+            'verification_complete': True,
+            'verification_failed_count': 1,
+            'has_policy_denial': True,
+            'has_evidence_grounding_failure': True,
+            'has_replan': False,
+            'has_manual_handoff': True,
+            'task_failure_count': 1,
+        },
+    ]
+    summary = eval_summary_out(rows)
+    assert summary['total_cases'] == 2
+    assert summary['case_resolution_rate'] == 0.5
+    assert summary['verification_pass_rate'] == 1
+    assert summary['policy_denials'] == 1
+    assert summary['evidence_grounding_failures'] == 1
+    assert summary['replanned_cases'] == 1

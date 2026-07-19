@@ -1,0 +1,156 @@
+"""Evidence grounding checks for model-proposed Action Plans.
+
+The LLM may decide what to investigate and what to propose, but it does not get
+to decide whether its proposal is sufficiently grounded.  This module validates
+the semantic link between read-tool observations and executable actions.
+"""
+from __future__ import annotations
+from datetime import date, datetime, timedelta
+from typing import Any
+
+
+def usable_qty(stock: dict[str, Any] | None) -> float:
+    if not isinstance(stock, dict) or stock.get('error'):
+        return 0
+    return max(0, float(stock.get('actual_qty') or 0) - float(stock.get('reserved_qty') or 0))
+
+
+def observations_by_tool(observations: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = {}
+    for observation in observations or []:
+        result.setdefault(observation.get('tool'), []).append(observation)
+    return result
+
+
+def first_success(observations: list[dict[str, Any]], tool: str) -> dict[str, Any] | None:
+    for observation in observations or []:
+        if observation.get('tool') == tool and not (observation.get('result') or {}).get('error'):
+            return observation.get('result')
+    return None
+
+
+def matching_inventory(observations: list[dict[str, Any]], sku: str, warehouse: str) -> dict[str, Any] | None:
+    for observation in observations or []:
+        if observation.get('tool') != 'get_inventory':
+            continue
+        args = observation.get('arguments') or {}
+        result = observation.get('result') or {}
+        if result.get('error'):
+            continue
+        if args.get('item_code') == sku and args.get('warehouse') == warehouse:
+            return result
+    return None
+
+
+def matching_lane(observations: list[dict[str, Any]], sku: str, source: str, target: str) -> dict[str, Any] | None:
+    for observation in observations or []:
+        if observation.get('tool') != 'get_transfer_options':
+            continue
+        args = observation.get('arguments') or {}
+        result = observation.get('result') or {}
+        if result.get('error') or args.get('item_code') != sku or args.get('target') != target:
+            continue
+        for lane in result.get('lanes') or []:
+            if lane.get('source') == source and lane.get('target') == target:
+                return lane
+    return None
+
+
+def order_context(observations: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[str]]:
+    problems: list[str] = []
+    order = first_success(observations, 'get_order')
+    if not order:
+        return None, None, ['missing successful get_order evidence']
+    items = order.get('items') or []
+    if not items:
+        return order, None, ['order has no item evidence']
+    return order, items[0], problems
+
+
+def required_shortage(observations: list[dict[str, Any]]) -> tuple[float | None, list[str]]:
+    order, item, problems = order_context(observations)
+    if problems:
+        return None, problems
+    assert item is not None
+    target = item.get('warehouse')
+    sku = item.get('item_code')
+    required = float(item.get('qty') or 0)
+    target_stock = matching_inventory(observations, sku, target)
+    if target_stock is None:
+        return None, [f'missing target inventory evidence for {sku} at {target}']
+    return max(0, required - usable_qty(target_stock)), []
+
+
+def validates_purchase_timing(observations: list[dict[str, Any]], required_by: str) -> tuple[bool, str | None]:
+    supply = first_success(observations, 'get_item_supply_profile')
+    if not supply:
+        return False, 'missing item supply profile evidence'
+    lead_time = supply.get('lead_time_days')
+    if lead_time is None:
+        return False, 'missing lead_time_days evidence'
+    try:
+        due = date.fromisoformat(required_by[:10])
+        if date.today() + timedelta(days=float(lead_time)) > due:
+            return False, 'purchase lead time exceeds required_by date'
+    except (ValueError, TypeError):
+        return False, 'invalid required_by date'
+    return True, None
+
+
+def validate_plan_grounding(plan: dict[str, Any], observations: list[dict[str, Any]]) -> dict[str, Any]:
+    actions = plan.get('actions') if isinstance(plan, dict) else None
+    if not isinstance(actions, list) or not actions:
+        return {'allowed': False, 'reason': 'plan has no actions', 'problems': ['plan has no actions']}
+
+    shortage, base_problems = required_shortage(observations)
+    problems = list(base_problems)
+    covered = 0.0
+
+    inbound_checked = any(
+        observation.get('tool') == 'get_inbound_purchase' and not (observation.get('result') or {}).get('error')
+        for observation in observations
+    )
+
+    for action in actions:
+        action_type = action.get('action_type')
+        action_input = action.get('input') or {}
+        sku = action_input.get('sku')
+        target = action_input.get('target')
+        quantity = float(action_input.get('quantity') or 0)
+
+        if quantity <= 0:
+            problems.append(f'{action_type} has non-positive quantity')
+            continue
+
+        if action_type == 'transfer_stock':
+            source = action_input.get('source')
+            source_stock = matching_inventory(observations, sku, source)
+            if source_stock is None:
+                problems.append(f'transfer_stock missing source inventory evidence for {sku} at {source}')
+            elif usable_qty(source_stock) < quantity:
+                problems.append(f'transfer_stock quantity {quantity} exceeds usable source stock {usable_qty(source_stock)} at {source}')
+            if matching_lane(observations, sku, source, target) is None:
+                problems.append(f'transfer_stock missing transfer lane evidence from {source} to {target}')
+            covered += quantity
+
+        elif action_type == 'create_purchase_request':
+            ok, reason = validates_purchase_timing(observations, action_input.get('required_by') or '')
+            if not ok:
+                problems.append(f'create_purchase_request {reason}')
+            if not inbound_checked:
+                problems.append('create_purchase_request missing inbound purchase evidence')
+            covered += quantity
+
+        else:
+            problems.append(f'{action_type} has no evidence grounding rule')
+
+    if shortage is not None and covered < shortage:
+        problems.append(f'plan covers {covered} units but shortage is {shortage}')
+
+    return {
+        'allowed': not problems,
+        'reason': 'grounded' if not problems else 'evidence_not_sufficient',
+        'problems': problems,
+        'shortage': shortage,
+        'covered_quantity': covered,
+    }

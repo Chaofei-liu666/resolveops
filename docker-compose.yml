@@ -1,0 +1,26 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: resolveops
+      POSTGRES_USER: resolveops
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U resolveops -d resolveops"], interval: 5s, timeout: 3s, retries: 10}
+  api:
+    build: .
+    env_file: .env
+    ports: ["8090:8080"]
+    depends_on: {postgres: {condition: service_healthy}}
+    networks: [default, erpnext]
+  worker:
+    build: .
+    env_file: .env
+    command: ["python","-m","production.worker"]
+    depends_on: {postgres: {condition: service_healthy}}
+    networks: [default, erpnext]
+volumes: {postgres_data: {}}
+networks:
+  erpnext:
+    external: true
+    name: frappe_docker_frappe_network
