@@ -398,6 +398,20 @@ def eval_summary(x_operator_key:str|None=Header(default=None), x_operator:str|No
             rows.append(eval_case_out(case,events,approvals,invocations,tasks))
         return eval_summary_out(rows)
 
+@app.get('/v1/evals/cases/{case_id}')
+def eval_case(case_id:str, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        require_role(identity,'ops_admin','config_admin')
+        case=db.get(Case,case_id)
+        if not case:
+            raise HTTPException(404,'case not found')
+        events=db.scalars(select(Event).where(Event.case_id==case.id).order_by(Event.created_at)).all()
+        approvals=db.scalars(select(Approval).where(Approval.case_id==case.id)).all()
+        invocations=db.scalars(select(Invocation).where(Invocation.case_id==case.id)).all()
+        tasks=db.scalars(select(Task).where(Task.case_id==case.id)).all()
+        return eval_case_out(case,events,approvals,invocations,tasks)
+
 @app.get('/v1/fault-injections')
 def fault_injection_catalog(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
     with Session(engine) as db:

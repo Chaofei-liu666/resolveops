@@ -22,7 +22,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from production.context import CaseContextBuilder, build_case_context, validate_case_context_isolation
-from production.main import CaseCreateIn, FaultInjectionRunIn, LogisticsLaneIn, OperatorIdentity, audit_out, case_tool_trace, create_case, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_fault_injection_enabled, require_role, run_fault_injection
+from production.main import CaseCreateIn, FaultInjectionRunIn, LogisticsLaneIn, OperatorIdentity, audit_out, case_tool_trace, create_case, eval_case, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_fault_injection_enabled, require_role, run_fault_injection
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
 import production.migrations as migration_module
 from production.migrations import apply_migrations, ensure_schema_migrations_table
@@ -1421,6 +1421,41 @@ def test_eval_case_counts_tool_failures_and_context_isolation():
     assert result['has_context_isolation_sanitized'] is True
     assert result['has_context_isolation_failure'] is True
     assert result['blocked_event_count'] == 2
+
+
+def test_eval_case_endpoint_requires_ops_role_and_returns_case_metrics(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+    with Session(engine) as db:
+        db.add(Operator(
+            tenant_id='demo',
+            subject='ops',
+            role='ops_admin',
+            api_key_hash=operator_key_hash('ops-key'),
+            status='active',
+        ))
+        db.add(Case(
+            id='case-eval',
+            tenant_id='demo',
+            order_id='SO-1',
+            event_type='inventory_shortage',
+            status='resolved',
+            plan_version=1,
+            plan={'actions': [{'action_type': 'transfer_stock'}]},
+        ))
+        db.add(Event(case_id='case-eval', kind='tool_observation', message='read', data={'tool': 'get_order', 'result': {}, 'tool_result': {'status': 'success'}}))
+        db.add(Event(case_id='case-eval', kind='verification_passed', message='verified', data={}))
+        db.add(Invocation(case_id='case-eval', idempotency_key='case-eval:transfer_stock:1', tool='create_transfer_draft', status='succeeded'))
+        db.commit()
+
+    result = eval_case('case-eval', x_operator_key='ops-key')
+
+    assert result['case_id'] == 'case-eval'
+    assert result['resolved'] is True
+    assert result['write_invocation_count'] == 1
+    assert result['verification_complete'] is True
+    assert result['tool_call_count'] == 1
 
 
 def test_eval_summary_counts_recovery_and_failure_signals():

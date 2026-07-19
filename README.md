@@ -136,6 +136,8 @@ Evaluate recent Agent runs:
 ```powershell
 python resolveops.py eval summary --limit 20
 python resolveops.py eval summary --limit 20 --cases
+python resolveops.py eval case <case-id>
+python resolveops.py eval case <case-id> --events
 ```
 
 Approve or revoke an action:

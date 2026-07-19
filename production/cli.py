@@ -204,6 +204,79 @@ def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
             )
 
 
+def compact_stage_sequence(sequence: list[Any]) -> list[str]:
+    milestones = []
+    noisy = {'tool_scheduled', 'tool_observation'}
+    for item in sequence:
+        kind = str(item)
+        if kind in noisy:
+            continue
+        if not milestones or milestones[-1] != kind:
+            milestones.append(kind)
+    return milestones
+
+
+def print_eval_case(data: dict[str, Any], show_events: bool = False) -> None:
+    trace = data.get('tool_trace_summary') or {}
+    scheduler_sources = data.get('tool_scheduler_sources') or {}
+    write_count = data.get('write_invocation_count', 0)
+    if write_count:
+        verification_status = 'passed' if data.get('verification_complete') else 'failed_or_incomplete'
+    else:
+        verification_status = 'not_applicable_no_write'
+    print('ResolveOps Case Eval')
+    print(
+        f"case: {data.get('case_id')} type={data.get('event_type')} "
+        f"order={data.get('order_id')} status={data.get('status')} "
+        f"plan_version={data.get('plan_version')}"
+    )
+    print(
+        f"outcome: resolved={data.get('resolved')} manual_review={data.get('manual_review')} "
+        f"verification={verification_status}"
+    )
+    print(
+        f"tools: observed={data.get('tool_call_count', 0)} "
+        f"scheduled={data.get('scheduled_tool_call_count', 0)} "
+        f"failed={data.get('tool_failure_count', 0)} "
+        f"unique={', '.join(trace.get('tools_used') or []) or 'none'}"
+    )
+    if scheduler_sources:
+        sources = ', '.join(f'{key}={value}' for key, value in sorted(scheduler_sources.items()))
+        print(f"tool_scheduler_sources: {sources}")
+    print(
+        f"policy: approvals={data.get('approval_count', 0)} "
+        f"pending={data.get('pending_approval_count', 0)} "
+        f"expired={data.get('expired_approval_count', 0)} "
+        f"revoked={data.get('revoked_approval_count', 0)} "
+        f"policy_denial={data.get('has_policy_denial')}"
+    )
+    print(
+        f"writes: invocations={write_count} "
+        f"verification_passes={data.get('verification_pass_count', 0)} "
+        f"verification_failures={data.get('verification_failed_count', 0)}"
+    )
+    print(
+        f"recovery: replanned={data.get('has_replan')} "
+        f"recovery_events={data.get('recovery_event_count', 0)} "
+        f"blocked_events={data.get('blocked_event_count', 0)} "
+        f"manual_handoff={data.get('has_manual_handoff')}"
+    )
+    print(
+        f"context: isolation_sanitized={data.get('has_context_isolation_sanitized')} "
+        f"isolation_failed={data.get('has_context_isolation_failure')} "
+        f"grounding_passed={data.get('has_evidence_grounding_passed')} "
+        f"grounding_failed={data.get('has_evidence_grounding_failure')}"
+    )
+    sequence = [str(item) for item in (data.get('stage_sequence') or [])]
+    if sequence:
+        label = 'Full Stage Sequence' if show_events else 'Key Stage Sequence'
+        visible_sequence = sequence if show_events else compact_stage_sequence(sequence)
+        print(f'\n[{label}]')
+        print(' -> '.join(visible_sequence))
+        if not show_events and len(visible_sequence) != len(sequence):
+            print(f"(tool events hidden: {len(sequence) - len(visible_sequence)}; use --events for full sequence)")
+
+
 def cmd_status(args: argparse.Namespace, client: ApiClient) -> int:
     data = client.request('GET', '/v1/runtime/status')
     if args.json:
@@ -311,6 +384,15 @@ def cmd_eval_summary(args: argparse.Namespace, client: ApiClient) -> int:
     return 0
 
 
+def cmd_eval_case(args: argparse.Namespace, client: ApiClient) -> int:
+    data = client.request('GET', f'/v1/evals/cases/{args.case_id}')
+    if args.json:
+        print_json(data)
+    else:
+        print_eval_case(data, show_events=args.events)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='resolveops', description='ResolveOps API-first Agent CLI')
     parser.add_argument('--base-url', default=os.getenv('RESOLVEOPS_API_URL', DEFAULT_BASE_URL), help='ResolveOps API base URL')
@@ -369,6 +451,10 @@ def build_parser() -> argparse.ArgumentParser:
     eval_summary.add_argument('--limit', type=int, default=50, help='Number of recent cases to evaluate')
     eval_summary.add_argument('--cases', action='store_true', help='Include per-case rows')
     eval_summary.set_defaults(handler=cmd_eval_summary)
+    eval_case = eval_sub.add_parser('case', help='Show execution-quality metrics for one Case')
+    eval_case.add_argument('case_id')
+    eval_case.add_argument('--events', action='store_true', help='Include the full event sequence')
+    eval_case.set_defaults(handler=cmd_eval_case)
     return parser
 
 
