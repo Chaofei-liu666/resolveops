@@ -36,35 +36,32 @@ ERPNext is used as a real open-source ERP sandbox and adapter target. The Agent 
 
 ```text
 Business exception
-→ Case
-→ Read tool investigation
-→ Evidence-grounded Action Plan
-→ Policy Engine
-→ Approval
-→ Executor
-→ Read-after-write Verification
-→ resolved / replan / manual_review
+-> Case
+-> Read tool investigation
+-> Evidence-grounded Action Plan
+-> Policy Engine
+-> Approval
+-> Executor
+-> Read-after-write Verification
+-> resolved / replan / manual_review
 ```
 
 ## Architecture
 
 ```text
 CLI / Swagger / ERPNext Webhook
-        ↓
-FastAPI Control Plane
-        ↓
-PostgreSQL Case State
-        ↓
-Worker / Agent Runtime
-        ↓
-Tool Registry → Policy Engine → Executor → Verifier
-        ↓
-ERPNextAdapter / future external-system adapters
+        -> FastAPI Control Plane
+        -> PostgreSQL Case State
+        -> Worker / Agent Runtime
+        -> Tool Registry -> Policy Engine -> Executor -> Verifier
+        -> ERPNextAdapter / future external-system adapters
 ```
 
 The CLI is only a presentation layer. It calls ResolveOps APIs and does not talk to ERPNext directly.
 
 ## Quick start
+
+For a detailed guide, see [Quickstart](docs/quickstart.md).
 
 Copy environment template:
 
@@ -162,11 +159,11 @@ This calls:
 
 ```text
 CLI
-→ ResolveOps API
-→ permission / environment gate
-→ ERPNextAdapter
-→ ERPNext REST API
-→ Stock Reconciliation
+-> ResolveOps API
+-> permission / environment gate
+-> ERPNextAdapter
+-> ERPNext REST API
+-> Stock Reconciliation
 ```
 
 Fault injection is forbidden in production and requires:
@@ -220,6 +217,7 @@ See [production readiness](docs/production-readiness.md).
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Quickstart](docs/quickstart.md)
 - [Runbook](docs/runbook.md)
 - [Deployment safety checklist](docs/deployment.md)
 - [Production readiness assessment](docs/production-readiness.md)
