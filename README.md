@@ -1,67 +1,236 @@
 # ResolveOps
 
-ResolveOps is an API-first enterprise Agent runtime for handling business exceptions in ERP workflows.
+ResolveOps is an API-first enterprise Agent for handling long-tail business exceptions.
 
-It focuses on cases where a deterministic workflow is not enough: missing inventory, price mismatch, supplier delay, approval gating, business-state changes, and execution verification.
+It is not an ERP chatbot and it is not a generic workflow demo. The core problem it targets is:
+
+```text
+An enterprise system has already detected an exception.
+The normal deterministic workflow cannot safely decide the next step.
+ResolveOps investigates, proposes an evidence-grounded plan, requests approval when needed,
+executes controlled actions, and verifies the final business state.
+```
 
 Current reference integration: ERPNext.
 
-ERPNext is used as a real open-source ERP sandbox and adapter target. The Agent architecture is not ERPNext-specific: the same Tool Registry, Policy Engine, Executor and Verifier boundaries can be adapted to SAP, WMS, CRM, ticketing systems or internal business platforms.
+ERPNext is used as a real open-source ERP sandbox and system of record. The Agent architecture is intentionally not ERPNext-specific: read tools, action schemas, policy checks, approval binding, executors and verifiers can be adapted to SAP, WMS, CRM, ticketing systems, procurement systems, or internal platforms.
+
+## Why this project exists
+
+Most enterprise processes should stay as normal workflows:
+
+```text
+order paid -> reserve stock -> create delivery note -> notify warehouse
+```
+
+ResolveOps only enters the exception branch:
+
+```text
+order cannot be fulfilled
+-> why?
+-> which systems must be checked?
+-> what actions are possible?
+-> which action is safe?
+-> does it require approval?
+-> did the external system actually change?
+```
+
+That boundary is important. The project demonstrates how to build an Agent that can work with real business systems without giving the model uncontrolled write access.
 
 ## What it demonstrates
 
-- Agent investigation with read-only business tools.
-- Dynamic tool exposure by case type.
-- Evidence-grounded action planning.
-- Policy-controlled write execution.
-- Human approval bound to case, plan version and action hash.
-- Approval expiration and revocation.
-- Idempotent write actions.
-- PostgreSQL-backed durable case state.
-- Case-level context isolation.
-- Read-after-write verification.
-- Controlled fault injection against ERPNext sandbox data.
-- CLI-first developer experience.
-- Regression and fault-injection tests.
+- Case-based durable execution, not one-off chat completion.
+- Read-only business tools exposed by schema and case type.
+- Dynamic tool profile routing instead of exposing every tool to the LLM.
+- Evidence-grounded planning with deterministic validation before approval.
+- Write actions represented as controlled action plans, not directly callable LLM tools.
+- Policy-controlled execution with role-based approval.
+- Approval binding to case, plan version and action hash.
+- Approval expiration, revocation and one-time consumption.
+- Idempotent write execution.
+- Read-after-write verification against ERPNext.
+- Replanning when business state changes before execution.
+- Manual review when the Agent cannot safely proceed.
+- PostgreSQL-backed Case, Event, Task, Approval and Invocation state.
+- Context isolation across multiple Cases.
+- Lightweight verified lessons from successful Cases.
+- Fault injection against ERPNext sandbox data.
+- CLI-first operator/developer experience.
+- Runtime status and execution evaluation APIs.
 
-## Supported case types
+## Supported exception types
 
-| Case type | Description |
-|---|---|
-| `inventory_shortage` | Sales order cannot be fulfilled from the current warehouse. The Agent investigates inventory, transfer routes, purchase options and customer constraints. |
-| `price_mismatch` | Sales order price differs from reference price. The Agent creates a controlled price-review record instead of changing ERP prices directly. |
-| `delivery_delay` | Inbound supply arrives later than the customer delivery date. The Agent creates a controlled supplier-follow-up task instead of directly changing ERP dates. |
+| Case type | What the Agent investigates | Safe outcome |
+|---|---|---|
+| `inventory_shortage` | Sales order, target/source inventory, transfer lanes, inbound purchase, customer delivery constraints | Transfer draft, purchase request, customer notification draft, or manual review |
+| `price_mismatch` | Sales order item price, reference price, customer context | Price review record or manual review |
+| `delivery_delay` | Sales order delivery date, inbound purchase schedule, supplier information, customer context | Supplier follow-up task or manual review |
+
+The first case type is the most complete because it exercises the full loop: tool investigation, planning, approval, ERPNext write, verification, fault injection and replanning.
 
 ## Core flow
 
 ```text
 Business exception
--> Case
--> Read tool investigation
--> Evidence-grounded Action Plan
--> Policy Engine
--> Approval
--> Executor
--> Read-after-write Verification
--> resolved / replan / manual_review
+  -> Case
+  -> Context Builder
+  -> Tool Profile Router
+  -> Read Tool Scheduler
+  -> LLM Planner
+  -> Evidence Grounding
+  -> Policy Engine
+  -> Bound Approval
+  -> Governed Executor
+  -> Read-after-write Verifier
+  -> resolved / replan / manual_review
 ```
 
 ## Architecture
 
 ```text
-CLI / Swagger / ERPNext Webhook
-        -> FastAPI Control Plane
-        -> PostgreSQL Case State
-        -> Worker / Agent Runtime
-        -> Tool Registry -> Policy Engine -> Executor -> Verifier
-        -> ERPNextAdapter / future external-system adapters
+CLI / API / ERPNext Webhook
+        |
+        v
+FastAPI Control Plane
+        |
+        v
+PostgreSQL
+  - cases
+  - tasks
+  - events
+  - approvals
+  - tool_invocations
+  - operators
+  - case_lessons
+        |
+        v
+Worker / Agent Runtime
+        |
+        +--> CaseContextBuilder
+        +--> ToolRegistry + ToolProfileRouter
+        +--> BusinessReadTools
+        +--> LLMGateway
+        +--> ActionRegistry
+        +--> EvidenceGrounding
+        +--> PolicyEngine
+        +--> ExecutorRegistry
+        +--> Verifier
+        |
+        v
+External adapters
+  - ERPNextAdapter today
+  - SAP/WMS/CRM/ticketing adapters later
 ```
 
-The CLI is only a presentation layer. It calls ResolveOps APIs and does not talk to ERPNext directly.
+The CLI is only a presentation layer. It calls ResolveOps APIs and never talks to ERPNext directly. This keeps policy, audit, fault-injection gates and approval rules on the server side.
+
+## Tool design
+
+ResolveOps separates tools into two categories.
+
+### Read tools
+
+Read tools are LLM-callable business tools. They have explicit metadata:
+
+```text
+name
+description
+input_schema
+permission
+risk_level
+side_effect = none
+source_system
+```
+
+Examples:
+
+- `get_order`
+- `get_inventory`
+- `get_transfer_options`
+- `get_inbound_purchase`
+- `get_reference_price`
+- `get_customer_profile`
+
+The Agent does not see every tool. Runtime selects the minimum tool profile for the current `event_type`.
+
+### Write actions
+
+Write operations are still tools in the broader engineering sense, but they are not directly exposed as LLM-callable functions.
+
+The LLM can only propose a structured action plan. The runtime then validates, approves and executes it.
+
+Examples:
+
+- `transfer_stock`
+- `create_purchase_request`
+- `create_price_review_ticket`
+- `create_supplier_followup_task`
+- `draft_customer_notification`
+- `create_manual_ticket`
+
+This prevents the model from directly writing ERP data just because it generated a tool call.
+
+## Safety model
+
+ResolveOps uses a layered safety model:
+
+```text
+LLM proposes
+-> action schema validation
+-> evidence grounding
+-> policy check
+-> approval binding
+-> executor preflight
+-> idempotent write
+-> read-after-write verification
+```
+
+Important rule:
+
+```text
+The model can propose an action.
+The model cannot authorize itself to execute that action.
+```
+
+## Fault injection
+
+Fault injection is used to verify that the Agent stops safely when the business state changes.
+
+Example:
+
+```text
+1. Agent plans to transfer stock from source warehouse.
+2. Approval is granted.
+3. Before execution, fault injection changes the ERPNext source inventory.
+4. Executor preflight re-reads ERPNext.
+5. Approval is invalidated.
+6. Agent replans or moves to manual_review.
+```
+
+CLI-triggered fault injection still goes through ResolveOps:
+
+```text
+resolveops.py fi run ...
+-> ResolveOps API
+-> permission / environment gate
+-> ERPNextAdapter
+-> ERPNext REST API
+-> Stock Reconciliation
+-> Case event + audit log
+```
+
+Fault injection is forbidden in production and requires `ENABLE_FAULT_INJECTION=true`.
 
 ## Quick start
 
-For a detailed guide, see [Quickstart](docs/quickstart.md).
+For a more detailed guide, see [docs/quickstart.md](docs/quickstart.md).
+
+Clone:
+
+```powershell
+git clone https://github.com/Chaofei-liu666/resolveops.git
+cd resolveops
+```
 
 Copy environment template:
 
@@ -96,19 +265,14 @@ Invoke-RestMethod http://localhost:8090/healthz
 Invoke-RestMethod http://localhost:8090/readyz
 ```
 
-OpenAPI docs:
+Open:
 
 ```text
-http://localhost:8090/docs
+Swagger: http://localhost:8090/docs
+Console: http://localhost:8090
 ```
 
-Console:
-
-```text
-http://localhost:8090
-```
-
-## CLI
+## CLI usage
 
 Set API address and operator key:
 
@@ -117,7 +281,7 @@ $env:RESOLVEOPS_API_URL="http://localhost:8090"
 $env:RESOLVEOPS_OPERATOR_KEY="<ops-admin-key>"
 ```
 
-Runtime status:
+Check runtime:
 
 ```powershell
 python resolveops.py status
@@ -131,7 +295,14 @@ python resolveops.py case list
 python resolveops.py case show <case-id>
 ```
 
-Evaluate recent Agent runs:
+Approve or revoke an action:
+
+```powershell
+python resolveops.py approval approve <approval-id>
+python resolveops.py approval revoke <approval-id> --reason "operator cancelled unsafe action"
+```
+
+Evaluate Agent execution:
 
 ```powershell
 python resolveops.py eval summary --limit 20
@@ -140,22 +311,11 @@ python resolveops.py eval case <case-id>
 python resolveops.py eval case <case-id> --events
 ```
 
-Approve or revoke an action:
-
-```powershell
-python resolveops.py approval approve <approval-id>
-python resolveops.py approval revoke <approval-id> --reason "operator cancelled unsafe action"
-```
-
-Fault injection catalog:
+Run fault injection in local/test/staging:
 
 ```powershell
 python resolveops.py fi list
-```
 
-Trigger ERPNext sandbox stock change through ResolveOps:
-
-```powershell
 python resolveops.py fi run inventory_changed_before_execution `
   --case <case-id> `
   --item SKU-A12 `
@@ -164,23 +324,32 @@ python resolveops.py fi run inventory_changed_before_execution `
   --reason "simulate stock consumed before approval execution"
 ```
 
-This calls:
+## Evaluation
 
-```text
-CLI
--> ResolveOps API
--> permission / environment gate
--> ERPNextAdapter
--> ERPNext REST API
--> Stock Reconciliation
+ResolveOps evaluates Agent behavior from actual execution trails:
+
+| Metric | Meaning |
+|---|---|
+| Case resolution rate | How many Cases ended as `resolved` |
+| Verification pass rate | Whether write Cases were independently verified |
+| Average read tool calls | How much investigation the Agent performed |
+| Tool failure rate | How often read tools failed |
+| Replanned Cases | Whether the Agent recovered from changed business state |
+| Manual handoff Cases | Whether the Agent stopped instead of guessing |
+| Policy denials | Whether unsafe actions were blocked |
+| Evidence grounding failures | Whether unsupported plans were rejected |
+| Context isolation failures | Whether cross-Case leakage was detected |
+
+Example:
+
+```powershell
+python resolveops.py eval summary --limit 20
 ```
 
-Fault injection is forbidden in production and requires:
+Example single Case inspection:
 
-```text
-ENABLE_FAULT_INJECTION=true
-APP_ENV != production
-ops_admin or config_admin operator
+```powershell
+python resolveops.py eval case <case-id>
 ```
 
 ## Tests
@@ -203,10 +372,10 @@ Equivalent command:
 docker compose --profile test run --rm test
 ```
 
-Current containerized regression:
+Latest local regression during development:
 
 ```text
-64 passed, 1 skipped
+79 passed, 1 skipped
 ```
 
 ## Production status
@@ -219,9 +388,22 @@ job/project demonstration
 ERPNext sandbox runs
 ```
 
-It is not yet a drop-in production system for real ERP write operations. Before production write access, add enterprise IAM, secret management, monitoring and alerting, backup/restore, load testing, and an operational runbook for incident handling.
+It is not yet a drop-in production system for real ERP write operations. Before production write access, add enterprise IAM, managed secrets, monitoring and alerting, backup/restore, load testing, least-privilege ERP roles, and an operational incident runbook.
 
-See [production readiness](docs/production-readiness.md).
+See [docs/production-readiness.md](docs/production-readiness.md).
+
+## What is intentionally not included
+
+ResolveOps intentionally avoids:
+
+- a large multi-Agent role-play setup;
+- a vector database by default;
+- automatic prompt/skill rewriting;
+- direct browser automation as the main ERP integration path;
+- direct LLM access to ERP write APIs;
+- cloud deployment instructions in the main path.
+
+These can be added later if the use case justifies them. The current focus is reliable Agent execution against a real business system.
 
 ## Documentation
 

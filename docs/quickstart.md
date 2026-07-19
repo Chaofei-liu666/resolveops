@@ -23,16 +23,17 @@ Required for full sandbox runs:
 
 - an existing ERPNext sandbox;
 - ERPNext API key and secret;
-- test Customer, Item, Warehouse, Sales Order and stock data.
+- test Customer, Item, Warehouse, Sales Order and stock data;
+- an LLM API compatible with the OpenAI chat-completions format.
 
-ResolveOps does not currently bundle ERPNext in its own Docker Compose file.
+ResolveOps does not bundle ERPNext in its own Docker Compose file. ERPNext remains a separate sandbox system.
 
 ## Path A: run ResolveOps only
 
 Clone and enter the repository:
 
 ```bash
-git clone https://github.com/<your-org>/resolveops.git
+git clone https://github.com/Chaofei-liu666/resolveops.git
 cd resolveops
 ```
 
@@ -78,8 +79,8 @@ Invoke-RestMethod http://localhost:8090/healthz
 Open:
 
 ```text
-http://localhost:8090/docs
-http://localhost:8090
+Swagger: http://localhost:8090/docs
+Console: http://localhost:8090
 ```
 
 Set CLI environment:
@@ -101,6 +102,7 @@ Use the CLI:
 ```bash
 python resolveops.py status
 python resolveops.py case list
+python resolveops.py eval summary --limit 20
 ```
 
 Run tests:
@@ -128,7 +130,16 @@ LLM_API_KEY=<llm-api-key>
 LLM_MODEL=<model>
 ```
 
-The ERPNext integration user should be able to read Sales Order, Customer, Item, Item Price, Warehouse/Bin and Purchase Order. For sandbox write tests, it also needs permission to create the draft/test documents used by ResolveOps.
+The ERPNext integration user should be able to read:
+
+- Sales Order;
+- Customer;
+- Item;
+- Item Price;
+- Warehouse/Bin;
+- Purchase Order.
+
+For sandbox write tests, it also needs permission to create the draft/test documents used by ResolveOps, such as Stock Entry, Material Request, Price Review records or Supplier Follow-up records depending on the scenario.
 
 If ERPNext runs in a different Docker network, make sure `ERPNEXT_BASE_URL` is reachable from inside the ResolveOps containers.
 
@@ -152,6 +163,14 @@ python resolveops.py case list
 python resolveops.py case show <case-id>
 ```
 
+Approve pending actions:
+
+```bash
+python resolveops.py approval approve <approval-id>
+```
+
+Then inspect the Case and the corresponding ERPNext business document.
+
 Evaluate recent Agent runs:
 
 ```bash
@@ -160,14 +179,6 @@ python resolveops.py eval summary --limit 20 --cases
 python resolveops.py eval case <case-id>
 python resolveops.py eval case <case-id> --events
 ```
-
-Approve pending actions:
-
-```bash
-python resolveops.py approval approve <approval-id>
-```
-
-Then inspect the Case and the corresponding ERPNext business document.
 
 ## Fault injection from CLI
 
@@ -205,11 +216,13 @@ python resolveops.py fi run inventory_changed_before_execution \
   --reason "simulate stock consumed before approval execution"
 ```
 
-This does not open ERPNext UI. The chain is:
+This does not open the ERPNext UI. The chain is:
 
 ```text
 CLI -> ResolveOps API -> ERPNextAdapter -> ERPNext REST API -> Stock Reconciliation
 ```
+
+The CLI must not call ERPNext directly with raw ERP credentials. Otherwise it bypasses ResolveOps audit, role checks and production safety gates.
 
 ## Common problems
 
