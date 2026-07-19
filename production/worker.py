@@ -149,7 +149,7 @@ def execute(db,c,approval_id):
     if verified:
         pending=db.scalars(select(Approval).where(Approval.case_id==c.id,Approval.plan_version==c.plan_version,Approval.status!='consumed')).all()
         c.status='resolved' if not pending else 'waiting_approval'
-        emit(db,c.id,'verification_passed','ERPNext read-after-write verification passed.',{'action_id':action['action_id'],**event_data,'case_complete':not pending})
+        emit(db,c.id,'verification_passed','Read-after-write verification passed.',{'action_id':action['action_id'],**event_data,'case_complete':not pending})
         if c.status=='resolved':
             lessons=record_verified_lessons(db,c,action,{'verified':True,'event_data':event_data})
             if lessons:
