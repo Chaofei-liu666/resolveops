@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 from sqlalchemy import select, text
 from .erpnext import ERPNextAdapter
-from .models import Case, PriceReview
+from .models import Case, PriceReview, SupplierFollowup
 
 PreflightFn = Callable[[Any, ERPNextAdapter, dict[str, Any]], dict[str, Any]]
 ContextFn = Callable[[ERPNextAdapter, str, dict[str, Any]], dict[str, Any]]
@@ -126,6 +126,41 @@ def verify_price_review(db: Any, _erp: ERPNextAdapter, review_id: str, action_in
     return {'verified': verified, 'event_data': {'price_review': review_id}}
 
 
+def write_supplier_followup(db: Any, _erp: ERPNextAdapter, action_input: dict[str, Any], _company: str | None, idempotency_key: str, case: Case) -> str:
+    existing = db.scalar(select(SupplierFollowup).where(SupplierFollowup.idempotency_key == idempotency_key))
+    if existing:
+        return existing.id
+    followup = SupplierFollowup(
+        tenant_id=case.tenant_id,
+        case_id=case.id,
+        order_id=case.order_id,
+        sku=action_input['sku'],
+        purchase_order=action_input['purchase_order'],
+        supplier=action_input['supplier'],
+        expected_delivery_date=action_input['expected_delivery_date'],
+        delayed_by_days=float(action_input['delayed_by_days']),
+        idempotency_key=idempotency_key,
+        data={'reason': action_input.get('reason'), 'source': 'agent_action_plan'},
+    )
+    db.add(followup)
+    db.flush()
+    return followup.id
+
+
+def verify_supplier_followup(db: Any, _erp: ERPNextAdapter, followup_id: str, action_input: dict[str, Any]) -> dict[str, Any]:
+    followup = db.get(SupplierFollowup, followup_id)
+    verified = bool(
+        followup
+        and followup.status == 'draft'
+        and followup.sku == action_input['sku']
+        and followup.purchase_order == action_input['purchase_order']
+        and followup.supplier == action_input['supplier']
+        and followup.expected_delivery_date == action_input['expected_delivery_date']
+        and float(followup.delayed_by_days) == float(action_input['delayed_by_days'])
+    )
+    return {'verified': verified, 'event_data': {'supplier_followup': followup_id}}
+
+
 EXECUTOR_REGISTRY: dict[str, WriteActionExecutor] = {
     'transfer_stock': WriteActionExecutor(
         action_type='transfer_stock',
@@ -150,6 +185,14 @@ EXECUTOR_REGISTRY: dict[str, WriteActionExecutor] = {
         context=empty_context,
         write=write_price_review,
         verify=verify_price_review,
+    ),
+    'create_supplier_followup_task': WriteActionExecutor(
+        action_type='create_supplier_followup_task',
+        invocation_tool='create_supplier_followup_task',
+        preflight=ok_preflight,
+        context=empty_context,
+        write=write_supplier_followup,
+        verify=verify_supplier_followup,
     ),
 }
 

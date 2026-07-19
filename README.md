@@ -2,10 +2,11 @@
 
 ResolveOps 是一个面向企业业务异常的 Agent。它不处理确定性的正常流程，而是在业务进入异常分支后，自动调查原因、生成行动计划、申请审批、受控执行，并通过真实系统回读验证结果。
 
-当前版本支持两类 Case：
+当前版本支持三类 Case：
 
 - `inventory_shortage`：订单库存不足。Agent 调查库存、调拨路线、采购补货和客户约束，提出调拨或采购申请等 Action Plan。
 - `price_mismatch`：订单价格与参考价格不一致。Agent 调查订单价格和参考价，创建受控的价格复核记录，不直接修改 ERP 价格。
+- `delivery_delay`：在途采购到货晚于客户交付日期。Agent 调查订单、在途采购和客户约束，创建受控的供应商跟进记录，不直接修改 ERP 采购或销售日期。
 
 ## 核心闭环
 
@@ -86,7 +87,7 @@ python -m pytest -q
 当前本地回归：
 
 ```text
-43 passed, 1 skipped
+47 passed, 1 skipped
 ```
 
 ## 文档

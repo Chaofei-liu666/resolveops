@@ -130,6 +130,23 @@ def candidate_lessons_from_verified_action(case: Case, action: dict[str, Any], v
                 'data': {'action_input': action_input, 'verification': verification},
             })
 
+    if action_type == 'create_supplier_followup_task':
+        sku = action_input.get('sku') or entities.get('sku')
+        supplier = action_input.get('supplier')
+        if supplier:
+            lessons.append({
+                'tenant_id': case.tenant_id,
+                'lesson_type': 'resolution_pattern',
+                'subject_type': 'supplier',
+                'subject_id': supplier,
+                'content': f'Verified supplier follow-up for {supplier} was created from inbound delivery delay evidence. Treat as planning experience; re-read current order and inbound purchase schedule before proposing another follow-up.',
+                'evidence_case_id': case.id,
+                'source_action_type': action_type,
+                'confidence': 1.0,
+                'status': 'active',
+                'data': {'action_input': action_input, 'verification': verification, 'sku': sku},
+            })
+
     customer_id = entities.get('customer_id')
     customer = (_first_observation(case, 'get_customer_profile') or {}).get('result') or {}
     if customer_id and customer.get('allows_partial_delivery') is not None:
@@ -165,7 +182,7 @@ def record_verified_lessons(db: Session, case: Case, action: dict[str, Any], ver
 def relevant_lessons_for_case(db: Session, case: Case, limit: int = 8) -> list[dict[str, Any]]:
     """Return active lessons scoped to the same tenant and related entities."""
     entities = _order_entities(case)
-    subjects: list[tuple[str, str]] = [('action_type', 'transfer_stock'), ('action_type', 'create_purchase_request'), ('action_type', 'create_price_review_ticket')]
+    subjects: list[tuple[str, str]] = [('action_type', 'transfer_stock'), ('action_type', 'create_purchase_request'), ('action_type', 'create_price_review_ticket'), ('action_type', 'create_supplier_followup_task')]
     if entities.get('customer_id'):
         subjects.append(('customer', entities['customer_id']))
     if entities.get('sku'):

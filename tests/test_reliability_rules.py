@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from production.context import CaseContextBuilder
 from production.main import LogisticsLaneIn, OperatorIdentity, audit_out, eval_case_out, eval_summary_out, require_role
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
-from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, PriceReview, Task
+from production.models import Approval, AuditLog, Base, Case, CaseLesson, Event, Invocation, PriceReview, SupplierFollowup, Task
 from production.policy import action_policy, allow_read_tool
 from production.tool_result import ToolResult
 from production.tools import BusinessReadTools, ToolSpec, summarize_customer_profile
@@ -92,6 +92,26 @@ def test_price_review_action_has_strict_contract_and_dual_approval():
     decision = action_policy({'action_type': 'create_price_review_ticket'}, {'observations':[{'tool':'get_order','result':{'grand_total':150000}}]})
     assert decision['allowed']
     assert decision['required_roles'] == ['sales_manager', 'finance_manager']
+
+
+def test_supplier_followup_action_has_strict_contract_and_policy():
+    action = normalize_proposal({
+        'action_type': 'create_supplier_followup_task',
+        'input': {
+            'sku': 'SKU-A12',
+            'purchase_order': 'PO-1',
+            'supplier': 'Supplier A',
+            'expected_delivery_date': '2026-07-25',
+            'delayed_by_days': 5,
+            'reason': 'Inbound purchase is later than customer delivery date.',
+        },
+    }, 'Delivery delay is supported by inbound purchase evidence.')
+    assert action['executable']
+    assert action['execution']['executor'] == 'resolveops.create_supplier_followup_task'
+    assert action['tool']['llm_callable'] is False
+    decision = action_policy({'action_type':'create_supplier_followup_task'}, {'observations':[{'tool':'get_order','result':{'grand_total':150000}}]})
+    assert decision['allowed']
+    assert decision['required_roles'] == ['procurement_manager', 'sales_manager']
 
 
 def test_policy_tolerates_empty_customer_group():
@@ -205,6 +225,55 @@ def test_price_mismatch_grounding_rejects_missing_reference_price():
     assert any('missing reference price evidence' in problem for problem in result['problems'])
 
 
+def delivery_delay_observations():
+    return [
+        {'tool':'get_order','arguments':{},'result':{
+            'name':'SO-DELAY-1',
+            'delivery_date':'2026-07-20',
+            'grand_total':150000,
+            'items':[{'item_code':'SKU-A12','warehouse':'Stores - ROPS','qty':30,'delivery_date':'2026-07-20'}],
+        }},
+        {'tool':'get_inbound_purchase','arguments':{'item_code':'SKU-A12'},'result':{
+            'purchase_items':[{'purchase_order':'PO-1','supplier':'Supplier A','remaining_qty':30,'schedule_date':'2026-07-25','status':'To Receive'}],
+        }},
+        {'tool':'get_item_supply_profile','arguments':{'item_code':'SKU-A12'},'result':{
+            'item_code':'SKU-A12','lead_time_days':3,
+        }},
+    ]
+
+
+def test_delivery_delay_grounding_accepts_supported_supplier_followup():
+    plan = normalize_plan([
+        {'action_type':'create_supplier_followup_task','input':{
+            'sku':'SKU-A12',
+            'purchase_order':'PO-1',
+            'supplier':'Supplier A',
+            'expected_delivery_date':'2026-07-25',
+            'delayed_by_days':5,
+        }},
+    ], 'grounded delivery delay')
+    result = validate_plan_grounding(plan, delivery_delay_observations(), 'delivery_delay')
+    assert result['allowed']
+    assert result['case_type'] == 'delivery_delay'
+
+
+def test_delivery_delay_grounding_rejects_non_late_inbound_purchase():
+    observations = delivery_delay_observations()
+    observations[1]['result']['purchase_items'][0]['schedule_date'] = '2026-07-19'
+    plan = normalize_plan([
+        {'action_type':'create_supplier_followup_task','input':{
+            'sku':'SKU-A12',
+            'purchase_order':'PO-1',
+            'supplier':'Supplier A',
+            'expected_delivery_date':'2026-07-19',
+            'delayed_by_days':1,
+        }},
+    ], 'not grounded')
+    result = validate_plan_grounding(plan, observations, 'delivery_delay')
+    assert not result['allowed']
+    assert any('not later than customer delivery date' in problem for problem in result['problems'])
+
+
 def test_known_model_schema_variant_is_normalized_before_policy_checks():
     result = InvestigationAgent._parse_conclusion('{"status":"shortage","recommended_actions":[{"action":"transfer_stock","input":{}}],"alternatives":[],"rationale":"x","missing_information":[]}')
     assert result['status'] == 'ready'
@@ -300,9 +369,12 @@ def test_read_tool_profile_limits_llm_visible_tools_by_case_type():
 
     inventory_names = {item['function']['name'] for item in BusinessReadTools(FakeAdapter(), 'inventory_shortage').definitions()}
     price_names = {item['function']['name'] for item in BusinessReadTools(FakeAdapter(), 'price_mismatch').definitions()}
+    delivery_names = {item['function']['name'] for item in BusinessReadTools(FakeAdapter(), 'delivery_delay').definitions()}
     assert {'get_order', 'get_inventory', 'get_transfer_options', 'get_inbound_purchase'} <= inventory_names
     assert price_names == {'get_order', 'get_reference_price', 'get_customer_profile'}
+    assert delivery_names == {'get_order', 'get_inbound_purchase', 'get_item_supply_profile', 'get_customer_profile'}
     assert not {'get_inventory', 'get_transfer_options', 'get_inbound_purchase', 'get_item_supply_profile'} & price_names
+    assert 'get_inventory' not in delivery_names
     denied = BusinessReadTools(FakeAdapter(), 'price_mismatch').execute_result('get_inventory', {'item_code':'SKU-A12','warehouse':'Stores - ROPS'}, 'SO-1')
     assert denied.to_dict()['error_code'] == 'tool_not_enabled_for_case_type'
 
@@ -481,12 +553,15 @@ def test_executor_registry_maps_action_type_to_write_adapter_tool():
     transfer = executor_for('transfer_stock')
     purchase = executor_for('create_purchase_request')
     price_review = executor_for('create_price_review_ticket')
+    supplier_followup = executor_for('create_supplier_followup_task')
     assert transfer is not None
     assert transfer.invocation_tool == 'create_transfer_draft'
     assert purchase is not None
     assert purchase.invocation_tool == 'create_purchase_request_draft'
     assert price_review is not None
     assert price_review.invocation_tool == 'create_price_review_ticket'
+    assert supplier_followup is not None
+    assert supplier_followup.invocation_tool == 'create_supplier_followup_task'
     assert executor_for('draft_customer_notification') is None
 
 
@@ -508,6 +583,26 @@ def test_price_review_executor_writes_and_verifies_local_review_record():
         review = db.get(PriceReview, review_id)
         assert review.status == 'draft'
         assert review.order_id == 'SO-PRICE-1'
+
+
+def test_supplier_followup_executor_writes_and_verifies_local_record():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        case = Case(id='case-delay', tenant_id='demo', event_type='delivery_delay', order_id='SO-DELAY-1')
+        db.add(case)
+        db.flush()
+        executor = executor_for('create_supplier_followup_task')
+        action_input = {'sku':'SKU-A12','purchase_order':'PO-1','supplier':'Supplier A','expected_delivery_date':'2026-07-25','delayed_by_days':5,'reason':'late inbound'}
+        followup_id = executor.write(db, None, action_input, None, 'case-delay:action:v1', case)
+        verification = executor.verify(db, None, followup_id, action_input)
+        db.commit()
+
+    assert verification['verified'] is True
+    with Session(engine) as db:
+        followup = db.get(SupplierFollowup, followup_id)
+        assert followup.status == 'draft'
+        assert followup.order_id == 'SO-DELAY-1'
 
 
 def test_transfer_executor_preflight_detects_source_inventory_change():
@@ -545,10 +640,13 @@ def test_planner_action_catalog_is_generated_from_action_registry():
 def test_action_profile_limits_planner_visible_actions_by_case_type():
     inventory_actions = {item['action_type'] for item in planner_action_catalog('inventory_shortage')}
     price_actions = {item['action_type'] for item in planner_action_catalog('price_mismatch')}
+    delivery_actions = {item['action_type'] for item in planner_action_catalog('delivery_delay')}
     assert {'transfer_stock', 'create_purchase_request'} <= inventory_actions
     assert 'create_price_review_ticket' not in inventory_actions
     assert price_actions == {'create_price_review_ticket', 'create_manual_ticket'}
+    assert delivery_actions == {'create_supplier_followup_task', 'create_manual_ticket'}
     assert action_types_for_case('price_mismatch') == {'create_price_review_ticket', 'create_manual_ticket'}
+    assert action_types_for_case('delivery_delay') == {'create_supplier_followup_task', 'create_manual_ticket'}
     with pytest.raises(ValueError):
         normalize_plan([
             {'action_type':'transfer_stock','input':{'source':'WH-A','target':'WH-B','sku':'SKU-A12','quantity':1}},

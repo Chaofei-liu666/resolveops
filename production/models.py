@@ -105,3 +105,19 @@ class PriceReview(Base):
     idempotency_key: Mapped[str]=mapped_column(String(220), unique=True)
     data: Mapped[dict]=mapped_column(JSON, default=dict)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), server_default=func.now())
+
+class SupplierFollowup(Base):
+    __tablename__='supplier_followups'
+    id: Mapped[str]=mapped_column(String, primary_key=True, default=lambda:str(uuid4()))
+    tenant_id: Mapped[str]=mapped_column(String(80), index=True)
+    case_id: Mapped[str]=mapped_column(String, index=True)
+    order_id: Mapped[str]=mapped_column(String(140), index=True)
+    sku: Mapped[str]=mapped_column(String(140), index=True)
+    purchase_order: Mapped[str]=mapped_column(String(140), index=True)
+    supplier: Mapped[str]=mapped_column(String(180), index=True)
+    expected_delivery_date: Mapped[str]=mapped_column(String(40))
+    delayed_by_days: Mapped[float]=mapped_column(Float)
+    status: Mapped[str]=mapped_column(String(40), default='draft', index=True)
+    idempotency_key: Mapped[str]=mapped_column(String(220), unique=True)
+    data: Mapped[dict]=mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), server_default=func.now())

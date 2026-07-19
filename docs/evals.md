@@ -11,7 +11,7 @@ python -m pytest -q
 Current local regression:
 
 ```text
-41 passed, 1 skipped
+47 passed, 1 skipped
 ```
 
 | Risk | Test | Expected safe outcome |
@@ -60,6 +60,7 @@ Current checks:
 | `transfer_stock` | Sales Order, target inventory, source inventory with enough usable stock, configured transfer lane |
 | `create_purchase_request` | Sales Order, target inventory, item supply profile with lead time, inbound purchase check |
 | `create_price_review_ticket` | Sales Order item rate, same-SKU reference price, non-zero price difference |
+| `create_supplier_followup_task` | Sales Order delivery date, same-SKU inbound purchase, supplier, inbound schedule date later than customer delivery date |
 | multi-action plan | Combined action quantity must cover the computed shortage |
 
 This is intentionally deterministic. The LLM proposes actions; the system verifies the Evidence-to-Action link before approval.
@@ -100,3 +101,4 @@ Record each integration run with: Case ID, injected condition, event trail, busi
 | MEM-01 | `fe692874-cada-4b87-a0a7-ac2f0ecb6dda` | A follow-up Case for the same order confirmed CaseContextBuilder retrieved active same-tenant Verified Case Lessons. The new Case reached `waiting_approval` with `memory_count=1`, including the operational lesson from `E2E-01`. No second ERP write was approved during this memory check. |
 | E2E-02 | `c51cbdd5-1f70-4221-869d-a844924f6af6` | Real `price_mismatch` run. ERPNext `Item Price` access initially failed with 403, then the integration user was granted `Sales Master Manager` to read reference price. The Agent observed Sales Order rate 5000 and reference price 4500 for `SKU-A12`, proposed `create_price_review_ticket`, required sales + finance approvals, created verified local PriceReview `bb56dcbf-1f11-4b64-83ab-57d4b693bbb3`, closed the Case as `resolved`, and recorded Verified Case Lessons. |
 | E2E-03 | `f8b17e82-e7a8-4e70-ba42-c595992fecee` | Real `price_mismatch` run after introducing dynamic Tool/Action Profiles. The LLM-visible read tools were limited to `get_order`, `get_reference_price`, and `get_customer_profile`; no inventory, transfer, inbound purchase, or supply-profile tools appeared in the observed trajectory. The planner proposed only `create_price_review_ticket`, dual approval passed, local PriceReview `ff6f3a8d-57d0-4e6a-ad57-e1dda20f7c48` was verified, and the Case closed as `resolved`. |
+| E2E-04 | `43b46fb1-5f24-40bf-b6c9-5b28869f4090` | Real `delivery_delay` run. Test data prepared submitted ERPNext Purchase Order `PUR-ORD-2026-00001` for `SKU-A12`, supplier `ResolveOps Delay Supplier`, schedule date `2026-07-25`, while Sales Order delivery date was `2026-07-20`. The Agent used only delivery-delay tools (`get_order`, `get_customer_profile`, `get_item_supply_profile`, `get_inbound_purchase`), proposed `create_supplier_followup_task`, required procurement + sales approvals for the high-value order, created verified local SupplierFollowup `a2e350ba-2a35-41bb-a154-4d43c2cc1580`, closed the Case as `resolved`, and recorded Verified Case Lessons. |

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .models import AuditLog, Base, Approval, Case, Event, Invocation, LogisticsLane, Task
 
-SUPPORTED_EVENTS={'inventory_shortage','price_mismatch'}
+SUPPORTED_EVENTS={'inventory_shortage','price_mismatch','delivery_delay','supplier_delay'}
 
 class LogisticsLaneIn(BaseModel):
     tenant_id: str = Field(default='demo', min_length=1, max_length=80)
@@ -151,7 +151,8 @@ async def erp_webhook(request: Request, x_resolveops_signature: str=Header(...))
     with Session(engine) as db:
         existing=db.scalar(select(Case).where(Case.tenant_id==payload['tenant_id'], Case.source_event_id==payload['event_id']))
         if existing: return {'case_id':existing.id,'status':existing.status,'duplicate':True}
-        case=Case(tenant_id=payload['tenant_id'],source_event_id=payload['event_id'],event_type=payload['event'],order_id=payload['order_id']); db.add(case)
+        event_type = 'delivery_delay' if payload['event'] == 'supplier_delay' else payload['event']
+        case=Case(tenant_id=payload['tenant_id'],source_event_id=payload['event_id'],event_type=event_type,order_id=payload['order_id']); db.add(case)
         try: db.flush()
         except IntegrityError:
             # A concurrent delivery passed the read check. The unique index is
@@ -159,7 +160,7 @@ async def erp_webhook(request: Request, x_resolveops_signature: str=Header(...))
             db.rollback()
             existing=db.scalar(select(Case).where(Case.tenant_id==payload['tenant_id'], Case.source_event_id==payload['event_id']))
             return {'case_id':existing.id,'status':existing.status,'duplicate':True}
-        emit(db,case.id,'case_created','Trusted ERPNext webhook received.',{'event_id':payload.get('event_id'),'event_type':payload.get('event')})
+        emit(db,case.id,'case_created','Trusted ERPNext webhook received.',{'event_id':payload.get('event_id'),'event_type':event_type,'source_event':payload.get('event')})
         db.add(Task(case_id=case.id,kind='investigate')); db.commit(); return {'case_id':case.id,'status':'queued','duplicate':False}
 @app.get('/v1/cases')
 def case_list(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), limit:int=50):

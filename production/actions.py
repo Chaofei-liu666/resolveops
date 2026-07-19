@@ -24,6 +24,10 @@ ACTION_PROFILES: dict[str, set[str]] = {
         'create_price_review_ticket',
         'create_manual_ticket',
     },
+    'delivery_delay': {
+        'create_supplier_followup_task',
+        'create_manual_ticket',
+    },
 }
 
 
@@ -91,6 +95,25 @@ def price_review_input(data: dict[str, Any]) -> dict[str, Any]:
         'reference_rate': reference_rate,
         'difference': difference,
         'reason': str(data.get('reason') or 'Order rate differs from reference price.'),
+    }
+
+
+def supplier_followup_input(data: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError('create_supplier_followup_task input must be an object')
+    required = {'sku', 'purchase_order', 'supplier', 'expected_delivery_date', 'delayed_by_days'}
+    if not required <= data.keys() or any(data[k] in (None, '') for k in required):
+        raise ValueError('create_supplier_followup_task requires sku, purchase_order, supplier, expected_delivery_date and delayed_by_days')
+    delayed_by_days = float(data['delayed_by_days'])
+    if delayed_by_days <= 0:
+        raise ValueError('create_supplier_followup_task delayed_by_days must be positive')
+    return {
+        'sku': str(data['sku']),
+        'purchase_order': str(data['purchase_order']),
+        'supplier': str(data['supplier']),
+        'expected_delivery_date': str(data['expected_delivery_date']),
+        'delayed_by_days': delayed_by_days,
+        'reason': str(data.get('reason') or 'Inbound purchase delivery is later than the customer delivery date.'),
     }
 
 
@@ -180,6 +203,32 @@ ACTION_TOOL_SPECS: dict[str, ToolSpec] = {
         verification={'tool': 'get_price_review', 'assertions': ['draft', 'sku', 'order_rate', 'reference_rate', 'difference']},
         compensation={'strategy': 'close_draft_price_review'},
     ),
+    'create_supplier_followup_task': ToolSpec(
+        name='create_supplier_followup_task',
+        description='Create a governed supplier/procurement follow-up record for an inbound delivery delay; never changes ERP purchase or sales documents.',
+        parameters=object_schema(
+            {
+                'sku': {'type': 'string'},
+                'purchase_order': {'type': 'string'},
+                'supplier': {'type': 'string'},
+                'expected_delivery_date': {'type': 'string'},
+                'delayed_by_days': {'type': 'number'},
+                'reason': {'type': 'string'},
+            },
+            ['sku', 'purchase_order', 'supplier', 'expected_delivery_date', 'delayed_by_days'],
+        ),
+        permission='supplier_followup:create',
+        side_effect='create_followup_record',
+        risk_level='medium',
+        source_system='ResolveOpsDB',
+        executor_ref='resolveops.create_supplier_followup_task',
+        llm_callable=False,
+        requires_approval=True,
+        idempotency_required=True,
+        resource_keys=['supplier_followup:{purchase_order}:{sku}'],
+        verification={'tool': 'get_supplier_followup', 'assertions': ['draft', 'sku', 'purchase_order', 'supplier', 'expected_delivery_date']},
+        compensation={'strategy': 'close_draft_supplier_followup'},
+    ),
     'create_manual_ticket': ToolSpec(
         name='create_manual_ticket',
         description='Create a human handoff ticket for unresolved business exceptions.',
@@ -234,6 +283,17 @@ REGISTRY: dict[str, ActionDefinition] = {
         verification=ACTION_TOOL_SPECS['create_price_review_ticket'].verification,
         compensation=ACTION_TOOL_SPECS['create_price_review_ticket'].compensation,
         tool_spec=ACTION_TOOL_SPECS['create_price_review_ticket'],
+    ),
+    'create_supplier_followup_task': ActionDefinition(
+        action_type='create_supplier_followup_task',
+        title='Create supplier follow-up task',
+        executor=ACTION_TOOL_SPECS['create_supplier_followup_task'].executor_ref,
+        approval_policy='procurement_manager',
+        validator=supplier_followup_input,
+        resource_keys=lambda x: [f"supplier_followup:{x['purchase_order']}:{x['sku']}"],
+        verification=ACTION_TOOL_SPECS['create_supplier_followup_task'].verification,
+        compensation=ACTION_TOOL_SPECS['create_supplier_followup_task'].compensation,
+        tool_spec=ACTION_TOOL_SPECS['create_supplier_followup_task'],
     ),
     'create_manual_ticket': ActionDefinition(
         'create_manual_ticket',

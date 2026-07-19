@@ -91,7 +91,7 @@ class ERPNextAdapter:
         parent documents also gives the Agent submitted status and dates.
         """
         orders = self._get('/api/resource/Purchase Order', {
-            'fields': '["name","status","docstatus","schedule_date"]',
+            'fields': '["name","supplier","status","docstatus","schedule_date"]',
             'limit_page_length': 20,
         })
         inbound=[]
@@ -104,7 +104,13 @@ class ERPNextAdapter:
                     continue
                 remaining=float(item.get('qty',0))-float(item.get('received_qty',0))
                 if remaining > 0:
-                    inbound.append({'purchase_order':header['name'],'remaining_qty':remaining,'schedule_date':item.get('schedule_date') or header.get('schedule_date'),'status':header.get('status')})
+                    inbound.append({
+                        'purchase_order': header['name'],
+                        'supplier': order.get('supplier') or header.get('supplier'),
+                        'remaining_qty': remaining,
+                        'schedule_date': item.get('schedule_date') or header.get('schedule_date'),
+                        'status': header.get('status'),
+                    })
         return inbound
 
 

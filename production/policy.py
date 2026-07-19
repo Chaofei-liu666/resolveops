@@ -29,4 +29,8 @@ def action_policy(plan: dict, evidence: dict | None) -> dict:
         return {'allowed':True,'reason':'purchase_request_approval_required','required_roles':roles,'amount':amount,'vip':vip}
     if plan['action_type']=='create_price_review_ticket':
         return {'allowed':True,'reason':'price_review_requires_sales_and_finance','required_roles':['sales_manager','finance_manager'],'amount':amount,'vip':vip}
+    if plan['action_type']=='create_supplier_followup_task':
+        roles=['procurement_manager']
+        if amount>100000 or vip: roles.append('sales_manager')
+        return {'allowed':True,'reason':'supplier_followup_approval_required','required_roles':roles,'amount':amount,'vip':vip}
     return {'allowed':False,'reason':'no_executor_policy','required_roles':[]}

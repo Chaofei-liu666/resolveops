@@ -34,6 +34,12 @@ READ_TOOL_PROFILES: dict[str, set[str]] = {
         'get_reference_price',
         'get_customer_profile',
     },
+    'delivery_delay': {
+        'get_order',
+        'get_inbound_purchase',
+        'get_item_supply_profile',
+        'get_customer_profile',
+    },
 }
 
 

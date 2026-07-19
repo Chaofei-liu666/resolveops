@@ -84,6 +84,20 @@ def reference_price_for(observations: list[dict[str, Any]], sku: str) -> dict[st
     return None
 
 
+def inbound_purchase_for(observations: list[dict[str, Any]], sku: str, purchase_order: str) -> dict[str, Any] | None:
+    for observation in observations or []:
+        if observation.get('tool') != 'get_inbound_purchase':
+            continue
+        args = observation.get('arguments') or {}
+        result = observation.get('result') or {}
+        if result.get('error') or args.get('item_code') != sku:
+            continue
+        for item in result.get('purchase_items') or []:
+            if item.get('purchase_order') == purchase_order:
+                return item
+    return None
+
+
 def order_context(observations: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, dict[str, Any] | None, list[str]]:
     problems: list[str] = []
     order = first_success(observations, 'get_order')
@@ -238,7 +252,73 @@ def validate_inventory_shortage_plan(plan: dict[str, Any], observations: list[di
     }
 
 
+def validate_delivery_delay_plan(plan: dict[str, Any], observations: list[dict[str, Any]]) -> dict[str, Any]:
+    actions = plan.get('actions') if isinstance(plan, dict) else None
+    if not isinstance(actions, list) or not actions:
+        return {'allowed': False, 'reason': 'plan has no actions', 'problems': ['plan has no actions']}
+    problems: list[str] = []
+    order = first_success(observations, 'get_order')
+    if not order:
+        problems.append('missing successful get_order evidence')
+    if len(actions) != 1:
+        problems.append('delivery_delay currently supports exactly one governed supplier follow-up action')
+
+    for action in actions:
+        action_type = action.get('action_type')
+        action_input = action.get('input') or {}
+        if action_type != 'create_supplier_followup_task':
+            problems.append(f'{action_type} is not allowed for delivery_delay evidence grounding')
+            continue
+        sku = action_input.get('sku')
+        purchase_order = action_input.get('purchase_order')
+        if not sku or not purchase_order:
+            problems.append('create_supplier_followup_task missing sku or purchase_order')
+            continue
+        item = order_item(order or {}, sku)
+        if not item:
+            problems.append(f'order has no item evidence for {sku}')
+            continue
+        delivery_date = (item.get('delivery_date') or (order or {}).get('delivery_date') or '')
+        if not delivery_date:
+            problems.append('missing customer delivery date evidence')
+            continue
+        inbound = inbound_purchase_for(observations, sku, purchase_order)
+        if not inbound:
+            problems.append(f'missing inbound purchase evidence for {sku} on {purchase_order}')
+            continue
+        schedule_date = inbound.get('schedule_date')
+        if not schedule_date:
+            problems.append(f'inbound purchase {purchase_order} has no schedule_date evidence')
+            continue
+        supplier = action_input.get('supplier')
+        if inbound.get('supplier') and supplier != inbound.get('supplier'):
+            problems.append(f'supplier {supplier} does not match inbound evidence {inbound.get("supplier")}')
+        expected_delivery_date = action_input.get('expected_delivery_date')
+        if expected_delivery_date != schedule_date:
+            problems.append(f'expected_delivery_date {expected_delivery_date} does not match inbound schedule_date {schedule_date}')
+        try:
+            due = date.fromisoformat(str(delivery_date)[:10])
+            expected = date.fromisoformat(str(schedule_date)[:10])
+            computed_delay = (expected - due).days
+            delayed_by_days = float(action_input.get('delayed_by_days') or 0)
+            if computed_delay <= 0:
+                problems.append(f'inbound purchase {purchase_order} is not later than customer delivery date')
+            if abs(delayed_by_days - computed_delay) > 0.01:
+                problems.append(f'delayed_by_days {delayed_by_days} does not match computed delay {computed_delay}')
+        except (TypeError, ValueError):
+            problems.append('invalid delivery date evidence')
+
+    return {
+        'allowed': not problems,
+        'reason': 'grounded' if not problems else 'evidence_not_sufficient',
+        'problems': problems,
+        'case_type': 'delivery_delay',
+    }
+
+
 def validate_plan_grounding(plan: dict[str, Any], observations: list[dict[str, Any]], case_type: str = 'inventory_shortage') -> dict[str, Any]:
     if case_type == 'price_mismatch':
         return validate_price_mismatch_plan(plan, observations)
+    if case_type == 'delivery_delay':
+        return validate_delivery_delay_plan(plan, observations)
     return validate_inventory_shortage_plan(plan, observations)
