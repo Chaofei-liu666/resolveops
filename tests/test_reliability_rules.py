@@ -1536,7 +1536,7 @@ def test_case_question_agent_can_call_read_tool_before_answering():
     assert observations[0]['tool'] == 'get_item_supply_profile'
 
 
-def test_case_question_agent_allows_bounded_small_talk_without_tools():
+def test_case_question_agent_allows_general_no_tool_chat_without_business_tools():
     class FakeTools:
         def definitions(self):
             return [{
@@ -1560,23 +1560,32 @@ def test_case_question_agent_allows_bounded_small_talk_without_tools():
             assert 'tools' not in payload
             return LLMResult(status='success', response={'choices': [{'message': {
                 'role': 'assistant',
-                'content': '{"answer":"我是 ResolveOps，专注于订单履约和业务异常 Case 的调查、解释与安全推进。你可以问我当前 Case 为什么停住、用了哪些工具、下一步应该如何处理。","rationale":"This is an identity/scope question, so no business read tool was needed.","used_evidence":[],"used_tools":[],"safe_next_steps":["Ask about the current Case status, tool trace, approvals, or safe next steps."]}',
+                'content': '{"answer":"当然可以。Agent 通常指能够理解目标、规划步骤并在需要时调用工具完成任务的系统。ResolveOps 是一个面向订单履约异常的 Agent，所以我可以解释概念，也可以在当前 Case 里读取业务证据。","rationale":"This is a general no-tool explanation, so no business read tool was needed.","used_evidence":[],"used_tools":[],"safe_next_steps":["Ask about the current Case status, tool trace, approvals, or safe next steps."]}',
             }}]})
 
     observations = []
     fake_llm = FakeLLM()
     result = CaseQuestionAgent(FakeTools(), fake_llm).answer(
         order_id='SO-1',
-        question='你好，你是谁？',
+        question='什么是 Agent？',
         case_context={'scope': {'case_id': 'case-1', 'event_type': 'inventory_shortage', 'order_id': 'SO-1'}},
         on_observation=observations.append,
     )
 
-    assert 'ResolveOps' in result['answer']
+    assert 'Agent' in result['answer']
     assert result['used_tools'] == []
     assert observations == []
     assert len(result['llm']) > 0
     assert len(fake_llm.calls) == 1
+
+
+def test_case_question_router_separates_general_chat_from_case_tool_questions():
+    assert CaseQuestionAgent._is_general_no_tool_chat('帮我写一段介绍 Agent 的话')
+    assert CaseQuestionAgent._is_general_no_tool_chat('你和普通客服机器人有什么区别？')
+    assert CaseQuestionAgent._is_general_no_tool_chat('写一首关于仓库月光的短诗')
+    assert not CaseQuestionAgent._is_general_no_tool_chat('这个 Case 为什么停住了？')
+    assert not CaseQuestionAgent._is_general_no_tool_chat('用了哪些工具？')
+    assert not CaseQuestionAgent._is_general_no_tool_chat('我现在能审批这个订单吗？')
 
 
 def test_case_question_agent_falls_back_to_case_context_when_final_json_is_invalid():
