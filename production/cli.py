@@ -323,6 +323,24 @@ def print_case_answer(data: dict[str, Any]) -> None:
             print(f"- {step}")
 
 
+def print_case_chat_help() -> None:
+    print('Commands:')
+    print('  /show        show current Case summary')
+    print('  /events      show recent Case event trace')
+    print('  /help        show this help')
+    print('  /exit        leave the Case chat')
+    print('Any other input is sent as a Case-scoped read-only Agent question.')
+
+
+def print_recent_case_events(case: dict[str, Any], limit: int = 12) -> None:
+    events = case.get('events') or []
+    if not events:
+        print('No events recorded for this Case.')
+        return
+    for event in events[-limit:]:
+        print(format_event(event))
+
+
 def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
     total = data.get('total_cases', 0)
     resolved = data.get('resolved_cases', 0)
@@ -529,6 +547,43 @@ def cmd_case_watch(args: argparse.Namespace, client: ApiClient) -> int:
     return 0
 
 
+def cmd_case_chat(args: argparse.Namespace, client: ApiClient) -> int:
+    case = client.request('GET', f'/v1/cases/{args.case_id}')
+    print(paint('ResolveOps Case Chat', 'green'))
+    print(f"case: {case.get('id')} type={case.get('event_type')} order={case.get('order_id')} status={case.get('status')}")
+    print_case_chat_help()
+    prompt = f"resolveops {str(args.case_id)[:8]}> "
+    while True:
+        try:
+            question = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print(paint('chat stopped', 'yellow'))
+            return 0
+        if not question:
+            continue
+        lowered = question.lower()
+        if lowered in {'/exit', '/quit', 'exit', 'quit'}:
+            return 0
+        if lowered in {'/help', 'help', '?'}:
+            print_case_chat_help()
+            continue
+        if lowered == '/show':
+            case = client.request('GET', f'/v1/cases/{args.case_id}')
+            print_case_summary(case)
+            continue
+        if lowered == '/events':
+            case = client.request('GET', f'/v1/cases/{args.case_id}')
+            print_recent_case_events(case, limit=args.events)
+            continue
+        try:
+            data = client.request('POST', f'/v1/cases/{args.case_id}/ask', {'question': question})
+        except CliError as exc:
+            print(paint(f"error: {exc}", 'red'))
+            continue
+        print_case_answer(data)
+
+
 def cmd_fi_list(args: argparse.Namespace, client: ApiClient) -> int:
     data = client.request('GET', '/v1/fault-injections')
     if args.json:
@@ -633,6 +688,10 @@ def build_parser() -> argparse.ArgumentParser:
     case_watch.add_argument('--timeout', type=float, default=60.0, help='Maximum watch time in seconds; 0 disables timeout')
     case_watch.add_argument('--follow', action='store_true', help='Keep watching after waiting_approval/manual_review/resolved')
     case_watch.set_defaults(handler=cmd_case_watch)
+    case_chat = case_sub.add_parser('chat', help='Open an interactive Case-scoped Agent chat')
+    case_chat.add_argument('case_id')
+    case_chat.add_argument('--events', type=int, default=12, help='Number of recent events shown by /events')
+    case_chat.set_defaults(handler=cmd_case_chat)
 
     fi = sub.add_parser('fi', help='Fault injection commands')
     fi_sub = fi.add_subparsers(dest='fi_command', required=True)

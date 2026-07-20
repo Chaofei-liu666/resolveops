@@ -162,9 +162,12 @@ python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-
 python resolveops.py case list
 python resolveops.py case show <case-id>
 python resolveops.py case watch <case-id>
+python resolveops.py case chat <case-id>
 ```
 
 `case watch` is the CLI trace view. It polls ResolveOps APIs and prints Case events such as read-tool calls, Agent decision summaries, approvals, execution, verification and handoff.
+
+`case chat` starts an interactive Case-scoped read-only Agent session. Use `/show`, `/events`, `/help` and `/exit` inside the session.
 
 Ask a Case-scoped read-only Agent question:
 

@@ -294,9 +294,12 @@ python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-
 python resolveops.py case list
 python resolveops.py case show <case-id>
 python resolveops.py case watch <case-id>
+python resolveops.py case chat <case-id>
 ```
 
 `case watch` prints a live, colorized Case event trace. It shows read-tool calls, Agent decision summaries, approvals, executor activity, verification and safe handoff events without giving the CLI direct ERPNext access.
+
+`case chat` opens an interactive Case-scoped Agent session. Free-text input is sent to the read-only Case question endpoint; slash commands such as `/show`, `/events` and `/exit` stay in the CLI layer.
 
 Ask a Case-scoped read-only Agent question:
 

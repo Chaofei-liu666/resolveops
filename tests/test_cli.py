@@ -216,6 +216,61 @@ def test_cli_case_watch_prints_live_tool_and_agent_events(monkeypatch, capsys):
     assert 'Compared transfer and purchase' in out
 
 
+def test_cli_case_chat_loops_over_case_scoped_questions(monkeypatch, capsys):
+    calls = []
+    inputs = iter(['Why did it stop?', '/events', '/exit'])
+
+    def fake_input(prompt):
+        print(prompt, end='')
+        return next(inputs)
+
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json, 'timeout': timeout})
+        if method == 'GET':
+            return FakeResponse(data={
+                'id': 'CASE-1',
+                'event_type': 'inventory_shortage',
+                'order_id': 'SO-1',
+                'status': 'manual_review',
+                'events': [
+                    {'id': '1', 'kind': 'tool_observation', 'message': 'Agent called read tool: get_order.', 'data': {'tool': 'get_order'}, 'created_at': '2026-07-20T00:00:00'},
+                ],
+            })
+        return FakeResponse(data={
+            'case_id': 'CASE-1',
+            'event_type': 'inventory_shortage',
+            'order_id': 'SO-1',
+            'status': 'manual_review',
+            'question': json['question'],
+            'answer': 'It stopped because the required order evidence is unavailable.',
+            'rationale': 'Tool failures are treated as unknown facts.',
+            'used_tools': ['get_order'],
+            'used_evidence': [],
+            'safe_next_steps': ['Restore ERPNext connectivity.'],
+            'observations': [{'tool': 'get_order', 'scheduler': {'source': 'executed'}, 'result': {'error': 'tool_execution_failed'}}],
+        })
+
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
+    monkeypatch.setattr('builtins.input', fake_input)
+
+    result = cli.main([
+        '--base-url', 'http://api.local',
+        '--operator-key', 'ops-key',
+        'case', 'chat', 'CASE-1',
+    ])
+
+    assert result == 0
+    assert calls[0]['method'] == 'GET'
+    assert calls[1]['method'] == 'POST'
+    assert calls[1]['url'] == 'http://api.local/v1/cases/CASE-1/ask'
+    assert calls[1]['json'] == {'question': 'Why did it stop?'}
+    assert calls[2]['method'] == 'GET'
+    out = capsys.readouterr().out
+    assert 'ResolveOps Case Chat' in out
+    assert 'It stopped because' in out
+    assert '[Tool]' in out
+
+
 def test_cli_eval_summary_calls_eval_endpoint(monkeypatch, capsys):
     calls = []
 
