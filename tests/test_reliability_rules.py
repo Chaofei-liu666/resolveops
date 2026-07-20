@@ -1536,6 +1536,53 @@ def test_case_question_agent_can_call_read_tool_before_answering():
     assert observations[0]['tool'] == 'get_item_supply_profile'
 
 
+def test_case_question_agent_allows_bounded_small_talk_without_tools():
+    class FakeTools:
+        def definitions(self):
+            return [{
+                'type': 'function',
+                'function': {
+                    'name': 'get_order',
+                    'description': 'Read order facts.',
+                    'parameters': {'type': 'object', 'properties': {}},
+                },
+            }]
+
+        def execute_result(self, name, arguments, order_id):
+            raise AssertionError('small talk should not call read tools')
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, payload):
+            self.calls.append(payload)
+            if len(self.calls) == 1:
+                system_prompt = payload['messages'][0]['content']
+                assert 'not a general-purpose assistant' in system_prompt
+                assert 'light conversational messages' in system_prompt
+                return LLMResult(status='success', response={'choices': [{'message': {
+                    'role': 'assistant',
+                    'content': 'I can answer briefly without tools.',
+                }}]})
+            return LLMResult(status='success', response={'choices': [{'message': {
+                'role': 'assistant',
+                'content': '{"answer":"我是 ResolveOps，专注于订单履约和业务异常 Case 的调查、解释与安全推进。你可以问我当前 Case 为什么停住、用了哪些工具、下一步应该如何处理。","rationale":"This is an identity/scope question, so no business read tool was needed.","used_evidence":[],"used_tools":[],"safe_next_steps":["Ask about the current Case status, tool trace, approvals, or safe next steps."]}',
+            }}]})
+
+    observations = []
+    result = CaseQuestionAgent(FakeTools(), FakeLLM()).answer(
+        order_id='SO-1',
+        question='你好，你是谁？',
+        case_context={'scope': {'case_id': 'case-1', 'event_type': 'inventory_shortage', 'order_id': 'SO-1'}},
+        on_observation=observations.append,
+    )
+
+    assert 'ResolveOps' in result['answer']
+    assert result['used_tools'] == []
+    assert observations == []
+
+
 def test_case_ask_endpoint_records_read_only_answer(monkeypatch):
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(engine)

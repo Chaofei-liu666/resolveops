@@ -330,6 +330,7 @@ def print_case_chat_help() -> None:
     print('  /help        show this help')
     print('  /exit        leave the Case chat')
     print('Any other input is sent as a Case-scoped read-only Agent question.')
+    print('Light greetings or identity questions are allowed, but the Agent stays scoped to business exception handling.')
 
 
 def print_recent_case_events(case: dict[str, Any], limit: int = 12) -> None:

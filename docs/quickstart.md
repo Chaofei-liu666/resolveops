@@ -167,7 +167,7 @@ python resolveops.py case chat <case-id>
 
 `case watch` is the CLI trace view. It polls ResolveOps APIs and prints Case events such as read-tool calls, Agent decision summaries, approvals, execution, verification and handoff.
 
-`case chat` starts an interactive Case-scoped read-only Agent session. Use `/show`, `/events`, `/help` and `/exit` inside the session.
+`case chat` starts an interactive Case-scoped read-only Agent session. Use `/show`, `/events`, `/help` and `/exit` inside the session. Light greetings and identity questions are allowed, but the Agent stays scoped to ResolveOps order/business exception handling.
 
 Ask a Case-scoped read-only Agent question:
 
