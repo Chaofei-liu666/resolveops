@@ -295,6 +295,15 @@ python resolveops.py case list
 python resolveops.py case show <case-id>
 ```
 
+Ask a Case-scoped read-only Agent question:
+
+```powershell
+python resolveops.py case ask <case-id> "Why not create a purchase request?"
+python resolveops.py case ask <case-id> "If the source warehouse has no stock now, what should happen?"
+```
+
+`case ask` may call read tools to refresh evidence, but it never creates approvals or executes writes.
+
 Approve or revoke an action:
 
 ```powershell

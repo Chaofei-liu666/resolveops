@@ -21,6 +21,9 @@ from .models import AuditLog, Base, Approval, Case, Event, Invocation, Logistics
 from .runtime_status import build_runtime_status
 from .tool_trace import build_tool_trace
 from .erpnext import ERPNextAdapter
+from .case_ask import CaseQuestionAgent
+from .context import CaseContextBuilder, validate_case_context_isolation
+from .tools import BusinessReadTools
 
 SUPPORTED_EVENTS={'inventory_shortage','price_mismatch','delivery_delay','supplier_delay'}
 
@@ -43,6 +46,9 @@ class CaseCreateIn(BaseModel):
     source_event_id: str | None = Field(default=None, max_length=160)
     reason: str | None = Field(default=None, max_length=500)
     context: dict[str, Any] = Field(default_factory=dict)
+
+class CaseAskIn(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
 
 class FaultInjectionRunIn(BaseModel):
     fault_type: Literal['inventory_changed_before_execution']
@@ -349,6 +355,57 @@ def create_case(payload: CaseCreateIn, x_operator_key:str|None=Header(default=No
         db.add(Task(case_id=case.id,kind='investigate',payload={'source':'api','context':payload.context,'reason':payload.reason}))
         db.commit()
         return {'case_id':case.id,'status':'queued','duplicate':False}
+
+@app.post('/v1/cases/{case_id}/ask')
+def ask_case(case_id:str, payload: CaseAskIn, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        case=db.get(Case,case_id)
+        if not case:
+            raise HTTPException(404,'case not found')
+        context=CaseContextBuilder(db).build(case_id, {'reason':'operator_case_question'})
+        isolation=validate_case_context_isolation(context)
+        if not isolation['allowed']:
+            emit(db,case.id,'context_isolation_failed','Case question blocked because context isolation failed.',{'question':payload.question,'isolation':isolation})
+            audit(db,identity,'case_question_blocked','case',case.id,{'question':payload.question,'isolation':isolation},case_id=case.id)
+            db.commit()
+            raise HTTPException(409, {'error':'context_isolation_failed','isolation':isolation})
+        if isolation.get('warnings'):
+            emit(db,case.id,'context_isolation_sanitized','Case question context was sanitized before LLM use.',{'question':payload.question,'isolation':isolation})
+
+        emit(db,case.id,'case_question_asked','Operator asked a Case-scoped question.',{'question':payload.question,'actor':identity.subject,'role':identity.role})
+        tools=BusinessReadTools(ERPNextAdapter(settings.erpnext_base_url,settings.erpnext_api_key,settings.erpnext_api_secret), case.event_type)
+
+        def record_observation(observation: dict[str, Any]) -> None:
+            emit(
+                db,
+                case.id,
+                'case_question_tool_observation',
+                f"Case question called read tool: {observation.get('tool')}.",
+                observation,
+            )
+
+        answer=CaseQuestionAgent(tools).answer(
+            order_id=case.order_id,
+            question=payload.question,
+            case_context=context,
+            on_observation=record_observation,
+        )
+        emit(db,case.id,'case_question_answered','Agent answered a Case-scoped question without executing writes.',{
+            'question':payload.question,
+            'answer':answer.get('answer'),
+            'used_tools':answer.get('used_tools') or [],
+            'observation_count':len(answer.get('observations') or []),
+        })
+        audit(db,identity,'case_question_answered','case',case.id,{'question':payload.question,'used_tools':answer.get('used_tools') or []},case_id=case.id)
+        db.commit()
+        return {
+            'case_id':case.id,
+            'status':case.status,
+            'event_type':case.event_type,
+            'order_id':case.order_id,
+            **answer,
+        }
 @app.get('/v1/config/logistics-lanes')
 def logistics_lanes(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), tenant_id:str='demo', active:bool|None=None):
     with Session(engine) as db:

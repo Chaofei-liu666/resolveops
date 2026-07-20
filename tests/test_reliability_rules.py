@@ -15,6 +15,7 @@ import production.agent as agent_module
 import production.main as main_module
 import production.runtime_status as runtime_status_module
 from production.agent import InvestigationAgent
+from production.case_ask import CaseQuestionAgent
 from production.evidence import validate_plan_grounding
 from production.executors import executor_for
 from fastapi import HTTPException
@@ -22,7 +23,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from production.context import CaseContextBuilder, build_case_context, validate_case_context_isolation
-from production.main import CaseCreateIn, FaultInjectionRunIn, LogisticsLaneIn, OperatorIdentity, audit_out, case_tool_trace, create_case, eval_case, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_fault_injection_enabled, require_role, run_fault_injection
+from production.main import CaseAskIn, CaseCreateIn, FaultInjectionRunIn, LogisticsLaneIn, OperatorIdentity, ask_case, audit_out, case_tool_trace, create_case, eval_case, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_fault_injection_enabled, require_role, run_fault_injection
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
 import production.migrations as migration_module
 from production.migrations import apply_migrations, ensure_schema_migrations_table
@@ -1456,6 +1457,117 @@ def test_eval_case_endpoint_requires_ops_role_and_returns_case_metrics(monkeypat
     assert result['write_invocation_count'] == 1
     assert result['verification_complete'] is True
     assert result['tool_call_count'] == 1
+
+
+def test_case_question_agent_can_call_read_tool_before_answering():
+    calls = []
+
+    class FakeTools:
+        def definitions(self):
+            return [{
+                'type': 'function',
+                'function': {
+                    'name': 'get_item_supply_profile',
+                    'description': 'Read item replenishment facts.',
+                    'parameters': {
+                        'type': 'object',
+                        'properties': {'item_code': {'type': 'string'}},
+                        'required': ['item_code'],
+                    },
+                },
+            }]
+
+        def execute_result(self, name, arguments, order_id):
+            calls.append({'name': name, 'arguments': arguments, 'order_id': order_id})
+            return ToolResult.success({'item_code': arguments['item_code'], 'lead_time_days': 3})
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, payload):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResult(status='success', response={'choices': [{'message': {
+                    'role': 'assistant',
+                    'tool_calls': [{
+                        'id': 'call-1',
+                        'type': 'function',
+                        'function': {'name': 'get_item_supply_profile', 'arguments': '{"item_code":"SKU-A12"}'},
+                    }],
+                }}]})
+            return LLMResult(status='success', response={'choices': [{'message': {
+                'role': 'assistant',
+                'content': '{"answer":"Purchase takes 3 days, so it is slower than the current transfer plan.","rationale":"The read tool returned lead_time_days=3.","used_evidence":["lead_time_days=3"],"used_tools":["get_item_supply_profile"],"safe_next_steps":["Keep the current approval path or ask for replanning."]}',
+            }}]})
+
+    observations = []
+    result = CaseQuestionAgent(FakeTools(), FakeLLM()).answer(
+        order_id='SO-1',
+        question='Why not purchase?',
+        case_context={'scope': {'case_id': 'case-1', 'event_type': 'inventory_shortage', 'order_id': 'SO-1'}},
+        on_observation=observations.append,
+    )
+
+    assert result['answer'].startswith('Purchase takes 3 days')
+    assert result['used_tools'] == ['get_item_supply_profile']
+    assert calls == [{'name': 'get_item_supply_profile', 'arguments': {'item_code': 'SKU-A12'}, 'order_id': 'SO-1'}]
+    assert observations[0]['tool'] == 'get_item_supply_profile'
+
+
+def test_case_ask_endpoint_records_read_only_answer(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+
+    class FakeQuestionAgent:
+        def __init__(self, _tools):
+            pass
+
+        def answer(self, *, order_id, question, case_context, on_observation):
+            on_observation({'tool': 'get_order', 'arguments': {}, 'result': {'name': order_id}, 'scheduler': {'source': 'executed'}})
+            return {
+                'question': question,
+                'answer': 'The Case is still waiting for approval.',
+                'rationale': 'The Case context status is waiting_approval.',
+                'used_evidence': ['current_state.status'],
+                'used_tools': ['get_order'],
+                'safe_next_steps': ['Approve through the normal approval API if appropriate.'],
+                'observations': [{'tool': 'get_order', 'arguments': {}, 'result': {'name': order_id}, 'scheduler': {'source': 'executed'}}],
+            }
+
+    monkeypatch.setattr(main_module, 'CaseQuestionAgent', FakeQuestionAgent)
+    with Session(engine) as db:
+        db.add(Operator(
+            tenant_id='demo',
+            subject='ops',
+            role='ops_admin',
+            api_key_hash=operator_key_hash('ops-key'),
+            status='active',
+        ))
+        db.add(Case(
+            id='case-ask',
+            tenant_id='demo',
+            order_id='SO-1',
+            event_type='inventory_shortage',
+            status='waiting_approval',
+            plan_version=1,
+            plan={'actions': [{'action_type': 'transfer_stock'}]},
+        ))
+        db.commit()
+
+    result = ask_case('case-ask', CaseAskIn(question='What is next?'), x_operator_key='ops-key')
+
+    assert result['case_id'] == 'case-ask'
+    assert result['answer'] == 'The Case is still waiting for approval.'
+    assert result['used_tools'] == ['get_order']
+    with Session(engine) as db:
+        events = db.scalars(select(Event).where(Event.case_id == 'case-ask').order_by(Event.created_at)).all()
+        approvals = db.scalars(select(Approval).where(Approval.case_id == 'case-ask')).all()
+        invocations = db.scalars(select(Invocation).where(Invocation.case_id == 'case-ask')).all()
+    assert [event.kind for event in events] == ['case_question_asked', 'case_question_tool_observation', 'case_question_answered']
+    assert approvals == []
+    assert invocations == []
 
 
 def test_eval_summary_counts_recovery_and_failure_signals():

@@ -112,6 +112,46 @@ def test_cli_case_create_posts_resolveops_payload(monkeypatch, capsys):
     assert 'CASE-1' in capsys.readouterr().out
 
 
+def test_cli_case_ask_posts_question(monkeypatch, capsys):
+    calls = []
+
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json, 'timeout': timeout})
+        return FakeResponse(data={
+            'case_id': 'CASE-1',
+            'event_type': 'inventory_shortage',
+            'order_id': 'SO-1',
+            'status': 'waiting_approval',
+            'question': 'Why not purchase?',
+            'answer': 'Transfer is faster than purchase based on current evidence.',
+            'rationale': 'Transfer route takes 1 day while purchase lead time is 3 days.',
+            'used_tools': ['get_item_supply_profile', 'get_transfer_options'],
+            'used_evidence': ['transfer transit_days=1', 'lead_time_days=3'],
+            'safe_next_steps': ['Approve the bound action or ask for replanning.'],
+            'observations': [{'tool': 'get_transfer_options', 'scheduler': {'source': 'executed'}, 'result': {'lanes': []}}],
+        })
+
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
+    result = cli.main([
+        '--base-url', 'http://api.local',
+        '--operator-key', 'ops-key',
+        'case', 'ask', 'CASE-1', 'Why not purchase?',
+    ])
+
+    assert result == 0
+    assert calls == [{
+        'method': 'POST',
+        'url': 'http://api.local/v1/cases/CASE-1/ask',
+        'headers': {'X-Operator-Key': 'ops-key'},
+        'json': {'question': 'Why not purchase?'},
+        'timeout': 30,
+    }]
+    out = capsys.readouterr().out
+    assert 'ResolveOps Case Answer' in out
+    assert 'Transfer is faster' in out
+    assert 'get_transfer_options' in out
+
+
 def test_cli_eval_summary_calls_eval_endpoint(monkeypatch, capsys):
     calls = []
 

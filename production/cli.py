@@ -158,6 +158,44 @@ def print_case_summary(case: dict[str, Any]) -> None:
             print(f"- {event.get('kind')}: {event.get('message')}")
 
 
+def print_case_answer(data: dict[str, Any]) -> None:
+    print('ResolveOps Case Answer')
+    print(f"case: {data.get('case_id')} type={data.get('event_type')} order={data.get('order_id')} status={data.get('status')}")
+    print(f"question: {data.get('question')}")
+    print('\n[Answer]')
+    print(data.get('answer') or '')
+    rationale = data.get('rationale')
+    if rationale:
+        print('\n[Rationale]')
+        print(rationale)
+    used_tools = data.get('used_tools') or []
+    if used_tools:
+        print('\n[Used Tools]')
+        print(', '.join(str(tool) for tool in used_tools))
+    observations = data.get('observations') or []
+    if observations:
+        print('\n[Tool Observations]')
+        for obs in observations:
+            tool = obs.get('tool')
+            source = ((obs.get('scheduler') or {}).get('source')) or 'unknown'
+            result = obs.get('result') or {}
+            if isinstance(result, dict) and result.get('error'):
+                summary = f"error={result.get('error')}"
+            else:
+                summary = ', '.join(str(key) for key in list(result.keys())[:5]) if isinstance(result, dict) else type(result).__name__
+            print(f"- {tool} source={source} result={summary}")
+    evidence = data.get('used_evidence') or []
+    if evidence:
+        print('\n[Used Evidence]')
+        for item in evidence:
+            print(f"- {item}")
+    next_steps = data.get('safe_next_steps') or []
+    if next_steps:
+        print('\n[Safe Next Steps]')
+        for step in next_steps:
+            print(f"- {step}")
+
+
 def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
     total = data.get('total_cases', 0)
     resolved = data.get('resolved_cases', 0)
@@ -324,6 +362,16 @@ def cmd_case_show(args: argparse.Namespace, client: ApiClient) -> int:
     return 0
 
 
+def cmd_case_ask(args: argparse.Namespace, client: ApiClient) -> int:
+    question = ' '.join(args.question) if isinstance(args.question, list) else args.question
+    data = client.request('POST', f'/v1/cases/{args.case_id}/ask', {'question': question})
+    if args.json:
+        print_json(data)
+    else:
+        print_case_answer(data)
+    return 0
+
+
 def cmd_fi_list(args: argparse.Namespace, client: ApiClient) -> int:
     data = client.request('GET', '/v1/fault-injections')
     if args.json:
@@ -418,6 +466,10 @@ def build_parser() -> argparse.ArgumentParser:
     case_show = case_sub.add_parser('show', help='Show one case')
     case_show.add_argument('case_id')
     case_show.set_defaults(handler=cmd_case_show)
+    case_ask = case_sub.add_parser('ask', help='Ask a read-only Agent question about one Case')
+    case_ask.add_argument('case_id')
+    case_ask.add_argument('question', nargs='+')
+    case_ask.set_defaults(handler=cmd_case_ask)
 
     fi = sub.add_parser('fi', help='Fault injection commands')
     fi_sub = fi.add_subparsers(dest='fi_command', required=True)

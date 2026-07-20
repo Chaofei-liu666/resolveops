@@ -163,6 +163,14 @@ python resolveops.py case list
 python resolveops.py case show <case-id>
 ```
 
+Ask a Case-scoped read-only Agent question:
+
+```bash
+python resolveops.py case ask <case-id> "Why not create a purchase request?"
+```
+
+The Agent may call read tools to answer, but this command never creates approvals or executes writes.
+
 Approve pending actions:
 
 ```bash
