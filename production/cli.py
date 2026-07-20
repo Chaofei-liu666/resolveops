@@ -11,12 +11,15 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 
 DEFAULT_BASE_URL = 'http://localhost:8090'
+CONFIG_DIR_NAME = '.resolveops'
+CONFIG_FILE_NAME = 'config.json'
 TERMINAL_CASE_STATUSES = {'waiting_approval', 'manual_review', 'resolved'}
 ANSI = {
     'dim': '\033[2m',
@@ -33,6 +36,43 @@ ANSI = {
 
 class CliError(RuntimeError):
     pass
+
+
+def config_dir() -> Path:
+    override = os.getenv('RESOLVEOPS_CONFIG_HOME')
+    return Path(override).expanduser() if override else Path.home() / CONFIG_DIR_NAME
+
+
+def config_path() -> Path:
+    return config_dir() / CONFIG_FILE_NAME
+
+
+def load_cli_config() -> dict[str, Any]:
+    path = config_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except Exception as exc:
+        raise CliError(f'failed to read CLI config {path}: {exc}') from exc
+    if not isinstance(data, dict):
+        raise CliError(f'CLI config must be a JSON object: {path}')
+    return data
+
+
+def save_cli_config(data: dict[str, Any]) -> Path:
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    return path
+
+
+def masked(value: str | None) -> str:
+    if not value:
+        return ''
+    if len(value) <= 8:
+        return '*' * len(value)
+    return value[:4] + '*' * (len(value) - 8) + value[-4:]
 
 
 class ApiClient:
@@ -471,6 +511,65 @@ def cmd_status(args: argparse.Namespace, client: ApiClient) -> int:
     return 0
 
 
+def cmd_init(args: argparse.Namespace, client: ApiClient | None = None) -> int:
+    path = config_path()
+    created_dir = False
+    created_file = False
+    if not path.parent.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        created_dir = True
+    if not path.exists():
+        save_cli_config({
+            'api_url': DEFAULT_BASE_URL,
+            'operator_key': '',
+        })
+        created_file = True
+
+    print(paint('ResolveOps CLI', 'green'))
+    print('API-first Agent for enterprise order exception handling.')
+    print()
+    print(paint('[Init]', 'blue') + ' Checking local CLI config...')
+    dir_status = 'created' if created_dir else 'exists'
+    file_status = 'created' if created_file else 'exists'
+    print(f"{paint('[OK]', 'green')} Config directory {dir_status}: {path.parent}")
+    print(f"{paint('[OK]', 'green')} Config file {file_status}: {path}")
+    print()
+    print(paint('[Config]', 'yellow') + ' Set your ResolveOps API endpoint and operator key:')
+    print(f"python resolveops.py config set api_url {DEFAULT_BASE_URL}")
+    print('python resolveops.py config set operator_key <your-operator-key>')
+    print()
+    print(paint('[Next]', 'cyan') + ' Check the runtime:')
+    print('python resolveops.py status')
+    print()
+    print(paint('[Note]', 'dim') + ' Case commands still require an explicit <case-id> to preserve Case context isolation.')
+    return 0
+
+
+def cmd_config_show(args: argparse.Namespace, client: ApiClient | None = None) -> int:
+    data = load_cli_config()
+    visible = dict(data)
+    if 'operator_key' in visible:
+        visible['operator_key'] = masked(str(visible.get('operator_key') or ''))
+    print(f"config_file: {config_path()}")
+    print_json(visible)
+    return 0
+
+
+def cmd_config_set(args: argparse.Namespace, client: ApiClient | None = None) -> int:
+    data = load_cli_config()
+    if args.key == 'api_url':
+        data['api_url'] = args.value.rstrip('/')
+    elif args.key == 'operator_key':
+        data['operator_key'] = args.value.strip()
+    else:
+        raise CliError(f'unsupported config key: {args.key}')
+    path = save_cli_config(data)
+    display_value = masked(data['operator_key']) if args.key == 'operator_key' else data[args.key]
+    print(f"updated {args.key}: {display_value}")
+    print(f"config_file: {path}")
+    return 0
+
+
 def cmd_case_list(args: argparse.Namespace, client: ApiClient) -> int:
     data = client.request('GET', f'/v1/cases?limit={args.limit}')
     if args.json:
@@ -657,10 +756,22 @@ def cmd_eval_case(args: argparse.Namespace, client: ApiClient) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog='resolveops', description='ResolveOps API-first Agent CLI')
-    parser.add_argument('--base-url', default=os.getenv('RESOLVEOPS_API_URL', DEFAULT_BASE_URL), help='ResolveOps API base URL')
-    parser.add_argument('--operator-key', default=os.getenv('RESOLVEOPS_OPERATOR_KEY') or os.getenv('OPERATOR_API_KEY'), help='Operator API key')
+    parser.add_argument('--base-url', default=None, help='ResolveOps API base URL')
+    parser.add_argument('--operator-key', default=None, help='Operator API key')
     parser.add_argument('--json', action='store_true', help='Print raw JSON response')
     sub = parser.add_subparsers(dest='command', required=True)
+
+    init = sub.add_parser('init', help='Create local CLI config template')
+    init.set_defaults(handler=cmd_init)
+
+    config = sub.add_parser('config', help='Local CLI config commands')
+    config_sub = config.add_subparsers(dest='config_command', required=True)
+    config_show = config_sub.add_parser('show', help='Show local CLI config with secrets masked')
+    config_show.set_defaults(handler=cmd_config_show)
+    config_set = config_sub.add_parser('set', help='Set a local CLI config value')
+    config_set.add_argument('key', choices=['api_url', 'operator_key'])
+    config_set.add_argument('value')
+    config_set.set_defaults(handler=cmd_config_set)
 
     status = sub.add_parser('status', help='Show runtime status')
     status.set_defaults(handler=cmd_status)
@@ -739,8 +850,21 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    client = ApiClient(args.base_url, args.operator_key)
     try:
+        config = {} if args.command in {'init', 'config'} else load_cli_config()
+        base_url = (
+            args.base_url
+            or os.getenv('RESOLVEOPS_API_URL')
+            or config.get('api_url')
+            or DEFAULT_BASE_URL
+        )
+        operator_key = (
+            args.operator_key
+            or os.getenv('RESOLVEOPS_OPERATOR_KEY')
+            or os.getenv('OPERATOR_API_KEY')
+            or config.get('operator_key')
+        )
+        client = ApiClient(base_url, operator_key)
         return args.handler(args, client)
     except CliError as exc:
         print(f'error: {exc}', file=sys.stderr)

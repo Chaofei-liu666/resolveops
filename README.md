@@ -274,12 +274,16 @@ Console: http://localhost:8090
 
 ## CLI usage
 
-Set API address and operator key:
+Initialize local CLI config:
 
 ```powershell
-$env:RESOLVEOPS_API_URL="http://localhost:8090"
-$env:RESOLVEOPS_OPERATOR_KEY="<ops-admin-key>"
+python resolveops.py init
+python resolveops.py config set api_url http://localhost:8090
+python resolveops.py config set operator_key <ops-admin-key>
+python resolveops.py config show
 ```
+
+`config show` masks the operator key. Case commands still require an explicit `<case-id>` so different business Cases do not accidentally share context.
 
 Check runtime:
 

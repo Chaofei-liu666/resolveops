@@ -39,6 +39,68 @@ def test_cli_status_calls_runtime_status_with_operator_key(monkeypatch, capsys):
     assert 'ResolveOps Runtime Status' in capsys.readouterr().out
 
 
+def test_cli_init_creates_local_config_template(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv('RESOLVEOPS_CONFIG_HOME', str(tmp_path))
+
+    result = cli.main(['init'])
+
+    assert result == 0
+    config_file = tmp_path / 'config.json'
+    assert config_file.exists()
+    data = json.loads(config_file.read_text(encoding='utf-8'))
+    assert data == {'api_url': 'http://localhost:8090', 'operator_key': ''}
+    out = capsys.readouterr().out
+    assert 'ResolveOps CLI' in out
+    assert '[Init] Checking local CLI config' in out
+    assert '[Next] Check the runtime' in out
+
+
+def test_cli_config_set_and_show_mask_secret(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv('RESOLVEOPS_CONFIG_HOME', str(tmp_path))
+
+    assert cli.main(['config', 'set', 'api_url', 'http://api.local/']) == 0
+    assert cli.main(['config', 'set', 'operator_key', 'abcdef1234567890']) == 0
+    assert cli.main(['config', 'show']) == 0
+
+    data = json.loads((tmp_path / 'config.json').read_text(encoding='utf-8'))
+    assert data == {'api_url': 'http://api.local', 'operator_key': 'abcdef1234567890'}
+    out = capsys.readouterr().out
+    assert 'http://api.local' in out
+    assert 'abcdef1234567890' not in out
+    assert 'abcd********7890' in out
+
+
+def test_cli_status_reads_local_config_when_flags_are_omitted(monkeypatch, tmp_path):
+    (tmp_path / 'config.json').write_text(
+        json.dumps({'api_url': 'http://api.local', 'operator_key': 'ops-key'}),
+        encoding='utf-8',
+    )
+    monkeypatch.setenv('RESOLVEOPS_CONFIG_HOME', str(tmp_path))
+    monkeypatch.delenv('RESOLVEOPS_API_URL', raising=False)
+    monkeypatch.delenv('RESOLVEOPS_OPERATOR_KEY', raising=False)
+    monkeypatch.delenv('OPERATOR_API_KEY', raising=False)
+    calls = []
+
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        calls.append({'method': method, 'url': url, 'headers': headers})
+        return FakeResponse(data={
+            'status': 'ready',
+            'checks': {'database': {'ok': True}},
+            'queues': {'queued': 0, 'running': 0, 'failed': 0},
+        })
+
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
+
+    result = cli.main(['status'])
+
+    assert result == 0
+    assert calls == [{
+        'method': 'GET',
+        'url': 'http://api.local/v1/runtime/status',
+        'headers': {'X-Operator-Key': 'ops-key'},
+    }]
+
+
 def test_cli_fault_injection_posts_resolveops_payload(monkeypatch, capsys):
     calls = []
 

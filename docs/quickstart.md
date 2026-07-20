@@ -83,19 +83,25 @@ Swagger: http://localhost:8090/docs
 Console: http://localhost:8090
 ```
 
-Set CLI environment:
+Initialize local CLI config:
 
 ```bash
-export RESOLVEOPS_API_URL=http://localhost:8090
-export RESOLVEOPS_OPERATOR_KEY=local-ops-key
+python resolveops.py init
+python resolveops.py config set api_url http://localhost:8090
+python resolveops.py config set operator_key local-ops-key
+python resolveops.py config show
 ```
 
 PowerShell:
 
 ```powershell
-$env:RESOLVEOPS_API_URL="http://localhost:8090"
-$env:RESOLVEOPS_OPERATOR_KEY="local-ops-key"
+python resolveops.py init
+python resolveops.py config set api_url http://localhost:8090
+python resolveops.py config set operator_key local-ops-key
+python resolveops.py config show
 ```
+
+`config show` masks the operator key. You can still override values per command with `--base-url` and `--operator-key`, or with `RESOLVEOPS_API_URL` / `RESOLVEOPS_OPERATOR_KEY`.
 
 Use the CLI:
 
