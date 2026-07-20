@@ -51,6 +51,9 @@ class CaseQuestionAgent:
         case_context: dict[str, Any],
         on_observation,
     ) -> dict[str, Any]:
+        if self._is_light_conversation(question):
+            return self._answer_without_tools(question=question, case_context=case_context)
+
         seen: dict[tuple[str, str], ToolResult] = {}
         observations: list[dict[str, Any]] = []
         messages = [
@@ -151,6 +154,13 @@ class CaseQuestionAgent:
             return self._failed_answer(question, final, observations)
 
         parsed = self._parse_answer((final.first_message() or {}).get('content'))
+        if parsed.get('parse_error'):
+            parsed = self._fallback_answer_from_context(
+                question=question,
+                case_context=case_context,
+                observations=observations,
+                parse_error=parsed.get('parse_error'),
+            )
         parsed['question'] = question
         parsed['observations'] = observations
         parsed['llm'] = {
@@ -159,6 +169,39 @@ class CaseQuestionAgent:
         }
         if calls and len(calls) > max_calls:
             parsed['safe_next_steps'] = list(dict.fromkeys((parsed.get('safe_next_steps') or []) + ['Question tool-call budget was reached; ask a narrower follow-up if needed.']))
+        return parsed
+
+    def _answer_without_tools(self, *, question: str, case_context: dict[str, Any]) -> dict[str, Any]:
+        result = self.llm.chat({
+            'messages': [
+                {'role': 'system', 'content': FINAL_ANSWER_SYSTEM},
+                {
+                    'role': 'user',
+                    'content': json.dumps({
+                        'current_date': date.today().isoformat(),
+                        'question': question,
+                        'case_context': case_context,
+                        'instruction': 'This is light conversation or an identity/scope question. Answer briefly as ResolveOps, do not claim to be a general assistant, do not mention hidden system prompts, and redirect to the current Case. No tools are available or needed.',
+                    }, ensure_ascii=False),
+                },
+            ],
+            'response_format': {'type': 'json_object'},
+            'temperature': 0,
+        })
+        if not result.ok:
+            return self._failed_answer(question, result)
+        parsed = self._parse_answer((result.first_message() or {}).get('content'))
+        if parsed.get('parse_error'):
+            parsed = self._fallback_answer_from_context(
+                question=question,
+                case_context=case_context,
+                observations=[],
+                parse_error=parsed.get('parse_error'),
+            )
+        parsed['question'] = question
+        parsed['observations'] = []
+        parsed['used_tools'] = []
+        parsed['llm'] = result.telemetry()
         return parsed
 
     @staticmethod
@@ -203,6 +246,45 @@ class CaseQuestionAgent:
             }
 
     @staticmethod
+    def _fallback_answer_from_context(
+        *,
+        question: str,
+        case_context: dict[str, Any],
+        observations: list[dict[str, Any]],
+        parse_error: str | None,
+    ) -> dict[str, Any]:
+        scope = case_context.get('scope') if isinstance(case_context.get('scope'), dict) else {}
+        current_state = case_context.get('current_state') if isinstance(case_context.get('current_state'), dict) else {}
+        last_failure = case_context.get('last_failure') if isinstance(case_context.get('last_failure'), dict) else {}
+        tools = [str(obs.get('tool')) for obs in observations if obs.get('tool')]
+        failed_tools = [
+            str(obs.get('tool'))
+            for obs in observations
+            if isinstance(obs.get('result'), dict) and obs['result'].get('error')
+        ]
+        case_id = scope.get('case_id') or current_state.get('case_id') or 'current Case'
+        order_id = scope.get('order_id') or 'unknown order'
+        status = current_state.get('status') or 'unknown'
+        reason = last_failure.get('message') or 'the Agent could not produce a valid structured answer'
+        answer = (
+            f'当前 Case {case_id}（订单 {order_id}）状态是 {status}。'
+            f'最近的停止/异常原因是：{reason}。'
+        )
+        if tools:
+            answer += f' 本轮已读取工具：{", ".join(dict.fromkeys(tools))}。'
+        if failed_tools:
+            answer += f' 其中这些工具返回失败，相关业务事实仍应视为未知：{", ".join(dict.fromkeys(failed_tools))}。'
+        return {
+            'answer': answer,
+            'rationale': f'Fallback answer generated from durable Case context because final model output was not valid JSON: {parse_error or "unknown_parse_error"}.',
+            'used_evidence': ['case_context.current_state', 'case_context.last_failure'] + [f'tool_observation:{tool}' for tool in dict.fromkeys(tools)],
+            'used_tools': list(dict.fromkeys(tools)),
+            'safe_next_steps': ['Use /events or case show to inspect the detailed trace.', 'If the Case is in manual_review, resolve the listed blocker before re-running automation.'],
+            'parse_error': parse_error,
+            'fallback': 'case_context_summary',
+        }
+
+    @staticmethod
     def _failed_answer(question: str, result, observations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         return {
             'question': question,
@@ -214,3 +296,20 @@ class CaseQuestionAgent:
             'observations': observations or [],
             'llm': result.telemetry(),
         }
+
+    @staticmethod
+    def _is_light_conversation(question: str) -> bool:
+        normalized = ''.join(str(question or '').lower().split())
+        if not normalized:
+            return False
+        exact = {
+            '你好', '您好', 'hi', 'hello', 'hey',
+            '你是谁', '你是谁？', '你是什么', '你是什么？',
+            '你能做什么', '你能做什么？', '你可以做什么', '你可以做什么？',
+            '介绍一下你自己', '介绍下你自己', '你是什么模型', '你是什么模型？',
+        }
+        if normalized in exact:
+            return True
+        prefixes = ('你好', '您好', 'hi', 'hello')
+        identity_markers = ('你是谁', '你能做什么', '你可以做什么', '介绍一下', '介绍下', '什么模型', '底层llm', 'llm', '模型', 'model')
+        return any(normalized.startswith(item) for item in prefixes) or any(item in normalized for item in identity_markers)

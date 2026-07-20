@@ -285,23 +285,17 @@ def print_case_watch_header(case_id: str) -> None:
     print(paint('Press Ctrl+C to stop watching.', 'dim'))
 
 
-def print_case_answer(data: dict[str, Any]) -> None:
-    print('ResolveOps Case Answer')
-    print(f"case: {data.get('case_id')} type={data.get('event_type')} order={data.get('order_id')} status={data.get('status')}")
-    print(f"question: {data.get('question')}")
-    print('\n[Answer]')
-    print(data.get('answer') or '')
-    rationale = data.get('rationale')
-    if rationale:
-        print('\n[Rationale]')
-        print(rationale)
-    used_tools = data.get('used_tools') or []
-    if used_tools:
-        print('\n[Used Tools]')
-        print(', '.join(str(tool) for tool in used_tools))
+def print_case_answer(data: dict[str, Any], *, verbose: bool = False, show_case: bool = True, show_question: bool = True) -> None:
+    if show_case:
+        print(paint(
+            f"case: {data.get('case_id')} type={data.get('event_type')} order={data.get('order_id')} status={data.get('status')}",
+            'dim',
+        ))
+    if show_question:
+        print(f"\n{paint('[You]', 'yellow')} {data.get('question')}")
     observations = data.get('observations') or []
     if observations:
-        print('\n[Tool Observations]')
+        print()
         for obs in observations:
             tool = obs.get('tool')
             source = ((obs.get('scheduler') or {}).get('source')) or 'unknown'
@@ -310,17 +304,24 @@ def print_case_answer(data: dict[str, Any]) -> None:
                 summary = f"error={result.get('error')}"
             else:
                 summary = ', '.join(str(key) for key in list(result.keys())[:5]) if isinstance(result, dict) else type(result).__name__
-            print(f"- {tool} source={source} result={summary}")
-    evidence = data.get('used_evidence') or []
-    if evidence:
-        print('\n[Used Evidence]')
-        for item in evidence:
-            print(f"- {item}")
-    next_steps = data.get('safe_next_steps') or []
-    if next_steps:
-        print('\n[Safe Next Steps]')
-        for step in next_steps:
-            print(f"- {step}")
+            print(f"{paint('[Tool]', 'cyan')} {tool} source={source} result={summary}")
+    print(f"\n{paint('[Answer]', 'blue')}")
+    print(data.get('answer') or '')
+    if verbose:
+        rationale = data.get('rationale')
+        if rationale:
+            print(f"\n{paint('[Rationale]', 'dim')}")
+            print(rationale)
+        evidence = data.get('used_evidence') or []
+        if evidence:
+            print(f"\n{paint('[Used Evidence]', 'dim')}")
+            for item in evidence:
+                print(f"- {item}")
+        next_steps = data.get('safe_next_steps') or []
+        if next_steps:
+            print(f"\n{paint('[Safe Next Steps]', 'dim')}")
+            for step in next_steps:
+                print(f"- {step}")
 
 
 def print_case_chat_help() -> None:
@@ -514,7 +515,7 @@ def cmd_case_ask(args: argparse.Namespace, client: ApiClient) -> int:
     if args.json:
         print_json(data)
     else:
-        print_case_answer(data)
+        print_case_answer(data, verbose=args.verbose)
     return 0
 
 
@@ -553,7 +554,7 @@ def cmd_case_chat(args: argparse.Namespace, client: ApiClient) -> int:
     print(paint('ResolveOps Case Chat', 'green'))
     print(f"case: {case.get('id')} type={case.get('event_type')} order={case.get('order_id')} status={case.get('status')}")
     print_case_chat_help()
-    prompt = f"resolveops {str(args.case_id)[:8]}> "
+    prompt = f"{paint('[You]', 'yellow')} resolveops {str(args.case_id)[:8]}> "
     while True:
         try:
             question = input(prompt).strip()
@@ -582,7 +583,7 @@ def cmd_case_chat(args: argparse.Namespace, client: ApiClient) -> int:
         except CliError as exc:
             print(paint(f"error: {exc}", 'red'))
             continue
-        print_case_answer(data)
+        print_case_answer(data, verbose=args.verbose, show_case=False, show_question=False)
 
 
 def cmd_fi_list(args: argparse.Namespace, client: ApiClient) -> int:
@@ -682,6 +683,7 @@ def build_parser() -> argparse.ArgumentParser:
     case_ask = case_sub.add_parser('ask', help='Ask a read-only Agent question about one Case')
     case_ask.add_argument('case_id')
     case_ask.add_argument('question', nargs='+')
+    case_ask.add_argument('--verbose', action='store_true', help='Show rationale, used evidence and safe next steps')
     case_ask.set_defaults(handler=cmd_case_ask)
     case_watch = case_sub.add_parser('watch', help='Watch a live colorized Case event trace')
     case_watch.add_argument('case_id')
@@ -692,6 +694,7 @@ def build_parser() -> argparse.ArgumentParser:
     case_chat = case_sub.add_parser('chat', help='Open an interactive Case-scoped Agent chat')
     case_chat.add_argument('case_id')
     case_chat.add_argument('--events', type=int, default=12, help='Number of recent events shown by /events')
+    case_chat.add_argument('--verbose', action='store_true', help='Show rationale, used evidence and safe next steps for each answer')
     case_chat.set_defaults(handler=cmd_case_chat)
 
     fi = sub.add_parser('fi', help='Fault injection commands')

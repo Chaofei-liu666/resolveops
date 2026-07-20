@@ -1557,21 +1557,15 @@ def test_case_question_agent_allows_bounded_small_talk_without_tools():
 
         def chat(self, payload):
             self.calls.append(payload)
-            if len(self.calls) == 1:
-                system_prompt = payload['messages'][0]['content']
-                assert 'not a general-purpose assistant' in system_prompt
-                assert 'light conversational messages' in system_prompt
-                return LLMResult(status='success', response={'choices': [{'message': {
-                    'role': 'assistant',
-                    'content': 'I can answer briefly without tools.',
-                }}]})
+            assert 'tools' not in payload
             return LLMResult(status='success', response={'choices': [{'message': {
                 'role': 'assistant',
                 'content': '{"answer":"我是 ResolveOps，专注于订单履约和业务异常 Case 的调查、解释与安全推进。你可以问我当前 Case 为什么停住、用了哪些工具、下一步应该如何处理。","rationale":"This is an identity/scope question, so no business read tool was needed.","used_evidence":[],"used_tools":[],"safe_next_steps":["Ask about the current Case status, tool trace, approvals, or safe next steps."]}',
             }}]})
 
     observations = []
-    result = CaseQuestionAgent(FakeTools(), FakeLLM()).answer(
+    fake_llm = FakeLLM()
+    result = CaseQuestionAgent(FakeTools(), fake_llm).answer(
         order_id='SO-1',
         question='你好，你是谁？',
         case_context={'scope': {'case_id': 'case-1', 'event_type': 'inventory_shortage', 'order_id': 'SO-1'}},
@@ -1581,6 +1575,60 @@ def test_case_question_agent_allows_bounded_small_talk_without_tools():
     assert 'ResolveOps' in result['answer']
     assert result['used_tools'] == []
     assert observations == []
+    assert len(result['llm']) > 0
+    assert len(fake_llm.calls) == 1
+
+
+def test_case_question_agent_falls_back_to_case_context_when_final_json_is_invalid():
+    class FakeTools:
+        def definitions(self):
+            return [{
+                'type': 'function',
+                'function': {
+                    'name': 'get_order',
+                    'description': 'Read order facts.',
+                    'parameters': {'type': 'object', 'properties': {}},
+                },
+            }]
+
+        def execute_result(self, name, arguments, order_id):
+            return ToolResult.failure('tool_execution_failed', error_type='ConnectError', retryable=True)
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = 0
+
+        def chat(self, payload):
+            self.calls += 1
+            if self.calls == 1:
+                return LLMResult(status='success', response={'choices': [{'message': {
+                    'role': 'assistant',
+                    'tool_calls': [{
+                        'id': 'call-1',
+                        'type': 'function',
+                        'function': {'name': 'get_order', 'arguments': '{}'},
+                    }],
+                }}]})
+            return LLMResult(status='success', response={'choices': [{'message': {
+                'role': 'assistant',
+                'content': '',
+            }}]})
+
+    result = CaseQuestionAgent(FakeTools(), FakeLLM()).answer(
+        order_id='SO-1',
+        question='Why did this case stop?',
+        case_context={
+            'scope': {'case_id': 'case-1', 'event_type': 'inventory_shortage', 'order_id': 'SO-1'},
+            'current_state': {'status': 'manual_review'},
+            'last_failure': {'message': 'Agent ended investigation without a safe executable proposal.'},
+        },
+        on_observation=lambda _record: None,
+    )
+
+    assert 'case-1' in result['answer']
+    assert 'manual_review' in result['answer']
+    assert result['fallback'] == 'case_context_summary'
+    assert result['used_tools'] == ['get_order']
 
 
 def test_case_ask_endpoint_records_read_only_answer(monkeypatch):

@@ -147,9 +147,44 @@ def test_cli_case_ask_posts_question(monkeypatch, capsys):
         'timeout': 30,
     }]
     out = capsys.readouterr().out
-    assert 'ResolveOps Case Answer' in out
+    assert '[You] Why not purchase?' in out
+    assert '[Answer]' in out
     assert 'Transfer is faster' in out
+    assert '[Tool]' in out
     assert 'get_transfer_options' in out
+    assert '[Rationale]' not in out
+    assert '[Safe Next Steps]' not in out
+
+
+def test_cli_case_ask_verbose_prints_rationale_and_safe_steps(monkeypatch, capsys):
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        return FakeResponse(data={
+            'case_id': 'CASE-1',
+            'event_type': 'inventory_shortage',
+            'order_id': 'SO-1',
+            'status': 'waiting_approval',
+            'question': 'Why not purchase?',
+            'answer': 'Transfer is faster.',
+            'rationale': 'Transfer takes 1 day.',
+            'used_evidence': ['transfer transit_days=1'],
+            'safe_next_steps': ['Approve the bound action if appropriate.'],
+            'observations': [],
+        })
+
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
+    result = cli.main([
+        '--base-url', 'http://api.local',
+        '--operator-key', 'ops-key',
+        'case', 'ask', 'CASE-1', 'Why not purchase?',
+        '--verbose',
+    ])
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert '[Rationale]' in out
+    assert 'Transfer takes 1 day.' in out
+    assert '[Used Evidence]' in out
+    assert '[Safe Next Steps]' in out
 
 
 def test_cli_case_show_prints_agent_decision_trace(capsys):
@@ -267,8 +302,11 @@ def test_cli_case_chat_loops_over_case_scoped_questions(monkeypatch, capsys):
     assert calls[2]['method'] == 'GET'
     out = capsys.readouterr().out
     assert 'ResolveOps Case Chat' in out
+    assert '[You] resolveops CASE-1>' in out
+    assert '[Answer]' in out
     assert 'It stopped because' in out
     assert '[Tool]' in out
+    assert '[Rationale]' not in out
 
 
 def test_cli_eval_summary_calls_eval_endpoint(monkeypatch, capsys):

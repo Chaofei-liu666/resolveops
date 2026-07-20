@@ -169,6 +169,8 @@ python resolveops.py case chat <case-id>
 
 `case chat` starts an interactive Case-scoped read-only Agent session. Use `/show`, `/events`, `/help` and `/exit` inside the session. Light greetings and identity questions are allowed, but the Agent stays scoped to ResolveOps order/business exception handling.
 
+Default CLI answers hide rationale and safe next steps to keep the terminal readable. Add `--verbose` to `case ask` or `case chat` when debugging.
+
 Ask a Case-scoped read-only Agent question:
 
 ```bash
