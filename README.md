@@ -293,7 +293,10 @@ Create and inspect a Case:
 python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-00002 --reason "manual CLI test"
 python resolveops.py case list
 python resolveops.py case show <case-id>
+python resolveops.py case watch <case-id>
 ```
+
+`case watch` prints a live, colorized Case event trace. It shows read-tool calls, Agent decision summaries, approvals, executor activity, verification and safe handoff events without giving the CLI direct ERPNext access.
 
 Ask a Case-scoped read-only Agent question:
 

@@ -10,12 +10,25 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Any
 
 import httpx
 
 
 DEFAULT_BASE_URL = 'http://localhost:8090'
+TERMINAL_CASE_STATUSES = {'waiting_approval', 'manual_review', 'resolved'}
+ANSI = {
+    'dim': '\033[2m',
+    'reset': '\033[0m',
+    'red': '\033[31m',
+    'green': '\033[32m',
+    'yellow': '\033[33m',
+    'blue': '\033[34m',
+    'magenta': '\033[35m',
+    'cyan': '\033[36m',
+    'white': '\033[37m',
+}
 
 
 class CliError(RuntimeError):
@@ -51,6 +64,23 @@ class ApiClient:
 
 def print_json(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def supports_color() -> bool:
+    return not os.getenv('NO_COLOR') and sys.stdout.isatty()
+
+
+def paint(text: str, color: str) -> str:
+    if not supports_color():
+        return text
+    return f"{ANSI.get(color, '')}{text}{ANSI['reset']}"
+
+
+def compact_json(value: Any, max_len: int = 180) -> str:
+    if value is None:
+        return ''
+    text = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
+    return text if len(text) <= max_len else text[: max_len - 3] + '...'
 
 
 def fmt_percent(value: Any) -> str:
@@ -109,6 +139,27 @@ def print_case_summary(case: dict[str, Any]) -> None:
             print(f"{idx}. {action_type}")
             if rationale:
                 print(f"   reason: {rationale}")
+    agent_decision = case.get('agent_decision') or {}
+    decision_trace = agent_decision.get('decision_trace') or []
+    rejected_actions = agent_decision.get('rejected_actions') or []
+    missing_information = agent_decision.get('missing_information') or []
+    if decision_trace or rejected_actions or missing_information:
+        print('\n[Agent Decision Trace]')
+        for idx, item in enumerate(decision_trace, 1):
+            print(f"{idx}. {item}")
+        if rejected_actions:
+            print('rejected_actions:')
+            for item in rejected_actions:
+                if isinstance(item, dict):
+                    action_type = item.get('action_type') or 'unknown'
+                    reason = item.get('reason') or ''
+                    print(f"- {action_type}: {reason}")
+                else:
+                    print(f"- {item}")
+        if missing_information:
+            print('missing_information:')
+            for item in missing_information:
+                print(f"- {item}")
     approvals = case.get('approvals') or []
     if approvals:
         print('\n[Approvals]')
@@ -156,6 +207,82 @@ def print_case_summary(case: dict[str, Any]) -> None:
         print('\n[Recent Events]')
         for event in events[-8:]:
             print(f"- {event.get('kind')}: {event.get('message')}")
+
+
+def event_style(kind: str) -> tuple[str, str]:
+    if kind in {'case_created', 'context_built'}:
+        return '[Case]', 'white'
+    if kind in {'tool_scheduled', 'tool_observation', 'case_question_tool_observation'}:
+        return '[Tool]', 'cyan'
+    if kind in {'agent_decision_trace', 'agent_plan_created', 'evidence_grounding_passed'}:
+        return '[Agent]', 'magenta'
+    if kind in {'approval_requested', 'approval_partial', 'approval_granted'}:
+        return '[Approval]', 'yellow'
+    if kind in {'execution_started'}:
+        return '[Executor]', 'blue'
+    if kind in {'verification_passed', 'lessons_recorded'}:
+        return '[Verify]', 'green'
+    if kind in {'handoff', 'manual_review_required', 'worker_failure', 'policy_denied', 'evidence_grounding_failed', 'verification_failed', 'approval_expired', 'approval_revoked'}:
+        return '[Stop]', 'red'
+    if kind in {'replan_requested', 'task_requeued'}:
+        return '[Replan]', 'yellow'
+    if kind in {'case_question_asked', 'case_question_answered'}:
+        return '[Ask]', 'green'
+    return '[Event]', 'white'
+
+
+def format_event(event: dict[str, Any]) -> str:
+    kind = event.get('kind') or 'event'
+    label, color = event_style(kind)
+    data = event.get('data') or {}
+    message = event.get('message') or ''
+    created = event.get('created_at') or ''
+    head = f"{paint(label, color)} {paint(kind, 'dim')} {message}"
+
+    if kind in {'tool_scheduled', 'tool_observation', 'case_question_tool_observation'}:
+        tool = data.get('tool')
+        if not tool and 'Agent called read tool:' in message:
+            tool = message.split('Agent called read tool:', 1)[1].strip().rstrip('.')
+        if not tool and 'Case question called read tool:' in message:
+            tool = message.split('Case question called read tool:', 1)[1].strip().rstrip('.')
+        status = data.get('status') or ((data.get('tool_result') or {}).get('status') if isinstance(data.get('tool_result'), dict) else None)
+        scheduler = data.get('scheduler') or ((data.get('tool_result') or {}).get('scheduler') if isinstance(data.get('tool_result'), dict) else {})
+        result = data.get('result')
+        suffix = f" tool={tool}"
+        if status:
+            suffix += f" status={status}"
+        if scheduler:
+            suffix += f" scheduler={compact_json(scheduler, 80)}"
+        if result:
+            suffix += f" result={compact_json(result, 180)}"
+        return f"{head}{suffix}"
+
+    if kind == 'agent_decision_trace':
+        trace = data.get('decision_trace') or []
+        rejected = data.get('rejected_actions') or []
+        missing = data.get('missing_information') or []
+        details = []
+        if trace:
+            details.append(f"decisions={compact_json(trace, 220)}")
+        if rejected:
+            details.append(f"rejected={compact_json(rejected, 180)}")
+        if missing:
+            details.append(f"missing={compact_json(missing, 160)}")
+        return f"{head} {' '.join(details)}".rstrip()
+
+    if kind in {'agent_plan_created', 'approval_requested', 'approval_partial', 'approval_granted'}:
+        return f"{head} {compact_json(data, 240)}".rstrip()
+
+    if kind in {'replan_requested', 'handoff', 'manual_review_required', 'worker_failure', 'verification_failed'}:
+        return f"{head} {compact_json(data, 240)}".rstrip()
+
+    return f"{head} {paint(created, 'dim')}".rstrip()
+
+
+def print_case_watch_header(case_id: str) -> None:
+    print(paint('ResolveOps live Case trace', 'green'))
+    print(f"case: {case_id}")
+    print(paint('Press Ctrl+C to stop watching.', 'dim'))
 
 
 def print_case_answer(data: dict[str, Any]) -> None:
@@ -372,6 +499,36 @@ def cmd_case_ask(args: argparse.Namespace, client: ApiClient) -> int:
     return 0
 
 
+def cmd_case_watch(args: argparse.Namespace, client: ApiClient) -> int:
+    print_case_watch_header(args.case_id)
+    seen: set[str] = set()
+    start = time.monotonic()
+    last_status = None
+    try:
+        while True:
+            data = client.request('GET', f'/v1/cases/{args.case_id}')
+            status = data.get('status')
+            if status != last_status:
+                print(f"{paint('status', 'green')}: {status}")
+                last_status = status
+            for event in data.get('events') or []:
+                event_id = str(event.get('id') or f"{event.get('kind')}:{event.get('created_at')}")
+                if event_id in seen:
+                    continue
+                seen.add(event_id)
+                print(format_event(event))
+            if not args.follow and status in TERMINAL_CASE_STATUSES:
+                break
+            if args.timeout and time.monotonic() - start >= args.timeout:
+                print(paint('watch timeout reached', 'yellow'))
+                break
+            time.sleep(max(0.2, args.interval))
+    except KeyboardInterrupt:
+        print()
+        print(paint('watch stopped', 'yellow'))
+    return 0
+
+
 def cmd_fi_list(args: argparse.Namespace, client: ApiClient) -> int:
     data = client.request('GET', '/v1/fault-injections')
     if args.json:
@@ -470,6 +627,12 @@ def build_parser() -> argparse.ArgumentParser:
     case_ask.add_argument('case_id')
     case_ask.add_argument('question', nargs='+')
     case_ask.set_defaults(handler=cmd_case_ask)
+    case_watch = case_sub.add_parser('watch', help='Watch a live colorized Case event trace')
+    case_watch.add_argument('case_id')
+    case_watch.add_argument('--interval', type=float, default=1.0, help='Polling interval in seconds')
+    case_watch.add_argument('--timeout', type=float, default=60.0, help='Maximum watch time in seconds; 0 disables timeout')
+    case_watch.add_argument('--follow', action='store_true', help='Keep watching after waiting_approval/manual_review/resolved')
+    case_watch.set_defaults(handler=cmd_case_watch)
 
     fi = sub.add_parser('fi', help='Fault injection commands')
     fi_sub = fi.add_subparsers(dest='fi_command', required=True)

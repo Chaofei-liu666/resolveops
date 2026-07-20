@@ -158,6 +158,15 @@ def case_tool_trace(case: Case):
         return build_tool_trace(evidence.get('observations') or [],None,None)
     plan=case.plan if isinstance(case.plan,dict) else {}
     return build_tool_trace(evidence.get('observations') or [],plan,plan.get('evidence_grounding') if isinstance(plan,dict) else None)
+def case_agent_decision(case: Case):
+    evidence=case.evidence if isinstance(case.evidence,dict) else {}
+    conclusion=evidence.get('conclusion') if isinstance(evidence.get('conclusion'),dict) else {}
+    return {
+        'decision_trace': conclusion.get('decision_trace') or [],
+        'rejected_actions': conclusion.get('rejected_actions') or [],
+        'missing_information': conclusion.get('missing_information') or [],
+        'evidence_summary': conclusion.get('evidence_summary') or [],
+    }
 def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], invocations: list[Invocation], tasks: list[Task]):
     kinds=[event.kind for event in events]
     plan_actions=(case.plan or {}).get('actions',[]) if isinstance(case.plan,dict) else []
@@ -555,6 +564,7 @@ def case_detail(case_id:str, x_operator_key:str|None=Header(default=None), x_ope
             'id':case.id,'tenant_id':case.tenant_id,'source_event_id':case.source_event_id,'event_type':case.event_type,'order_id':case.order_id,
             'status':case.status,'plan_version':case.plan_version,'plan':case.plan,'evidence':case.evidence,
             'tool_trace':case_tool_trace(case),
+            'agent_decision':case_agent_decision(case),
             'created_at':case.created_at.isoformat() if case.created_at else None,'updated_at':case.updated_at.isoformat() if case.updated_at else None,
             'approvals':[approval_out(a) for a in approvals],
             'invocations':[invocation_out(i) for i in invocations],

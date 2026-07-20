@@ -161,7 +161,10 @@ Create a Case:
 python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-00002 --reason "sandbox run"
 python resolveops.py case list
 python resolveops.py case show <case-id>
+python resolveops.py case watch <case-id>
 ```
+
+`case watch` is the CLI trace view. It polls ResolveOps APIs and prints Case events such as read-tool calls, Agent decision summaries, approvals, execution, verification and handoff.
 
 Ask a Case-scoped read-only Agent question:
 

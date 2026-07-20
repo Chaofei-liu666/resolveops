@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import UTC, date, datetime, timedelta
 
@@ -368,6 +369,26 @@ def test_known_model_schema_variant_is_normalized_before_policy_checks():
 def test_known_model_tool_field_variant_is_normalized_before_policy_checks():
     result = InvestigationAgent._parse_conclusion('{"status":"ready","recommended_actions":[{"tool":"create_purchase_request","input":{}}],"alternatives":[],"rationale":"x","missing_information":[]}')
     assert result['recommended_actions'][0]['action_type'] == 'create_purchase_request'
+
+
+def test_planner_decision_trace_is_preserved_for_audit_display():
+    result = InvestigationAgent._parse_conclusion(json.dumps({
+        'status': 'ready',
+        'recommended_actions': [{'action_type': 'transfer_stock', 'input': {}}],
+        'alternatives': ['purchase request'],
+        'rationale': 'transfer can meet delivery date',
+        'missing_information': 'purchase unit cost unknown',
+        'evidence_summary': ['source warehouse has stock'],
+        'decision_trace': ['Compared transfer transit days with purchase lead time.'],
+        'rejected_actions': [{'action': 'create_purchase_request', 'rationale': 'lead time misses delivery date'}],
+    }))
+
+    assert result['decision_trace'] == ['Compared transfer transit days with purchase lead time.']
+    assert result['missing_information'] == ['purchase unit cost unknown']
+    assert result['rejected_actions'] == [{
+        'action_type': 'create_purchase_request',
+        'reason': 'lead time misses delivery date',
+    }]
 
 
 def test_tool_error_is_unknown_not_negative_fact():

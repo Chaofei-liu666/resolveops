@@ -106,10 +106,15 @@ def investigate_with_agent(db, c, task_context):
             'status':(tool_result or {}).get('status') if isinstance(tool_result,dict) else None,
             'error_code':(tool_result or {}).get('error_code') if isinstance(tool_result,dict) else None,
         })
-        emit(db,c.id,'tool_observation',f'Agent called read tool: {name}.',{'arguments':args,'result':result,'tool_result':tool_result,'metadata':metadata})
+        emit(db,c.id,'tool_observation',f'Agent called read tool: {name}.',{'tool':name,'arguments':args,'result':result,'tool_result':tool_result,'metadata':metadata})
     conclusion=InvestigationAgent(tool_surface).run(c.order_id, observe, case_context)
     previous_evidence=c.evidence
     c.evidence={'case_context':case_context,'observations':observations,'conclusion':conclusion,'replanning_context':task_context or None,'previous_evidence':previous_evidence if task_context else None}; proposals=conclusion.get('recommended_actions',[])
+    emit(db,c.id,'agent_decision_trace','Agent produced an auditable decision summary from tool evidence.',{
+        'decision_trace': conclusion.get('decision_trace') or [],
+        'rejected_actions': conclusion.get('rejected_actions') or [],
+        'missing_information': conclusion.get('missing_information') or [],
+    })
     if conclusion.get('status')!='ready' or not proposals:
         c.status='manual_review'; emit(db,c.id,'handoff','Agent ended investigation without a safe executable proposal.',{'conclusion':conclusion}); return
     try: plan=normalize_plan(proposals,conclusion.get('rationale',''),[f'E-{index+1:03d}' for index in range(len(observations))],action_types_for_case(c.event_type))
@@ -128,7 +133,12 @@ def investigate_with_agent(db, c, task_context):
     c.plan_version+=1; c.plan=plan; c.status='waiting_approval'; approvals=[]
     for action in plan['actions']:
         a=Approval(case_id=c.id,plan_version=c.plan_version,action=action,action_hash=digest(action,c.plan_version),required_roles=action['policy']['required_roles'],expires_at=approval_expiry(settings.approval_ttl_seconds)); db.add(a); db.flush(); approvals.append({'approval_id':a.id,'action_id':action['action_id'],'action_type':action['action_type'],'expires_at':a.expires_at.isoformat() if a.expires_at else None})
-    emit(db,c.id,'agent_plan_created','Agent produced a multi-action plan from observed tool evidence; policy created bound approvals.',{'approvals':approvals,'alternatives':conclusion.get('alternatives',[])})
+    emit(db,c.id,'agent_plan_created','Agent produced a multi-action plan from observed tool evidence; policy created bound approvals.',{
+        'approvals':approvals,
+        'alternatives':conclusion.get('alternatives',[]),
+        'decision_trace':conclusion.get('decision_trace') or [],
+        'rejected_actions':conclusion.get('rejected_actions') or [],
+    })
 def execute(db,c,approval_id):
     a=db.get(Approval,approval_id)
     plan=c.plan or {}

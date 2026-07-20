@@ -152,6 +152,70 @@ def test_cli_case_ask_posts_question(monkeypatch, capsys):
     assert 'get_transfer_options' in out
 
 
+def test_cli_case_show_prints_agent_decision_trace(capsys):
+    cli.print_case_summary({
+        'id': 'CASE-1',
+        'event_type': 'inventory_shortage',
+        'order_id': 'SO-1',
+        'status': 'waiting_approval',
+        'plan_version': 1,
+        'plan': {'actions': [{'action_type': 'transfer_stock', 'rationale': 'fastest supported action'}]},
+        'agent_decision': {
+            'decision_trace': ['Observed shortage, then compared transfer and purchase evidence.'],
+            'rejected_actions': [{'action_type': 'create_purchase_request', 'reason': 'lead time misses delivery date'}],
+            'missing_information': ['supplier unit cost remains unknown'],
+        },
+        'approvals': [],
+        'tool_trace': {},
+        'events': [],
+    })
+
+    out = capsys.readouterr().out
+    assert '[Agent Decision Trace]' in out
+    assert 'Observed shortage' in out
+    assert 'create_purchase_request: lead time misses delivery date' in out
+    assert 'supplier unit cost remains unknown' in out
+
+
+def test_cli_case_watch_prints_live_tool_and_agent_events(monkeypatch, capsys):
+    calls = []
+
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json, 'timeout': timeout})
+        return FakeResponse(data={
+            'id': 'CASE-1',
+            'status': 'waiting_approval',
+            'events': [
+                {'id': '1', 'kind': 'case_created', 'message': 'Operator-created Case received.', 'data': {}, 'created_at': '2026-07-20T00:00:00'},
+                {'id': '2', 'kind': 'tool_observation', 'message': 'Agent called read tool: get_inventory.', 'data': {'tool': 'get_inventory', 'result': {'available_qty': 40}}, 'created_at': '2026-07-20T00:00:01'},
+                {'id': '3', 'kind': 'agent_decision_trace', 'message': 'Agent produced an auditable decision summary from tool evidence.', 'data': {'decision_trace': ['Compared transfer and purchase.']}, 'created_at': '2026-07-20T00:00:02'},
+            ],
+        })
+
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
+    result = cli.main([
+        '--base-url', 'http://api.local',
+        '--operator-key', 'ops-key',
+        'case', 'watch', 'CASE-1',
+        '--timeout', '1',
+    ])
+
+    assert result == 0
+    assert calls == [{
+        'method': 'GET',
+        'url': 'http://api.local/v1/cases/CASE-1',
+        'headers': {'X-Operator-Key': 'ops-key'},
+        'json': None,
+        'timeout': 30,
+    }]
+    out = capsys.readouterr().out
+    assert 'ResolveOps live Case trace' in out
+    assert '[Tool]' in out
+    assert 'get_inventory' in out
+    assert '[Agent]' in out
+    assert 'Compared transfer and purchase' in out
+
+
 def test_cli_eval_summary_calls_eval_endpoint(monkeypatch, capsys):
     calls = []
 
