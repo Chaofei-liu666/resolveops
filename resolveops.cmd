@@ -19,11 +19,10 @@ echo.
 python resolveops.py status
 echo.
 
-echo Common commands:
-echo   python resolveops.py case list
-echo   python resolveops.py case show ^<case-id^>
-echo   python resolveops.py case chat ^<case-id^>
+echo Opening ResolveOps chat...
 echo.
+python resolveops.py chat
+
 echo If authentication failed, edit:
 echo   %USERPROFILE%\.resolveops\config.json
 echo.

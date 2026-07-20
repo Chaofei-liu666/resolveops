@@ -389,6 +389,100 @@ def test_cli_case_chat_loops_over_case_scoped_questions(monkeypatch, capsys):
     assert '[Rationale]' not in out
 
 
+def test_cli_top_level_chat_answers_without_case(monkeypatch, capsys):
+    inputs = iter(['你好', '我要创建一个库存不足case', '/exit'])
+
+    def fake_input(prompt):
+        print(prompt, end='')
+        return next(inputs)
+
+    monkeypatch.setattr('builtins.input', fake_input)
+    result = cli.main([
+        '--base-url', 'http://api.local',
+        '--operator-key', 'ops-key',
+        'chat',
+    ])
+
+    assert result == 0
+    out = capsys.readouterr().out
+    assert 'ResolveOps Chat' in out
+    assert '[You] resolveops>' in out
+    assert '我是 ResolveOps' in out
+    assert '/new 创建一个新的订单异常 Case' in out
+
+
+def test_cli_top_level_chat_lists_cases(monkeypatch, capsys):
+    calls = []
+    inputs = iter(['/cases', '/exit'])
+
+    def fake_input(prompt):
+        print(prompt, end='')
+        return next(inputs)
+
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json})
+        return FakeResponse(data=[
+            {'id': 'CASE-1', 'event_type': 'inventory_shortage', 'order_id': 'SO-1', 'status': 'waiting_approval'},
+        ])
+
+    monkeypatch.setattr('builtins.input', fake_input)
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
+
+    result = cli.main([
+        '--base-url', 'http://api.local',
+        '--operator-key', 'ops-key',
+        'chat',
+        '--limit', '5',
+    ])
+
+    assert result == 0
+    assert calls == [{
+        'method': 'GET',
+        'url': 'http://api.local/v1/cases?limit=5',
+        'headers': {'X-Operator-Key': 'ops-key'},
+        'json': None,
+    }]
+    assert 'CASE-1' in capsys.readouterr().out
+
+
+def test_cli_top_level_chat_creates_case_interactively(monkeypatch, capsys):
+    calls = []
+    inputs = iter(['/new', '1', 'SO-1', 'CLI created shortage', '/exit'])
+
+    def fake_input(prompt):
+        print(prompt, end='')
+        return next(inputs)
+
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json})
+        return FakeResponse(data={'case_id': 'CASE-NEW', 'status': 'queued', 'duplicate': False})
+
+    monkeypatch.setattr('builtins.input', fake_input)
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
+
+    result = cli.main([
+        '--base-url', 'http://api.local',
+        '--operator-key', 'ops-key',
+        'chat',
+    ])
+
+    assert result == 0
+    assert calls == [{
+        'method': 'POST',
+        'url': 'http://api.local/v1/cases',
+        'headers': {'X-Operator-Key': 'ops-key'},
+        'json': {
+            'tenant_id': 'demo',
+            'event_type': 'inventory_shortage',
+            'order_id': 'SO-1',
+            'reason': 'CLI created shortage',
+        },
+    }]
+    out = capsys.readouterr().out
+    assert '[New Case]' in out
+    assert 'CASE-NEW' in out
+
+
 def test_cli_eval_summary_calls_eval_endpoint(monkeypatch, capsys):
     calls = []
 

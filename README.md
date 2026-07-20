@@ -285,7 +285,7 @@ python resolveops.py config show
 
 `config show` masks the operator key. Case commands still require an explicit `<case-id>` so different business Cases do not accidentally share context.
 
-On Windows, you can also double-click `resolveops.cmd` in the project directory. It opens a terminal, initializes the local CLI config if needed, checks runtime status, and leaves the terminal open for the next command. If authentication fails, edit:
+On Windows, you can also double-click `resolveops.cmd` in the project directory. It opens a terminal, initializes the local CLI config if needed, checks runtime status, and then opens ResolveOps chat. If authentication fails, edit:
 
 ```text
 C:\Users\<you>\.resolveops\config.json
@@ -297,7 +297,25 @@ Check runtime:
 python resolveops.py status
 ```
 
-Create and inspect a Case:
+Open the operator-level chat:
+
+```powershell
+python resolveops.py chat
+```
+
+Inside `chat`, use:
+
+```text
+/new             create a new Case interactively
+/cases           list recent Cases
+/case <case-id>  enter one Case-scoped Agent chat
+/status          show runtime status
+/exit            leave chat
+```
+
+Top-level `chat` is intentionally no-tool by default. It can explain ResolveOps, guide usage, and create or select Cases through explicit commands. Case-specific business questions should enter `/case <case-id>` so Case context stays isolated.
+
+You can also call Case commands directly:
 
 ```powershell
 python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-00002 --reason "manual CLI test"

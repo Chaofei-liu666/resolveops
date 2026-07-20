@@ -103,7 +103,7 @@ python resolveops.py config show
 
 `config show` masks the operator key. You can still override values per command with `--base-url` and `--operator-key`, or with `RESOLVEOPS_API_URL` / `RESOLVEOPS_OPERATOR_KEY`.
 
-On Windows, you can also double-click `resolveops.cmd` in the project directory. It opens a terminal, initializes the local CLI config if needed, checks runtime status, and leaves the terminal open. If authentication fails, edit:
+On Windows, you can also double-click `resolveops.cmd` in the project directory. It opens a terminal, initializes the local CLI config if needed, checks runtime status, and then opens ResolveOps chat. If authentication fails, edit:
 
 ```text
 C:\Users\<you>\.resolveops\config.json
@@ -113,9 +113,11 @@ Use the CLI:
 
 ```bash
 python resolveops.py status
-python resolveops.py case list
+python resolveops.py chat
 python resolveops.py eval summary --limit 20
 ```
+
+Inside `chat`, use `/new` to create a Case, `/cases` to list recent Cases, and `/case <case-id>` to enter a Case-scoped Agent chat. Top-level chat does not call ERP tools; Case-specific business questions should enter one Case first.
 
 Run tests:
 
@@ -167,7 +169,21 @@ Check readiness:
 curl http://localhost:8090/readyz
 ```
 
-Create a Case:
+Open ResolveOps chat:
+
+```bash
+python resolveops.py chat
+```
+
+Inside chat:
+
+```text
+/new             create a new Case interactively
+/cases           list recent Cases
+/case <case-id>  enter one Case-scoped Agent chat
+```
+
+You can also create a Case directly:
 
 ```bash
 python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-00002 --reason "sandbox run"

@@ -399,6 +399,77 @@ def print_case_chat_help() -> None:
     print('General no-tool chat is allowed; business tools stay scoped to Case questions.')
 
 
+def print_operator_chat_help() -> None:
+    print('Commands:')
+    print('  /status          show ResolveOps runtime status')
+    print('  /cases           list recent Cases')
+    print('  /new             create a new Case interactively')
+    print('  /case <case-id>  enter one Case-scoped Agent chat')
+    print('  /help            show this help')
+    print('  /exit            leave ResolveOps chat')
+    print('Free text is handled as an operator-level request. Case-specific questions require /case <case-id>.')
+
+
+def looks_like_case_creation(text: str) -> bool:
+    normalized = text.lower()
+    markers = (
+        'create case', 'new case', 'open case',
+        '创建case', '创建 case', '新建case', '新建 case',
+        '库存不足', '价格异常', '价格不一致', '延期', '供应商延期',
+    )
+    return any(marker in normalized for marker in markers)
+
+
+def prompt_required(label: str, *, default: str | None = None) -> str:
+    suffix = f' [{default}]' if default else ''
+    while True:
+        value = input(f'{label}{suffix}: ').strip()
+        if value:
+            return value
+        if default is not None:
+            return default
+        print(paint('This field is required.', 'red'))
+
+
+def choose_event_type() -> str:
+    options = {
+        '1': 'inventory_shortage',
+        '2': 'price_mismatch',
+        '3': 'delivery_delay',
+        '4': 'supplier_delay',
+    }
+    print('Case type:')
+    print('  1. inventory_shortage  库存不足')
+    print('  2. price_mismatch      价格不一致')
+    print('  3. delivery_delay      交付延期')
+    print('  4. supplier_delay      供应商延期')
+    while True:
+        value = input('Choose type [1]: ').strip() or '1'
+        if value in options:
+            return options[value]
+        if value in options.values():
+            return value
+        print(paint('Invalid Case type. Use 1-4 or the event_type name.', 'red'))
+
+
+def create_case_interactively(client: ApiClient) -> dict[str, Any]:
+    print(paint('[New Case]', 'green'))
+    event_type = choose_event_type()
+    order_id = prompt_required('Order ID')
+    reason = prompt_required('Reason', default='created from ResolveOps chat')
+    payload = {
+        'tenant_id': 'demo',
+        'event_type': event_type,
+        'order_id': order_id,
+        'reason': reason,
+    }
+    data = client.request('POST', '/v1/cases', payload)
+    duplicate = ' duplicate=true' if data.get('duplicate') else ''
+    print(f"case created: {data.get('case_id')} status={data.get('status')}{duplicate}")
+    print(f"next: /case {data.get('case_id')}")
+    return data
+
+
 def print_recent_case_events(case: dict[str, Any], limit: int = 12) -> None:
     events = case.get('events') or []
     if not events:
@@ -710,6 +781,87 @@ def cmd_case_chat(args: argparse.Namespace, client: ApiClient) -> int:
         print_case_answer(data, verbose=args.verbose, show_case=False, show_question=False)
 
 
+def answer_operator_question(question: str) -> str:
+    normalized = question.lower().strip()
+    if any(token in normalized for token in {'你好', 'hello', 'hi', '你是谁'}):
+        return (
+            '我是 ResolveOps，一个面向订单履约异常处理的企业级 Agent。'
+            '你可以让我解释项目、查看 Case、创建新 Case，或进入某个 Case 后分析异常。'
+        )
+    if '能做什么' in normalized or 'what can you do' in normalized:
+        return (
+            '我可以处理三类入口任务：1）解释 ResolveOps 的设计和能力；'
+            '2）通过 /new 创建订单异常 Case；3）通过 /case <case-id> 进入具体 Case，'
+            '查看工具调用、证据、审批、执行和验证过程。'
+        )
+    if '项目' in normalized or '干什么' in normalized or 'resolveops' in normalized:
+        return (
+            'ResolveOps 不是普通客服机器人，而是订单履约异常处置 Agent。'
+            '它围绕业务 Case 收集证据、规划方案、经过权限和审批控制后执行动作，并做结果验证。'
+        )
+    if '客服' in normalized or '区别' in normalized:
+        return (
+            '普通客服机器人主要回答问题；ResolveOps 的核心是处理业务异常 Case。'
+            '它会调用企业系统只读工具收集证据，并在受控审批后执行写操作，最后验证真实业务状态。'
+        )
+    if looks_like_case_creation(question):
+        return '你可以输入 /new 创建一个新的订单异常 Case。我会依次询问异常类型、订单号和原因。'
+    return (
+        '这是 ResolveOps 顶层对话窗口。当前不绑定具体 Case，也不会调用业务工具。'
+        '如果要创建异常，请输入 /new；如果要分析某个 Case，请输入 /case <case-id>；'
+        '如果要查看已有 Case，请输入 /cases。'
+    )
+
+
+def cmd_chat(args: argparse.Namespace, client: ApiClient) -> int:
+    print(paint('ResolveOps Chat', 'green'))
+    print('Operator-level chat. No ERP tools are called here.')
+    print_operator_chat_help()
+    prompt = f"{paint('[You]', 'yellow')} resolveops> "
+    while True:
+        try:
+            text = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            print(paint('chat stopped', 'yellow'))
+            return 0
+        if not text:
+            continue
+        lowered = text.lower()
+        if lowered in {'/exit', '/quit', 'exit', 'quit'}:
+            return 0
+        if lowered in {'/help', 'help', '?'}:
+            print_operator_chat_help()
+            continue
+        if lowered == '/status':
+            try:
+                print_status(client.request('GET', '/v1/runtime/status'))
+            except CliError as exc:
+                print(paint(f"error: {exc}", 'red'))
+            continue
+        if lowered == '/cases':
+            try:
+                data = client.request('GET', f'/v1/cases?limit={args.limit}')
+                print('Cases')
+                for case in data:
+                    print(f"- {case.get('id')}  {case.get('event_type')}  {case.get('order_id')}  {case.get('status')}")
+            except CliError as exc:
+                print(paint(f"error: {exc}", 'red'))
+            continue
+        if lowered == '/new':
+            try:
+                create_case_interactively(client)
+            except CliError as exc:
+                print(paint(f"error: {exc}", 'red'))
+            continue
+        if lowered.startswith('/case '):
+            case_id = text.split(maxsplit=1)[1].strip()
+            nested_args = argparse.Namespace(case_id=case_id, events=args.events, verbose=args.verbose)
+            return cmd_case_chat(nested_args, client)
+        print(f"\n{paint('[Answer]', 'blue')}")
+        print(answer_operator_question(text))
+
+
 def cmd_fi_list(args: argparse.Namespace, client: ApiClient) -> int:
     data = client.request('GET', '/v1/fault-injections')
     if args.json:
@@ -800,6 +952,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = sub.add_parser('status', help='Show runtime status')
     status.set_defaults(handler=cmd_status)
+
+    chat = sub.add_parser('chat', help='Open the ResolveOps operator chat')
+    chat.add_argument('--limit', type=int, default=10, help='Number of cases shown by /cases')
+    chat.add_argument('--events', type=int, default=12, help='Number of recent events shown after entering /case')
+    chat.add_argument('--verbose', action='store_true', help='Show rationale, used evidence and safe next steps in Case chat')
+    chat.set_defaults(handler=cmd_chat)
 
     case = sub.add_parser('case', help='Case commands')
     case_sub = case.add_subparsers(dest='case_command', required=True)
