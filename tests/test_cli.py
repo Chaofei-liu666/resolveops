@@ -101,6 +101,24 @@ def test_cli_status_reads_local_config_when_flags_are_omitted(monkeypatch, tmp_p
     }]
 
 
+def test_cli_api_command_auto_creates_config_template_when_missing_key(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv('RESOLVEOPS_CONFIG_HOME', str(tmp_path))
+    monkeypatch.delenv('RESOLVEOPS_API_URL', raising=False)
+    monkeypatch.delenv('RESOLVEOPS_OPERATOR_KEY', raising=False)
+    monkeypatch.delenv('OPERATOR_API_KEY', raising=False)
+
+    result = cli.main(['status'])
+
+    assert result == 1
+    config_file = tmp_path / 'config.json'
+    assert config_file.exists()
+    data = json.loads(config_file.read_text(encoding='utf-8'))
+    assert data == {'api_url': 'http://localhost:8090', 'operator_key': ''}
+    err = capsys.readouterr().err
+    assert 'missing operator_key' in err
+    assert str(config_file) in err
+
+
 def test_cli_fault_injection_posts_resolveops_payload(monkeypatch, capsys):
     calls = []
 
@@ -495,7 +513,9 @@ def test_cli_eval_case_calls_case_eval_endpoint(monkeypatch, capsys):
 def test_cli_returns_error_for_failed_api(monkeypatch, capsys):
     monkeypatch.setattr(cli.httpx, 'request', lambda *args, **kwargs: FakeResponse(status_code=403, data={'detail': 'disabled'}))
 
-    result = cli.main(['--base-url', 'http://api.local', 'fi', 'list'])
+    result = cli.main(['--base-url', 'http://api.local', '--operator-key', 'ops-key', 'fi', 'list'])
 
     assert result == 1
-    assert 'HTTP 403' in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert 'HTTP 403' in err
+    assert 'Edit CLI config' in err

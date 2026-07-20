@@ -285,6 +285,12 @@ python resolveops.py config show
 
 `config show` masks the operator key. Case commands still require an explicit `<case-id>` so different business Cases do not accidentally share context.
 
+On Windows, you can also double-click `resolveops.cmd` in the project directory. It opens a terminal, initializes the local CLI config if needed, checks runtime status, and leaves the terminal open for the next command. If authentication fails, edit:
+
+```text
+C:\Users\<you>\.resolveops\config.json
+```
+
 Check runtime:
 
 ```powershell

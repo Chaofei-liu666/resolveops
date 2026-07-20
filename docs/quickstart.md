@@ -103,6 +103,12 @@ python resolveops.py config show
 
 `config show` masks the operator key. You can still override values per command with `--base-url` and `--operator-key`, or with `RESOLVEOPS_API_URL` / `RESOLVEOPS_OPERATOR_KEY`.
 
+On Windows, you can also double-click `resolveops.cmd` in the project directory. It opens a terminal, initializes the local CLI config if needed, checks runtime status, and leaves the terminal open. If authentication fails, edit:
+
+```text
+C:\Users\<you>\.resolveops\config.json
+```
+
 Use the CLI:
 
 ```bash

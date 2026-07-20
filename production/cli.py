@@ -60,6 +60,18 @@ def load_cli_config() -> dict[str, Any]:
     return data
 
 
+def load_or_create_cli_config() -> tuple[dict[str, Any], bool]:
+    path = config_path()
+    if path.exists():
+        return load_cli_config(), False
+    data = {
+        'api_url': DEFAULT_BASE_URL,
+        'operator_key': '',
+    }
+    save_cli_config(data)
+    return data, True
+
+
 def save_cli_config(data: dict[str, Any]) -> Path:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,6 +85,16 @@ def masked(value: str | None) -> str:
     if len(value) <= 8:
         return '*' * len(value)
     return value[:4] + '*' * (len(value) - 8) + value[-4:]
+
+
+def config_edit_hint(created: bool = False) -> str:
+    prefix = f'Created config template: {config_path()}\n' if created else ''
+    return (
+        f'{prefix}'
+        f'Edit CLI config: {config_path()}\n'
+        'Required fields: api_url, operator_key\n'
+        'Or run: python resolveops.py config set operator_key <your-operator-key>'
+    )
 
 
 class ApiClient:
@@ -96,7 +118,10 @@ class ApiClient:
                 detail = response.json()
             except Exception:
                 detail = response.text
-            raise CliError(f'{method} {path} failed: HTTP {response.status_code} {detail}')
+            hint = ''
+            if response.status_code in {401, 403}:
+                hint = '\n' + config_edit_hint()
+            raise CliError(f'{method} {path} failed: HTTP {response.status_code} {detail}{hint}')
         if not response.content:
             return None
         return response.json()
@@ -851,7 +876,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        config = {} if args.command in {'init', 'config'} else load_cli_config()
+        config_created = False
+        if args.command in {'init', 'config'}:
+            config = {}
+        else:
+            config, config_created = load_or_create_cli_config()
         base_url = (
             args.base_url
             or os.getenv('RESOLVEOPS_API_URL')
@@ -864,6 +893,8 @@ def main(argv: list[str] | None = None) -> int:
             or os.getenv('OPERATOR_API_KEY')
             or config.get('operator_key')
         )
+        if args.command not in {'init', 'config'} and not operator_key:
+            raise CliError('missing operator_key.\n' + config_edit_hint(created=config_created))
         client = ApiClient(base_url, operator_key)
         return args.handler(args, client)
     except CliError as exc:
