@@ -53,6 +53,7 @@ class CaseAskIn(BaseModel):
 
 class OperatorChatIn(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
+    history: list[dict[str, str]] = Field(default_factory=list)
 
 class FaultInjectionRunIn(BaseModel):
     fault_type: Literal['inventory_changed_before_execution']
@@ -424,9 +425,10 @@ def ask_case(case_id:str, payload: CaseAskIn, x_operator_key:str|None=Header(def
 def operator_chat(payload: OperatorChatIn, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
     with Session(engine) as db:
         identity=operator_identity_from_db(db,x_operator_key)
-        answer=OperatorChatAgent().answer(payload.question)
+        answer=OperatorChatAgent().answer(payload.question, history=payload.history)
         audit(db,identity,'operator_chat_answered','operator_chat',identity.subject,{
             'question':payload.question,
+            'history_items':len(payload.history or []),
             'source':answer.get('source'),
             'tools_used':answer.get('tools_used') or [],
             'llm':answer.get('llm') or {},

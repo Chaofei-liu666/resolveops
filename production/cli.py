@@ -407,7 +407,8 @@ def print_operator_chat_help() -> None:
     print('  /case <case-id>  enter one Case-scoped Agent chat')
     print('  /help            show this help')
     print('  /exit            leave ResolveOps chat')
-    print('Free text is handled as an operator-level request. Case-specific questions require /case <case-id>.')
+    print('Free text is handled as a no-tool operator-level chat with short-term context.')
+    print('Case-specific questions require /case <case-id> so business context stays isolated.')
 
 
 def looks_like_case_creation(text: str) -> bool:
@@ -630,12 +631,28 @@ def cmd_init(args: argparse.Namespace, client: ApiClient | None = None) -> int:
     print(f"{paint('[OK]', 'green')} Config directory {dir_status}: {path.parent}")
     print(f"{paint('[OK]', 'green')} Config file {file_status}: {path}")
     print()
-    print(paint('[Config]', 'yellow') + ' Set your ResolveOps API endpoint and operator key:')
-    print(f"python resolveops.py config set api_url {DEFAULT_BASE_URL}")
-    print('python resolveops.py config set operator_key <your-operator-key>')
-    print()
-    print(paint('[Next]', 'cyan') + ' Check the runtime:')
-    print('python resolveops.py status')
+    if created_file:
+        print(paint('[Config]', 'yellow') + ' Set your ResolveOps API endpoint and operator key:')
+        print(f"python resolveops.py config set api_url {DEFAULT_BASE_URL}")
+        print('python resolveops.py config set operator_key <your-operator-key>')
+        print()
+    else:
+        try:
+            current = load_cli_config()
+            api_url = current.get('api_url') or DEFAULT_BASE_URL
+            key_state = 'set' if current.get('operator_key') else 'missing'
+            key_color = 'green' if key_state == 'set' else 'yellow'
+            print(paint('[Config]', 'green') + f' Loaded api_url={api_url} operator_key={paint(key_state, key_color)}')
+            if key_state == 'missing':
+                print('Set it once with:')
+                print('python resolveops.py config set operator_key <your-operator-key>')
+                print()
+        except CliError as exc:
+            print(paint('[Config]', 'red') + f' Invalid config: {exc}')
+            print(f'Edit: {path}')
+            print()
+    print(paint('[Next]', 'cyan') + ' Start chat:')
+    print('python resolveops.py chat')
     print()
     print(paint('[Note]', 'dim') + ' Case commands still require an explicit <case-id> to preserve Case context isolation.')
     return 0
@@ -786,6 +803,8 @@ def cmd_chat(args: argparse.Namespace, client: ApiClient) -> int:
     print('Operator-level LLM chat. No ERP tools are called here.')
     print_operator_chat_help()
     prompt = f"{paint('[You]', 'yellow')} resolveops> "
+    history: list[dict[str, str]] = []
+    max_history_items = 12
     while True:
         try:
             text = input(prompt).strip()
@@ -827,14 +846,18 @@ def cmd_chat(args: argparse.Namespace, client: ApiClient) -> int:
             nested_args = argparse.Namespace(case_id=case_id, events=args.events, verbose=args.verbose)
             return cmd_case_chat(nested_args, client)
         try:
-            data = client.request('POST', '/v1/chat', {'question': text})
+            data = client.request('POST', '/v1/chat', {'question': text, 'history': history[-max_history_items:]})
         except CliError as exc:
             print(paint(f"error: {exc}", 'red'))
             continue
         source = data.get('source')
         suffix = f" {paint(f'({source})', 'dim')}" if source else ''
+        answer_text = data.get('answer') or ''
         print(f"\n{paint('[Answer]', 'blue')}{suffix}")
-        print(data.get('answer') or '')
+        print(answer_text)
+        history.append({'role': 'user', 'content': text})
+        history.append({'role': 'assistant', 'content': answer_text})
+        history = history[-max_history_items:]
 
 
 def cmd_fi_list(args: argparse.Namespace, client: ApiClient) -> int:

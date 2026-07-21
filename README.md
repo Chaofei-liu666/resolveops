@@ -285,10 +285,16 @@ python resolveops.py config show
 
 `config show` masks the operator key. Case commands still require an explicit `<case-id>` so different business Cases do not accidentally share context.
 
-On Windows, you can also double-click `resolveops.cmd` in the project directory. It opens a terminal, initializes the local CLI config if needed, checks runtime status, and then opens ResolveOps chat. If authentication fails, edit:
+On Windows, you can also double-click `resolveops.cmd` in the project directory. It opens a terminal, initializes the local CLI config if needed, starts Docker services with `docker compose up -d`, waits for the API, and then opens ResolveOps chat. If authentication fails, edit:
 
 ```text
 C:\Users\<you>\.resolveops\config.json
+```
+
+The launcher does not rebuild images every time. After changing backend code, run:
+
+```powershell
+docker compose up -d --build api worker
 ```
 
 Check runtime:
@@ -313,7 +319,7 @@ Inside `chat`, use:
 /exit            leave chat
 ```
 
-Top-level `chat` is an operator-level LLM conversation without ERP tools. It can explain ResolveOps, guide usage, and create or select Cases through explicit slash commands. Case-specific business questions should enter `/case <case-id>` so Case context stays isolated. If the LLM provider is unavailable, ResolveOps returns a bounded fallback answer instead of calling tools or guessing business facts.
+Top-level `chat` is an operator-level LLM conversation without ERP tools. It can answer general no-tool questions, explain ResolveOps, guide usage, and create or select Cases through explicit slash commands. Case-specific business questions should enter `/case <case-id>` so Case context stays isolated. If you ask which underlying model is configured, ResolveOps answers from server config (`LLM_MODEL` / `LLM_BASE_URL`) without exposing `LLM_API_KEY`. If the LLM provider is unavailable, ResolveOps returns a bounded fallback answer instead of calling tools or guessing business facts.
 
 You can also call Case commands directly:
 

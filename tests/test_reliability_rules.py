@@ -1701,7 +1701,7 @@ def test_operator_chat_endpoint_uses_llm_agent_and_audits(monkeypatch):
     monkeypatch.setattr(main_module, 'engine', engine)
 
     class FakeOperatorChatAgent:
-        def answer(self, question):
+        def answer(self, question, history=None):
             return {
                 'question': question,
                 'answer': 'LLM-level operator answer.',
@@ -1746,6 +1746,41 @@ def test_operator_chat_agent_falls_back_when_llm_is_unavailable():
     assert result['tools_used'] == []
     assert result['llm']['error_code'] == 'llm_not_configured'
     assert 'ResolveOps' in result['answer']
+
+
+def test_operator_chat_answers_configured_model_from_system_config(monkeypatch):
+    from production import operator_chat as operator_chat_module
+    from production.operator_chat import OperatorChatAgent
+
+    class ShouldNotCallLLM:
+        def chat(self, payload):
+            raise AssertionError('model identity questions should not call the LLM')
+
+    monkeypatch.setattr(operator_chat_module.settings, 'llm_model', 'qwen-test-model')
+    monkeypatch.setattr(operator_chat_module.settings, 'llm_base_url', 'https://llm.example.com/v1')
+
+    result = OperatorChatAgent(ShouldNotCallLLM()).answer('你的底层模型是什么？')
+
+    assert result['source'] == 'system_config'
+    assert result['tools_used'] == []
+    assert result['llm']['status'] == 'not_called'
+    assert 'qwen-test-model' in result['answer']
+    assert 'https://llm.example.com/v1' in result['answer']
+    assert 'API_KEY' in result['answer']
+
+
+def test_operator_chat_allows_general_no_tool_creative_fallback():
+    from production.operator_chat import OperatorChatAgent
+
+    class BrokenLLM:
+        def chat(self, payload):
+            return LLMResult(status='failed', error_code='llm_not_configured', error_type='ConfigurationError')
+
+    result = OperatorChatAgent(BrokenLLM()).answer('你给我写一首诗')
+
+    assert result['source'] == 'fallback'
+    assert result['tools_used'] == []
+    assert '短诗' in result['answer']
 
 
 def test_eval_summary_counts_recovery_and_failure_signals():
