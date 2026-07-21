@@ -172,6 +172,58 @@ def case_agent_decision(case: Case):
         'missing_information': conclusion.get('missing_information') or [],
         'evidence_summary': conclusion.get('evidence_summary') or [],
     }
+
+def token_value(usage: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        value=usage.get(key)
+        if isinstance(value,(int,float)):
+            return int(value)
+    return 0
+
+def llm_usage_from_telemetry(telemetry: dict[str, Any] | None) -> dict[str, int]:
+    if not isinstance(telemetry,dict):
+        return {'llm_calls':0,'prompt_tokens':0,'completion_tokens':0,'total_tokens':0}
+    usage=telemetry.get('usage') if isinstance(telemetry.get('usage'),dict) else {}
+    total=token_value(usage,'total_tokens','total_token_count')
+    prompt=token_value(usage,'prompt_tokens','input_tokens','prompt_token_count')
+    completion=token_value(usage,'completion_tokens','output_tokens','completion_token_count')
+    if not total:
+        total=prompt+completion
+    return {
+        'llm_calls':1 if telemetry.get('status')=='success' or usage else 0,
+        'prompt_tokens':prompt,
+        'completion_tokens':completion,
+        'total_tokens':total,
+    }
+
+def merge_llm_usage(*items: dict[str, int]) -> dict[str, int]:
+    return {
+        'llm_calls':sum(item.get('llm_calls',0) for item in items),
+        'prompt_tokens':sum(item.get('prompt_tokens',0) for item in items),
+        'completion_tokens':sum(item.get('completion_tokens',0) for item in items),
+        'total_tokens':sum(item.get('total_tokens',0) for item in items),
+    }
+
+def case_llm_usage(case: Case, events: list[Event]) -> dict[str, int]:
+    evidence=case.evidence if isinstance(case.evidence,dict) else {}
+    conclusion=evidence.get('conclusion') if isinstance(evidence.get('conclusion'),dict) else {}
+    usages=[
+        llm_usage_from_telemetry(conclusion.get('llm') if isinstance(conclusion,dict) else None),
+        llm_usage_from_telemetry(conclusion.get('llm_repair') if isinstance(conclusion,dict) else None),
+    ]
+    # Handoff events can preserve a failed or fallback conclusion. Include only
+    # token-bearing telemetry if present; do not count the same successful
+    # conclusion twice when it is already stored on the Case.
+    for event in events:
+        data=event.data or {}
+        event_conclusion=data.get('conclusion') if isinstance(data.get('conclusion'),dict) else None
+        if event_conclusion and event_conclusion is not conclusion:
+            telemetry=event_conclusion.get('llm') if isinstance(event_conclusion.get('llm'),dict) else None
+            usage=llm_usage_from_telemetry(telemetry)
+            if usage.get('total_tokens'):
+                usages.append(usage)
+    return merge_llm_usage(*usages)
+
 def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], invocations: list[Invocation], tasks: list[Task]):
     kinds=[event.kind for event in events]
     plan_actions=(case.plan or {}).get('actions',[]) if isinstance(case.plan,dict) else []
@@ -226,6 +278,13 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
     duration_seconds=None
     if timestamps:
         duration_seconds=max(timestamps).timestamp()-min(timestamps).timestamp()
+    llm_usage=case_llm_usage(case, events)
+    read_tool_budget=max(1, settings.agent_max_read_tool_calls)
+    read_tool_budget_used=len(tool_events)/read_tool_budget
+    read_tool_budget_exhausted=any(
+        'read-tool budget exhausted' in str(item)
+        for item in ((case.evidence or {}).get('conclusion') or {}).get('missing_information',[])
+    ) if isinstance(case.evidence,dict) else False
     return {
         'case_id':case.id,
         'event_type':case.event_type,
@@ -266,6 +325,13 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'has_approval_revoked':'approval_revoked' in kinds,
         'has_manual_handoff':has_manual_handoff,
         'duration_seconds':duration_seconds,
+        'llm_call_count':llm_usage['llm_calls'],
+        'llm_prompt_tokens':llm_usage['prompt_tokens'],
+        'llm_completion_tokens':llm_usage['completion_tokens'],
+        'llm_total_tokens':llm_usage['total_tokens'],
+        'read_tool_budget':read_tool_budget,
+        'read_tool_budget_used':read_tool_budget_used,
+        'read_tool_budget_exhausted':read_tool_budget_exhausted,
         'stage_sequence':stage_sequence,
         'event_kinds':kinds,
     }
@@ -280,6 +346,10 @@ def eval_summary_out(rows):
     tool_calls=sum(row.get('tool_call_count',0) for row in rows)
     scheduled_tool_calls=sum(row.get('scheduled_tool_call_count',0) for row in rows)
     tool_failures=sum(row.get('tool_failure_count',0) for row in rows)
+    llm_calls=sum(row.get('llm_call_count',0) for row in rows)
+    llm_total_tokens=sum(row.get('llm_total_tokens',0) for row in rows)
+    llm_prompt_tokens=sum(row.get('llm_prompt_tokens',0) for row in rows)
+    llm_completion_tokens=sum(row.get('llm_completion_tokens',0) for row in rows)
     replanned=[row for row in rows if row.get('has_replan')]
     durations=[row.get('duration_seconds') for row in rows if isinstance(row.get('duration_seconds'),(int,float))]
     grounding_applicable=[row for row in rows if row.get('action_count',0)>0 or row.get('has_evidence_grounding_passed') or row.get('has_evidence_grounding_failure')]
@@ -294,6 +364,14 @@ def eval_summary_out(rows):
         'avg_read_tool_calls':tool_calls/total if total else 0,
         'avg_scheduled_tool_calls':scheduled_tool_calls/total if total else 0,
         'avg_duration_seconds':sum(durations)/len(durations) if durations else None,
+        'llm_call_count':llm_calls,
+        'avg_llm_calls_per_case':llm_calls/total if total else 0,
+        'llm_total_tokens':llm_total_tokens,
+        'llm_prompt_tokens':llm_prompt_tokens,
+        'llm_completion_tokens':llm_completion_tokens,
+        'avg_llm_tokens_per_case':llm_total_tokens/total if total else 0,
+        'budget_exhausted_cases':sum(1 for row in rows if row.get('read_tool_budget_exhausted')),
+        'avg_read_tool_budget_used':sum(row.get('read_tool_budget_used',0) for row in rows)/total if total else 0,
         'tool_selection_accuracy':sum(row.get('tool_selection_accuracy',1) for row in rows)/total if total else 0,
         'tool_failure_rate':tool_failures/tool_calls if tool_calls else 0,
         'tool_failures':tool_failures,

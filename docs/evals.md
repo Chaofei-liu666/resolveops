@@ -92,6 +92,15 @@ ResolveOps keeps the public evaluation surface intentionally small. The goal is 
 | Verification Pass Rate | write invocations plus `verification_passed` / `verification_failed` events | Real business writes are checked by reading the source system again |
 | Recovery Efficiency | Replan success rate, average read-tool calls, average Case duration | The Agent can recover from state changes without excessive tool calls or latency |
 
+Process-control metrics are reported separately because they show whether the Agent is bounded and observable during execution:
+
+| Runtime metric | Source of truth | What it proves |
+|---|---|---|
+| LLM Call Count | `conclusion.llm` / `llm_repair` telemetry | The Agent is not allowed to loop invisibly |
+| Total / Average Tokens | provider `usage` from `LLMResult.telemetry()` | Token cost is measurable per Case and over a run |
+| Read Tool Budget Used | read-tool observations / configured `AGENT_MAX_READ_TOOL_CALLS` | Tool use is bounded instead of open-ended |
+| Budget Exhausted Cases | `read-tool budget exhausted` in missing information | The Agent stops or degrades explicitly when budget is reached |
+
 Auxiliary diagnostics are still returned for debugging and interview follow-up: policy denials, context isolation failures, approval expiry/revocation, task failures, grounding failures and manual handoffs.
 
 Do not claim “95% accuracy” before a fixed 30-50 Case benchmark dataset exists. Current metrics are execution-derived reliability metrics, suitable for regression testing and project demonstration.

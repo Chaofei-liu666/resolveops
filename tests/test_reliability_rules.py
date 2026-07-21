@@ -1401,7 +1401,27 @@ def test_audit_log_serializes_actor_role_and_resource():
 
 
 def test_eval_case_requires_write_verification():
-    case = Case(id='case-1', tenant_id='demo', order_id='SO-1', status='resolved', plan_version=1, plan={'actions':[{'action_type':'transfer_stock'}]})
+    case = Case(
+        id='case-1',
+        tenant_id='demo',
+        order_id='SO-1',
+        status='resolved',
+        plan_version=1,
+        plan={'actions':[{'action_type':'transfer_stock'}]},
+        evidence={
+            'conclusion': {
+                'llm': {
+                    'status': 'success',
+                    'usage': {'prompt_tokens': 100, 'completion_tokens': 40, 'total_tokens': 140},
+                },
+                'missing_information': [],
+            },
+            'tool_trace': {
+                'summary': {'grounding_allowed': True},
+                'action_evidence': {'1': ['E-001']},
+            },
+        },
+    )
     events = [
         Event(case_id='case-1', kind='case_created', message='created', data={}),
         Event(case_id='case-1', kind='context_built', message='context', data={}),
@@ -1423,6 +1443,13 @@ def test_eval_case_requires_write_verification():
     assert result['tool_failure_count'] == 0
     assert result['tool_scheduler_sources'] == {'executed': 1}
     assert result['has_evidence_grounding_passed'] is True
+    assert result['task_succeeded'] is True
+    assert result['tool_selection_accuracy'] == 1
+    assert result['evidence_faithfulness'] == 1
+    assert result['llm_call_count'] == 1
+    assert result['llm_total_tokens'] == 140
+    assert result['read_tool_budget_used'] > 0
+    assert result['read_tool_budget_exhausted'] is False
     assert 'execution_started' in result['stage_sequence']
 
 
@@ -1438,7 +1465,9 @@ def test_eval_case_counts_tool_failures_and_context_isolation():
     result = eval_case_out(case, events, [], [], [])
 
     assert result['manual_review'] is True
+    assert result['task_succeeded'] is True
     assert result['tool_failure_count'] == 1
+    assert result['tool_selection_accuracy'] == 0
     assert result['tool_scheduler_sources'] == {'cache': 1}
     assert result['has_context_isolation_sanitized'] is True
     assert result['has_context_isolation_failure'] is True
@@ -1800,8 +1829,18 @@ def test_eval_summary_counts_recovery_and_failure_signals():
             'has_context_isolation_sanitized': False,
             'has_context_isolation_failure': False,
             'has_replan': True,
+            'replan_success': True,
             'has_manual_handoff': False,
             'task_failure_count': 0,
+            'task_succeeded': True,
+            'tool_selection_accuracy': 1,
+            'evidence_faithfulness': 1,
+            'llm_call_count': 2,
+            'llm_total_tokens': 300,
+            'llm_prompt_tokens': 220,
+            'llm_completion_tokens': 80,
+            'read_tool_budget_used': 0.5,
+            'read_tool_budget_exhausted': False,
         },
         {
             'resolved': False,
@@ -1818,8 +1857,18 @@ def test_eval_summary_counts_recovery_and_failure_signals():
             'has_context_isolation_sanitized': True,
             'has_context_isolation_failure': True,
             'has_replan': False,
+            'replan_success': None,
             'has_manual_handoff': True,
             'task_failure_count': 1,
+            'task_succeeded': True,
+            'tool_selection_accuracy': 0.5,
+            'evidence_faithfulness': 0,
+            'llm_call_count': 1,
+            'llm_total_tokens': 120,
+            'llm_prompt_tokens': 100,
+            'llm_completion_tokens': 20,
+            'read_tool_budget_used': 0.25,
+            'read_tool_budget_exhausted': True,
         },
     ]
     summary = eval_summary_out(rows)
@@ -1835,3 +1884,12 @@ def test_eval_summary_counts_recovery_and_failure_signals():
     assert summary['context_isolation_sanitized_cases'] == 1
     assert summary['context_isolation_failures'] == 1
     assert summary['replanned_cases'] == 1
+    assert summary['task_success_rate'] == 1
+    assert summary['tool_selection_accuracy'] == 0.75
+    assert summary['evidence_faithfulness_rate'] == 0.5
+    assert summary['llm_call_count'] == 3
+    assert summary['llm_total_tokens'] == 420
+    assert summary['avg_llm_tokens_per_case'] == 210
+    assert summary['avg_read_tool_budget_used'] == 0.375
+    assert summary['budget_exhausted_cases'] == 1
+    assert summary['replan_success_rate'] == 1

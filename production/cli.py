@@ -504,6 +504,13 @@ def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
         f"avg_duration={duration_text} replan_success={replan_success_text}"
     )
     print(
+        f"runtime: llm_calls={data.get('llm_call_count', 0)} "
+        f"total_tokens={data.get('llm_total_tokens', 0)} "
+        f"avg_tokens_per_case={data.get('avg_llm_tokens_per_case', 0):.1f} "
+        f"read_budget_used={fmt_percent(data.get('avg_read_tool_budget_used'))} "
+        f"budget_exhausted_cases={data.get('budget_exhausted_cases', 0)}"
+    )
+    print(
         f"diagnostics: grounding_failures={data.get('evidence_grounding_failures', 0)} "
         f"policy_denials={data.get('policy_denials', 0)} "
         f"context_failures={data.get('context_isolation_failures', 0)} "
@@ -564,6 +571,12 @@ def print_eval_case(data: dict[str, Any], show_events: bool = False) -> None:
     print(
         f"agent_quality: evidence_faithfulness={fmt_percent(data.get('evidence_faithfulness'))} "
         f"replan_success={data.get('replan_success')} duration={duration_text}"
+    )
+    print(
+        f"runtime: llm_calls={data.get('llm_call_count', 0)} "
+        f"tokens={data.get('llm_total_tokens', 0)} "
+        f"read_budget_used={fmt_percent(data.get('read_tool_budget_used'))} "
+        f"budget_exhausted={data.get('read_tool_budget_exhausted')}"
     )
     if scheduler_sources:
         sources = ', '.join(f'{key}={value}' for key, value in sorted(scheduler_sources.items()))
