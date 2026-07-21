@@ -52,7 +52,7 @@ def test_cli_init_creates_local_config_template(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert 'ResolveOps CLI' in out
     assert '[Init] Checking local CLI config' in out
-    assert '[Next] Check the runtime' in out
+    assert '[Next] Start chat' in out
 
 
 def test_cli_config_set_and_show_mask_secret(monkeypatch, tmp_path, capsys):

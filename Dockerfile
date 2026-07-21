@@ -9,6 +9,5 @@ CMD ["uvicorn","production.main:app","--host","0.0.0.0","--port","8080"]
 FROM runtime AS test
 COPY requirements-dev.txt .
 RUN pip install --no-cache-dir -r requirements-dev.txt
-COPY app.py ./app.py
 COPY tests ./tests
 CMD ["python","-m","pytest","-q"]

@@ -302,6 +302,12 @@ class CaseQuestionAgent:
         normalized = ''.join(str(question or '').lower().split())
         if not normalized:
             return False
+        general_intent_markers = (
+            '写诗', '写一首诗', '短诗', 'poem', '创作', '故事', '笑话',
+            '解释一下', '介绍一下', '什么是agent', '什么是', '区别是什么',
+        )
+        if any(marker in normalized for marker in general_intent_markers):
+            return True
         case_tool_markers = (
             'case', '订单', '库存', '履约', '调拨', '采购', '审批', '仓库', 'erp', 'erpnext',
             '异常', '人工审核', '手动审核', 'manual_review', '等待审批', '批准', '拒绝',
