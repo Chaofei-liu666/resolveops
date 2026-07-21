@@ -1450,6 +1450,10 @@ def test_eval_case_requires_write_verification():
     assert result['llm_total_tokens'] == 140
     assert result['read_tool_budget_used'] > 0
     assert result['read_tool_budget_exhausted'] is False
+    assert result['duplicate_tool_call_count'] == 0
+    assert result['critical_stage_coverage'] == 1
+    assert result['trajectory_quality_score'] == 1
+    assert result['unsafe_continuation_count'] == 0
     assert 'execution_started' in result['stage_sequence']
 
 
@@ -1469,6 +1473,7 @@ def test_eval_case_counts_tool_failures_and_context_isolation():
     assert result['tool_failure_count'] == 1
     assert result['tool_selection_accuracy'] == 0
     assert result['tool_scheduler_sources'] == {'cache': 1}
+    assert result['trajectory_quality_score'] < 1
     assert result['has_context_isolation_sanitized'] is True
     assert result['has_context_isolation_failure'] is True
     assert result['blocked_event_count'] == 2
@@ -1841,6 +1846,10 @@ def test_eval_summary_counts_recovery_and_failure_signals():
             'llm_completion_tokens': 80,
             'read_tool_budget_used': 0.5,
             'read_tool_budget_exhausted': False,
+            'trajectory_quality_score': 1,
+            'duplicate_tool_call_count': 0,
+            'self_correction_count': 1,
+            'unsafe_continuation_count': 0,
         },
         {
             'resolved': False,
@@ -1869,6 +1878,10 @@ def test_eval_summary_counts_recovery_and_failure_signals():
             'llm_completion_tokens': 20,
             'read_tool_budget_used': 0.25,
             'read_tool_budget_exhausted': True,
+            'trajectory_quality_score': 0.25,
+            'duplicate_tool_call_count': 2,
+            'self_correction_count': 0,
+            'unsafe_continuation_count': 1,
         },
     ]
     summary = eval_summary_out(rows)
@@ -1893,3 +1906,7 @@ def test_eval_summary_counts_recovery_and_failure_signals():
     assert summary['avg_read_tool_budget_used'] == 0.375
     assert summary['budget_exhausted_cases'] == 1
     assert summary['replan_success_rate'] == 1
+    assert summary['avg_trajectory_quality_score'] == 0.625
+    assert summary['duplicate_tool_call_count'] == 2
+    assert summary['self_correction_cases'] == 1
+    assert summary['unsafe_continuation_cases'] == 1

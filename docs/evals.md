@@ -84,6 +84,14 @@ python resolveops.py eval case <case-id> --events
 
 ResolveOps keeps the public evaluation surface intentionally small. The goal is to prove Agent behavior, not to flood the project with vanity metrics.
 
+The evaluation is split into three layers:
+
+```text
+Task-level success
+-> Trajectory quality
+-> System/runtime control
+```
+
 | Core metric | Source of truth | What it proves |
 |---|---|---|
 | Task Success Rate | Case is `resolved`, or reaches deliberate `manual_review` through handoff | The Agent either solves the Case or stops safely instead of hallucinating success |
@@ -91,6 +99,16 @@ ResolveOps keeps the public evaluation surface intentionally small. The goal is 
 | Evidence Faithfulness | executable actions linked to Evidence Grounding and `action_evidence` | The plan is supported by observed tool evidence, not only model text |
 | Verification Pass Rate | write invocations plus `verification_passed` / `verification_failed` events | Real business writes are checked by reading the source system again |
 | Recovery Efficiency | Replan success rate, average read-tool calls, average Case duration | The Agent can recover from state changes without excessive tool calls or latency |
+
+Trajectory metrics check the path the Agent took, not only the final status:
+
+| Trajectory metric | Source of truth | What it proves |
+|---|---|---|
+| Trajectory Quality Score | deterministic blend of stage coverage, tool success, evidence support and verification | The Case followed a plausible Agent path instead of merely ending in a good state |
+| Critical Stage Coverage | required milestones such as context, tools, plan/handoff, execution and verification | The Agent did not skip important phases |
+| Duplicate Tool Calls | repeated identical read-tool observations | Detects wasteful or looping tool behavior |
+| Self-Correction Count | `replan_requested` / `task_requeued` | Shows dynamic recovery after state drift or runtime interruption |
+| Unsafe Continuation Count | execution after grounding failure, or success-like continuation after failed verification | Detects dangerous error propagation |
 
 Process-control metrics are reported separately because they show whether the Agent is bounded and observable during execution:
 

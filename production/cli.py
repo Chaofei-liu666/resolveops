@@ -511,6 +511,12 @@ def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
         f"budget_exhausted_cases={data.get('budget_exhausted_cases', 0)}"
     )
     print(
+        f"trajectory: quality={fmt_percent(data.get('avg_trajectory_quality_score'))} "
+        f"duplicate_tools={data.get('duplicate_tool_call_count', 0)} "
+        f"self_correction_cases={data.get('self_correction_cases', 0)} "
+        f"unsafe_continuation_cases={data.get('unsafe_continuation_cases', 0)}"
+    )
+    print(
         f"diagnostics: grounding_failures={data.get('evidence_grounding_failures', 0)} "
         f"policy_denials={data.get('policy_denials', 0)} "
         f"context_failures={data.get('context_isolation_failures', 0)} "
@@ -577,6 +583,13 @@ def print_eval_case(data: dict[str, Any], show_events: bool = False) -> None:
         f"tokens={data.get('llm_total_tokens', 0)} "
         f"read_budget_used={fmt_percent(data.get('read_tool_budget_used'))} "
         f"budget_exhausted={data.get('read_tool_budget_exhausted')}"
+    )
+    print(
+        f"trajectory: quality={fmt_percent(data.get('trajectory_quality_score'))} "
+        f"critical_stage_coverage={fmt_percent(data.get('critical_stage_coverage'))} "
+        f"duplicate_tools={data.get('duplicate_tool_call_count', 0)} "
+        f"self_corrections={data.get('self_correction_count', 0)} "
+        f"unsafe_continuations={data.get('unsafe_continuation_count', 0)}"
     )
     if scheduler_sources:
         sources = ', '.join(f'{key}={value}' for key, value in sorted(scheduler_sources.items()))
