@@ -180,31 +180,39 @@ def token_value(usage: dict[str, Any], *keys: str) -> int:
             return int(value)
     return 0
 
-def llm_usage_from_telemetry(telemetry: dict[str, Any] | None) -> dict[str, int]:
+def metric_number(value: Any) -> float | None:
+    if isinstance(value,(int,float)):
+        return float(value)
+    return None
+
+def llm_usage_from_telemetry(telemetry: dict[str, Any] | None) -> dict[str, int | float]:
     if not isinstance(telemetry,dict):
-        return {'llm_calls':0,'prompt_tokens':0,'completion_tokens':0,'total_tokens':0}
+        return {'llm_calls':0,'prompt_tokens':0,'completion_tokens':0,'total_tokens':0,'latency_ms_total':0}
     usage=telemetry.get('usage') if isinstance(telemetry.get('usage'),dict) else {}
     total=token_value(usage,'total_tokens','total_token_count')
     prompt=token_value(usage,'prompt_tokens','input_tokens','prompt_token_count')
     completion=token_value(usage,'completion_tokens','output_tokens','completion_token_count')
     if not total:
         total=prompt+completion
+    latency_ms=metric_number(telemetry.get('latency_ms')) or 0
     return {
-        'llm_calls':1 if telemetry.get('status')=='success' or usage else 0,
+        'llm_calls':1 if telemetry.get('status') or usage or latency_ms else 0,
         'prompt_tokens':prompt,
         'completion_tokens':completion,
         'total_tokens':total,
+        'latency_ms_total':latency_ms,
     }
 
-def merge_llm_usage(*items: dict[str, int]) -> dict[str, int]:
+def merge_llm_usage(*items: dict[str, int | float]) -> dict[str, int | float]:
     return {
         'llm_calls':sum(item.get('llm_calls',0) for item in items),
         'prompt_tokens':sum(item.get('prompt_tokens',0) for item in items),
         'completion_tokens':sum(item.get('completion_tokens',0) for item in items),
         'total_tokens':sum(item.get('total_tokens',0) for item in items),
+        'latency_ms_total':sum(item.get('latency_ms_total',0) for item in items),
     }
 
-def case_llm_usage(case: Case, events: list[Event]) -> dict[str, int]:
+def case_llm_usage(case: Case, events: list[Event]) -> dict[str, int | float]:
     evidence=case.evidence if isinstance(case.evidence,dict) else {}
     conclusion=evidence.get('conclusion') if isinstance(evidence.get('conclusion'),dict) else {}
     usages=[
@@ -220,9 +228,39 @@ def case_llm_usage(case: Case, events: list[Event]) -> dict[str, int]:
         if event_conclusion and event_conclusion is not conclusion:
             telemetry=event_conclusion.get('llm') if isinstance(event_conclusion.get('llm'),dict) else None
             usage=llm_usage_from_telemetry(telemetry)
-            if usage.get('total_tokens'):
+            if usage.get('llm_calls'):
                 usages.append(usage)
     return merge_llm_usage(*usages)
+
+def tool_latency_stats(tool_events: list[Event]) -> dict[str, float | None]:
+    latencies=[]
+    for event in tool_events:
+        data=event.data or {}
+        tool_result=data.get('tool_result') if isinstance(data.get('tool_result'),dict) else {}
+        metadata=tool_result.get('metadata') if isinstance(tool_result.get('metadata'),dict) else {}
+        latency=metric_number(metadata.get('latency_ms'))
+        if latency is not None:
+            latencies.append(latency)
+    if not latencies:
+        return {'tool_latency_ms_total':0,'observed_tool_latency_count':0,'avg_tool_latency_ms':None,'max_tool_latency_ms':None}
+    return {
+        'tool_latency_ms_total':sum(latencies),
+        'observed_tool_latency_count':len(latencies),
+        'avg_tool_latency_ms':sum(latencies)/len(latencies),
+        'max_tool_latency_ms':max(latencies),
+    }
+
+def case_queue_wait_ms(case: Case, events: list[Event], tasks: list[Task]) -> float | None:
+    starts=[task.started_at for task in tasks if task.started_at]
+    if not starts:
+        return None
+    origins=[]
+    if case.created_at:
+        origins.append(case.created_at)
+    origins.extend(event.created_at for event in events if event.kind=='case_created' and event.created_at)
+    if not origins:
+        return None
+    return max(0,(min(starts).timestamp()-min(origins).timestamp())*1000)
 
 def event_tool_signature(event: Event) -> str | None:
     data=event.data or {}
@@ -309,6 +347,10 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
     if timestamps:
         duration_seconds=max(timestamps).timestamp()-min(timestamps).timestamp()
     llm_usage=case_llm_usage(case, events)
+    llm_latency_ms_total=llm_usage.get('latency_ms_total',0)
+    avg_llm_latency_ms=(llm_latency_ms_total/llm_usage['llm_calls']) if llm_usage['llm_calls'] else None
+    tool_latency=tool_latency_stats(tool_events)
+    queue_wait_ms=case_queue_wait_ms(case, events, tasks)
     read_tool_budget=max(1, settings.agent_max_read_tool_calls)
     read_tool_budget_used=len(tool_events)/read_tool_budget
     read_tool_budget_exhausted=any(
@@ -384,6 +426,13 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'llm_prompt_tokens':llm_usage['prompt_tokens'],
         'llm_completion_tokens':llm_usage['completion_tokens'],
         'llm_total_tokens':llm_usage['total_tokens'],
+        'llm_latency_ms_total':llm_latency_ms_total,
+        'avg_llm_latency_ms':avg_llm_latency_ms,
+        'tool_latency_ms_total':tool_latency['tool_latency_ms_total'],
+        'observed_tool_latency_count':tool_latency['observed_tool_latency_count'],
+        'avg_tool_latency_ms':tool_latency['avg_tool_latency_ms'],
+        'max_tool_latency_ms':tool_latency['max_tool_latency_ms'],
+        'queue_wait_ms':queue_wait_ms,
         'read_tool_budget':read_tool_budget,
         'read_tool_budget_used':read_tool_budget_used,
         'read_tool_budget_exhausted':read_tool_budget_exhausted,
@@ -410,6 +459,11 @@ def eval_summary_out(rows):
     llm_total_tokens=sum(row.get('llm_total_tokens',0) for row in rows)
     llm_prompt_tokens=sum(row.get('llm_prompt_tokens',0) for row in rows)
     llm_completion_tokens=sum(row.get('llm_completion_tokens',0) for row in rows)
+    llm_latency_ms_total=sum(row.get('llm_latency_ms_total',0) for row in rows)
+    tool_latency_ms_total=sum(row.get('tool_latency_ms_total',0) for row in rows)
+    observed_tool_latency_count=sum(row.get('observed_tool_latency_count',0) for row in rows)
+    queue_waits=[row.get('queue_wait_ms') for row in rows if isinstance(row.get('queue_wait_ms'),(int,float))]
+    max_tool_latencies=[row.get('max_tool_latency_ms') for row in rows if isinstance(row.get('max_tool_latency_ms'),(int,float))]
     replanned=[row for row in rows if row.get('has_replan')]
     durations=[row.get('duration_seconds') for row in rows if isinstance(row.get('duration_seconds'),(int,float))]
     grounding_applicable=[row for row in rows if row.get('action_count',0)>0 or row.get('has_evidence_grounding_passed') or row.get('has_evidence_grounding_failure')]
@@ -431,6 +485,13 @@ def eval_summary_out(rows):
         'llm_prompt_tokens':llm_prompt_tokens,
         'llm_completion_tokens':llm_completion_tokens,
         'avg_llm_tokens_per_case':llm_total_tokens/total if total else 0,
+        'llm_latency_ms_total':llm_latency_ms_total,
+        'avg_llm_latency_ms':llm_latency_ms_total/llm_calls if llm_calls else None,
+        'tool_latency_ms_total':tool_latency_ms_total,
+        'observed_tool_latency_count':observed_tool_latency_count,
+        'avg_tool_latency_ms':tool_latency_ms_total/observed_tool_latency_count if observed_tool_latency_count else None,
+        'max_tool_latency_ms':max(max_tool_latencies) if max_tool_latencies else None,
+        'avg_queue_wait_ms':sum(queue_waits)/len(queue_waits) if queue_waits else None,
         'budget_exhausted_cases':sum(1 for row in rows if row.get('read_tool_budget_exhausted')),
         'avg_read_tool_budget_used':sum(row.get('read_tool_budget_used',0) for row in rows)/total if total else 0,
         'avg_trajectory_quality_score':sum(trajectory_scores)/len(trajectory_scores) if trajectory_scores else 0,

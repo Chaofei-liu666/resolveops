@@ -24,6 +24,7 @@ class ToolResult:
     source_system: str | None = None
     source_version: str | None = None
     evidence_usable: bool = True
+    metadata: dict[str, Any] | None = None
 
     @classmethod
     def success(
@@ -76,6 +77,7 @@ class ToolResult:
             'source_system': self.source_system,
             'source_version': self.source_version,
             'evidence_usable': self.evidence_usable,
+            'metadata': self.metadata or {},
         }
 
     def observation_result(self) -> dict[str, Any]:
@@ -88,4 +90,3 @@ class ToolResult:
             'retryable': self.retryable,
             'side_effect_committed': self.side_effect_committed,
         }
-

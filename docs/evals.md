@@ -116,10 +116,22 @@ Process-control metrics are reported separately because they show whether the Ag
 |---|---|---|
 | LLM Call Count | `conclusion.llm` / `llm_repair` telemetry | The Agent is not allowed to loop invisibly |
 | Total / Average Tokens | provider `usage` from `LLMResult.telemetry()` | Token cost is measurable per Case and over a run |
+| Average LLM Latency | `LLMResult.latency_ms` from the provider gateway | Separates model generation time from ERP/API and queue time |
+| Average / Max Tool Latency | `ToolResult.metadata.latency_ms` from read-tool scheduler observations | Shows whether external business systems or tool adapters are the bottleneck |
+| Average Queue Wait | first task start minus Case creation time | Shows whether Workers are saturated before Agent reasoning even starts |
 | Read Tool Budget Used | read-tool observations / configured `AGENT_MAX_READ_TOOL_CALLS` | Tool use is bounded instead of open-ended |
 | Budget Exhausted Cases | `read-tool budget exhausted` in missing information | The Agent stops or degrades explicitly when budget is reached |
 
 Auxiliary diagnostics are still returned for debugging and interview follow-up: policy denials, context isolation failures, approval expiry/revocation, task failures, grounding failures and manual handoffs.
+
+Latency metrics are for bottleneck localization, not marketing claims. A slow Case can now be classified as:
+
+```text
+LLM latency high      -> tune model, prompt size, timeout, or provider
+Tool latency high     -> inspect ERPNext/API adapter, network, or read-tool parallelism
+Queue wait high       -> add Workers or tune task lease/retry behavior
+Duration high but all three low -> likely waiting for human approval or business state
+```
 
 Do not claim “95% accuracy” before a fixed 30-50 Case benchmark dataset exists. Current metrics are execution-derived reliability metrics, suitable for regression testing and project demonstration.
 

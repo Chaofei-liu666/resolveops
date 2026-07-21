@@ -7,6 +7,7 @@ layer after evidence grounding, policy, approval, idempotency, and verification.
 from __future__ import annotations
 
 import json
+from time import monotonic
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
@@ -93,10 +94,32 @@ class ReadToolScheduler:
         ]
 
     def _execute_one(self, call: ReadToolCall, order_id: str) -> ToolResult:
-        if hasattr(self.tools, 'execute_result'):
-            result = self.tools.execute_result(call.name, call.arguments, order_id)
-            return result if isinstance(result, ToolResult) else ToolResult.success(result if isinstance(result, dict) else {'value': result})
-        result = self.tools.execute(call.name, call.arguments, order_id)
-        if isinstance(result, dict) and result.get('error'):
-            return ToolResult.failure(result.get('error'), error_type=result.get('error_type'))
-        return ToolResult.success(result if isinstance(result, dict) else {'value': result})
+        started=monotonic()
+        try:
+            if hasattr(self.tools, 'execute_result'):
+                result = self.tools.execute_result(call.name, call.arguments, order_id)
+                tool_result = result if isinstance(result, ToolResult) else ToolResult.success(result if isinstance(result, dict) else {'value': result})
+            else:
+                result = self.tools.execute(call.name, call.arguments, order_id)
+                if isinstance(result, dict) and result.get('error'):
+                    tool_result = ToolResult.failure(result.get('error'), error_type=result.get('error_type'))
+                else:
+                    tool_result = ToolResult.success(result if isinstance(result, dict) else {'value': result})
+        except Exception:
+            raise
+        latency_ms=int((monotonic()-started)*1000)
+        metadata=dict(tool_result.metadata or {})
+        metadata['latency_ms']=latency_ms
+        return ToolResult(
+            status=tool_result.status,
+            data=tool_result.data,
+            error_code=tool_result.error_code,
+            error_type=tool_result.error_type,
+            retryable=tool_result.retryable,
+            side_effect_committed=tool_result.side_effect_committed,
+            verification_required=tool_result.verification_required,
+            source_system=tool_result.source_system,
+            source_version=tool_result.source_version,
+            evidence_usable=tool_result.evidence_usable,
+            metadata=metadata,
+        )

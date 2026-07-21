@@ -1401,17 +1401,20 @@ def test_audit_log_serializes_actor_role_and_resource():
 
 
 def test_eval_case_requires_write_verification():
+    created_at = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
     case = Case(
         id='case-1',
         tenant_id='demo',
         order_id='SO-1',
         status='resolved',
         plan_version=1,
+        created_at=created_at,
         plan={'actions':[{'action_type':'transfer_stock'}]},
         evidence={
             'conclusion': {
                 'llm': {
                     'status': 'success',
+                    'latency_ms': 250,
                     'usage': {'prompt_tokens': 100, 'completion_tokens': 40, 'total_tokens': 140},
                 },
                 'missing_information': [],
@@ -1423,17 +1426,17 @@ def test_eval_case_requires_write_verification():
         },
     )
     events = [
-        Event(case_id='case-1', kind='case_created', message='created', data={}),
+        Event(case_id='case-1', kind='case_created', message='created', data={}, created_at=created_at),
         Event(case_id='case-1', kind='context_built', message='context', data={}),
         Event(case_id='case-1', kind='tool_scheduled', message='scheduled', data={'scheduler':{'source':'executed'},'status':'success'}),
-        Event(case_id='case-1', kind='tool_observation', message='read', data={'result':{'name':'SO-1'},'tool_result':{'status':'success'}}),
+        Event(case_id='case-1', kind='tool_observation', message='read', data={'result':{'name':'SO-1'},'tool_result':{'status':'success','metadata':{'latency_ms':35}}}),
         Event(case_id='case-1', kind='evidence_grounding_passed', message='grounded', data={}),
         Event(case_id='case-1', kind='execution_started', message='execute', data={}),
         Event(case_id='case-1', kind='verification_passed', message='ok', data={}),
     ]
     approvals = [Approval(case_id='case-1', plan_version=1, action_hash='abc', action={}, status='consumed')]
     invocations = [Invocation(case_id='case-1', idempotency_key='k', tool='create_transfer_draft', status='succeeded')]
-    tasks = [Task(case_id='case-1', kind='execute', status='done')]
+    tasks = [Task(case_id='case-1', kind='execute', status='done', started_at=created_at + timedelta(seconds=2))]
     result = eval_case_out(case, events, approvals, invocations, tasks)
     assert result['resolved'] is True
     assert result['write_invocation_count'] == 1
@@ -1448,6 +1451,10 @@ def test_eval_case_requires_write_verification():
     assert result['evidence_faithfulness'] == 1
     assert result['llm_call_count'] == 1
     assert result['llm_total_tokens'] == 140
+    assert result['avg_llm_latency_ms'] == 250
+    assert result['avg_tool_latency_ms'] == 35
+    assert result['max_tool_latency_ms'] == 35
+    assert result['queue_wait_ms'] == 2000
     assert result['read_tool_budget_used'] > 0
     assert result['read_tool_budget_exhausted'] is False
     assert result['duplicate_tool_call_count'] == 0
@@ -1844,6 +1851,12 @@ def test_eval_summary_counts_recovery_and_failure_signals():
             'llm_total_tokens': 300,
             'llm_prompt_tokens': 220,
             'llm_completion_tokens': 80,
+            'llm_latency_ms_total': 600,
+            'tool_latency_ms_total': 160,
+            'observed_tool_latency_count': 4,
+            'avg_tool_latency_ms': 40,
+            'max_tool_latency_ms': 70,
+            'queue_wait_ms': 1000,
             'read_tool_budget_used': 0.5,
             'read_tool_budget_exhausted': False,
             'trajectory_quality_score': 1,
@@ -1876,6 +1889,12 @@ def test_eval_summary_counts_recovery_and_failure_signals():
             'llm_total_tokens': 120,
             'llm_prompt_tokens': 100,
             'llm_completion_tokens': 20,
+            'llm_latency_ms_total': 200,
+            'tool_latency_ms_total': 100,
+            'observed_tool_latency_count': 2,
+            'avg_tool_latency_ms': 50,
+            'max_tool_latency_ms': 60,
+            'queue_wait_ms': 3000,
             'read_tool_budget_used': 0.25,
             'read_tool_budget_exhausted': True,
             'trajectory_quality_score': 0.25,
@@ -1903,6 +1922,10 @@ def test_eval_summary_counts_recovery_and_failure_signals():
     assert summary['llm_call_count'] == 3
     assert summary['llm_total_tokens'] == 420
     assert summary['avg_llm_tokens_per_case'] == 210
+    assert summary['avg_llm_latency_ms'] == 800 / 3
+    assert summary['avg_tool_latency_ms'] == 260 / 6
+    assert summary['max_tool_latency_ms'] == 70
+    assert summary['avg_queue_wait_ms'] == 2000
     assert summary['avg_read_tool_budget_used'] == 0.375
     assert summary['budget_exhausted_cases'] == 1
     assert summary['replan_success_rate'] == 1

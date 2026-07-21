@@ -314,6 +314,7 @@ Inside `chat`, use:
 ```text
 /new             create a new Case interactively
 /cases           list recent Cases
+/eval            show Agent evaluation summary
 /case <case-id>  enter one Case-scoped Agent chat
 /status          show runtime status
 /exit            leave chat
@@ -333,7 +334,7 @@ python resolveops.py case chat <case-id>
 
 `case watch` prints a live, colorized Case event trace. It shows read-tool calls, Agent decision summaries, approvals, executor activity, verification and safe handoff events without giving the CLI direct ERPNext access.
 
-`case chat` opens an interactive Case-scoped Agent session. Free-text input is sent to the read-only Case question endpoint; slash commands such as `/show`, `/events` and `/exit` stay in the CLI layer. General no-tool chat is allowed, but business tools remain scoped to Case questions and never execute writes.
+`case chat` opens an interactive Case-scoped Agent session. Free-text input is sent to the read-only Case question endpoint; slash commands such as `/show`, `/events`, `/eval` and `/exit` stay in the CLI layer. General no-tool chat is allowed, but business tools remain scoped to Case questions and never execute writes.
 
 The human CLI output is concise by default. Use `--verbose` on `case ask` or `case chat` to show rationale, used evidence and safe next steps.
 
@@ -390,6 +391,7 @@ ResolveOps evaluates Agent behavior from actual execution trails:
 | Policy denials | Whether unsafe actions were blocked |
 | Evidence grounding failures | Whether unsupported plans were rejected |
 | Context isolation failures | Whether cross-Case leakage was detected |
+| LLM / Tool / Queue latency | Where execution time is spent: model generation, external tool/API calls, or Worker queueing |
 
 Example:
 

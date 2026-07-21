@@ -154,6 +154,12 @@ def fmt_percent(value: Any) -> str:
     except (TypeError, ValueError):
         return 'n/a'
 
+def fmt_ms(value: Any) -> str:
+    try:
+        return f'{float(value):.0f}ms'
+    except (TypeError, ValueError):
+        return 'n/a'
+
 
 def print_status(data: dict[str, Any]) -> None:
     print('ResolveOps Runtime Status')
@@ -393,6 +399,7 @@ def print_case_chat_help() -> None:
     print('Commands:')
     print('  /show        show current Case summary')
     print('  /events      show recent Case event trace')
+    print('  /eval        show current Case Agent evaluation metrics')
     print('  /help        show this help')
     print('  /exit        leave the Case chat')
     print('Any other input is sent as a Case-scoped read-only Agent question.')
@@ -403,6 +410,7 @@ def print_operator_chat_help() -> None:
     print('Commands:')
     print('  /status          show ResolveOps runtime status')
     print('  /cases           list recent Cases')
+    print('  /eval            show Agent evaluation summary')
     print('  /new             create a new Case interactively')
     print('  /case <case-id>  enter one Case-scoped Agent chat')
     print('  /help            show this help')
@@ -507,6 +515,10 @@ def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
         f"runtime: llm_calls={data.get('llm_call_count', 0)} "
         f"total_tokens={data.get('llm_total_tokens', 0)} "
         f"avg_tokens_per_case={data.get('avg_llm_tokens_per_case', 0):.1f} "
+        f"avg_llm_latency={fmt_ms(data.get('avg_llm_latency_ms'))} "
+        f"avg_tool_latency={fmt_ms(data.get('avg_tool_latency_ms'))} "
+        f"max_tool_latency={fmt_ms(data.get('max_tool_latency_ms'))} "
+        f"avg_queue_wait={fmt_ms(data.get('avg_queue_wait_ms'))} "
         f"read_budget_used={fmt_percent(data.get('avg_read_tool_budget_used'))} "
         f"budget_exhausted_cases={data.get('budget_exhausted_cases', 0)}"
     )
@@ -581,6 +593,10 @@ def print_eval_case(data: dict[str, Any], show_events: bool = False) -> None:
     print(
         f"runtime: llm_calls={data.get('llm_call_count', 0)} "
         f"tokens={data.get('llm_total_tokens', 0)} "
+        f"llm_latency={fmt_ms(data.get('avg_llm_latency_ms'))} "
+        f"tool_latency={fmt_ms(data.get('avg_tool_latency_ms'))} "
+        f"max_tool_latency={fmt_ms(data.get('max_tool_latency_ms'))} "
+        f"queue_wait={fmt_ms(data.get('queue_wait_ms'))} "
         f"read_budget_used={fmt_percent(data.get('read_tool_budget_used'))} "
         f"budget_exhausted={data.get('read_tool_budget_exhausted')}"
     )
@@ -819,6 +835,13 @@ def cmd_case_chat(args: argparse.Namespace, client: ApiClient) -> int:
             case = client.request('GET', f'/v1/cases/{args.case_id}')
             print_recent_case_events(case, limit=args.events)
             continue
+        if lowered == '/eval':
+            try:
+                data = client.request('GET', f'/v1/evals/cases/{args.case_id}')
+                print_eval_case(data, show_events=False)
+            except CliError as exc:
+                print(paint(f"error: {exc}", 'red'))
+            continue
         try:
             data = client.request('POST', f'/v1/cases/{args.case_id}/ask', {'question': question})
         except CliError as exc:
@@ -861,6 +884,13 @@ def cmd_chat(args: argparse.Namespace, client: ApiClient) -> int:
                 print('Cases')
                 for case in data:
                     print(f"- {case.get('id')}  {case.get('event_type')}  {case.get('order_id')}  {case.get('status')}")
+            except CliError as exc:
+                print(paint(f"error: {exc}", 'red'))
+            continue
+        if lowered == '/eval':
+            try:
+                data = client.request('GET', f'/v1/evals/summary?limit={args.limit}')
+                print_eval_summary(data, show_cases=False)
             except CliError as exc:
                 print(paint(f"error: {exc}", 'red'))
             continue
