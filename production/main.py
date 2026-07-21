@@ -202,6 +202,30 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
             'lessons_recorded','handoff','manual_review_required','worker_failure',
         }
     ]
+    action_evidence=tool_trace.get('action_evidence',{})
+    trace_summary=tool_trace.get('summary',{})
+    verification_complete=write_count==0 or (verification_passes>=write_count and verification_failures==0)
+    has_manual_handoff=any(kind in {'handoff','manual_review_required'} for kind in kinds)
+    task_succeeded=case.status=='resolved' or (case.status=='manual_review' and has_manual_handoff)
+    tool_selection_accuracy=(len(tool_events)-len(failed_tool_events))/len(tool_events) if tool_events else 1
+    if plan_actions:
+        grounded_actions=sum(1 for idx, action in enumerate(plan_actions,1) if action_evidence.get(str(idx)) or action_evidence.get(action.get('action_type')))
+        evidence_faithfulness=grounded_actions/len(plan_actions)
+    else:
+        evidence_faithfulness=1 if not any(kind=='evidence_grounding_failed' for kind in kinds) else 0
+    if any(kind=='evidence_grounding_failed' for kind in kinds):
+        evidence_faithfulness=0
+    replan_success=None
+    if 'replan_requested' in kinds:
+        replan_success=case.status in {'resolved','manual_review','waiting_approval'} and 'worker_failure' not in kinds
+    timestamps=[event.created_at for event in events if event.created_at]
+    if case.created_at:
+        timestamps.append(case.created_at)
+    if case.updated_at:
+        timestamps.append(case.updated_at)
+    duration_seconds=None
+    if timestamps:
+        duration_seconds=max(timestamps).timestamp()-min(timestamps).timestamp()
     return {
         'case_id':case.id,
         'event_type':case.event_type,
@@ -209,14 +233,17 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'status':case.status,
         'resolved':case.status=='resolved',
         'manual_review':case.status=='manual_review',
+        'task_succeeded':task_succeeded,
         'plan_version':case.plan_version,
         'action_count':len(plan_actions),
         'tool_call_count':len(tool_events),
         'scheduled_tool_call_count':len(scheduled_events),
         'tool_failure_count':len(failed_tool_events),
+        'tool_selection_accuracy':tool_selection_accuracy,
         'tool_scheduler_sources':scheduler_sources,
-        'tool_trace_summary':tool_trace.get('summary',{}),
-        'action_evidence':tool_trace.get('action_evidence',{}),
+        'tool_trace_summary':trace_summary,
+        'action_evidence':action_evidence,
+        'evidence_faithfulness':evidence_faithfulness,
         'approval_count':len(approvals),
         'pending_approval_count':sum(1 for approval in approvals if approval.status=='pending'),
         'expired_approval_count':sum(1 for approval in approvals if approval.status=='expired'),
@@ -224,7 +251,7 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'write_invocation_count':write_count,
         'verification_pass_count':verification_passes,
         'verification_failed_count':verification_failures,
-        'verification_complete':write_count==0 or (verification_passes>=write_count and verification_failures==0),
+        'verification_complete':verification_complete,
         'recovery_event_count':len(recovery_events),
         'blocked_event_count':len(blocked_events),
         'task_failure_count':sum(1 for task in tasks if task.status=='failed'),
@@ -234,9 +261,11 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'has_context_isolation_failure':'context_isolation_failed' in kinds,
         'has_context_isolation_sanitized':'context_isolation_sanitized' in kinds,
         'has_replan':'replan_requested' in kinds,
+        'replan_success':replan_success,
         'has_approval_expired':'approval_expired' in kinds,
         'has_approval_revoked':'approval_revoked' in kinds,
-        'has_manual_handoff':any(kind in {'handoff','manual_review_required'} for kind in kinds),
+        'has_manual_handoff':has_manual_handoff,
+        'duration_seconds':duration_seconds,
         'stage_sequence':stage_sequence,
         'event_kinds':kinds,
     }
@@ -244,33 +273,53 @@ def eval_summary_out(rows):
     total=len(rows)
     resolved=sum(1 for row in rows if row['resolved'])
     manual=sum(1 for row in rows if row['manual_review'])
+    task_successes=sum(1 for row in rows if row.get('task_succeeded'))
     writes=sum(row['write_invocation_count'] for row in rows)
+    write_cases=sum(1 for row in rows if row['write_invocation_count']>0)
     verified=sum(1 for row in rows if row['write_invocation_count']>0 and row['verification_complete'])
     tool_calls=sum(row.get('tool_call_count',0) for row in rows)
+    scheduled_tool_calls=sum(row.get('scheduled_tool_call_count',0) for row in rows)
     tool_failures=sum(row.get('tool_failure_count',0) for row in rows)
+    replanned=[row for row in rows if row.get('has_replan')]
+    durations=[row.get('duration_seconds') for row in rows if isinstance(row.get('duration_seconds'),(int,float))]
+    grounding_applicable=[row for row in rows if row.get('action_count',0)>0 or row.get('has_evidence_grounding_passed') or row.get('has_evidence_grounding_failure')]
+    context_failures=sum(1 for row in rows if row.get('has_context_isolation_failure'))
     return {
         'total_cases':total,
         'resolved_cases':resolved,
         'manual_review_cases':manual,
+        'task_success_cases':task_successes,
+        'task_success_rate':task_successes/total if total else 0,
         'case_resolution_rate':resolved/total if total else 0,
         'avg_read_tool_calls':tool_calls/total if total else 0,
+        'avg_scheduled_tool_calls':scheduled_tool_calls/total if total else 0,
+        'avg_duration_seconds':sum(durations)/len(durations) if durations else None,
+        'tool_selection_accuracy':sum(row.get('tool_selection_accuracy',1) for row in rows)/total if total else 0,
         'tool_failure_rate':tool_failures/tool_calls if tool_calls else 0,
         'tool_failures':tool_failures,
+        'planner_coverage_rate':sum(1 for row in rows if row.get('action_count',0)>0 or row.get('has_manual_handoff'))/total if total else 0,
+        'avg_action_count':sum(row.get('action_count',0) for row in rows)/total if total else 0,
+        'evidence_faithfulness_rate':sum(row.get('evidence_faithfulness',1) for row in grounding_applicable)/len(grounding_applicable) if grounding_applicable else 1,
         'approval_waiting_cases':sum(1 for row in rows if row.get('pending_approval_count',0)>0),
         'approval_expired_cases':sum(1 for row in rows if row.get('expired_approval_count',0)>0 or row.get('has_approval_expired')),
         'approval_revoked_cases':sum(1 for row in rows if row.get('revoked_approval_count',0)>0 or row.get('has_approval_revoked')),
-        'cases_with_writes':sum(1 for row in rows if row['write_invocation_count']>0),
+        'cases_with_writes':write_cases,
         'verified_write_cases':verified,
-        'verification_pass_rate':verified/sum(1 for row in rows if row['write_invocation_count']>0) if any(row['write_invocation_count']>0 for row in rows) else 1,
+        'verification_pass_rate':verified/write_cases if write_cases else 1,
         'write_invocations':writes,
         'verification_failures':sum(row['verification_failed_count'] for row in rows),
         'policy_denials':sum(1 for row in rows if row['has_policy_denial']),
         'evidence_grounding_passed_cases':sum(1 for row in rows if row.get('has_evidence_grounding_passed')),
         'evidence_grounding_failures':sum(1 for row in rows if row.get('has_evidence_grounding_failure')),
+        'evidence_grounding_pass_rate':sum(1 for row in rows if row.get('has_evidence_grounding_passed'))/len(grounding_applicable) if grounding_applicable else 1,
         'context_isolation_sanitized_cases':sum(1 for row in rows if row.get('has_context_isolation_sanitized')),
-        'context_isolation_failures':sum(1 for row in rows if row.get('has_context_isolation_failure')),
-        'replanned_cases':sum(1 for row in rows if row['has_replan']),
+        'context_isolation_failures':context_failures,
+        'context_isolation_pass_rate':(total-context_failures)/total if total else 1,
+        'replanned_cases':len(replanned),
+        'replan_success_cases':sum(1 for row in replanned if row.get('replan_success')),
+        'replan_success_rate':sum(1 for row in replanned if row.get('replan_success'))/len(replanned) if replanned else None,
         'manual_handoff_cases':sum(1 for row in rows if row['has_manual_handoff']),
+        'safe_stop_rate':sum(1 for row in rows if row.get('has_manual_handoff') and not row.get('resolved'))/manual if manual else None,
         'task_failures':sum(row['task_failure_count'] for row in rows),
         'cases':rows,
     }

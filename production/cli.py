@@ -485,34 +485,29 @@ def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
     resolved = data.get('resolved_cases', 0)
     manual = data.get('manual_review_cases', 0)
     waiting = data.get('approval_waiting_cases', 0)
-    writes = data.get('cases_with_writes', 0)
-    verified = data.get('verified_write_cases', 0)
 
     print('ResolveOps Eval Summary')
     print(f"cases: total={total} resolved={resolved} manual_review={manual} waiting_approval={waiting}")
     print(
-        f"rates: resolution={fmt_percent(data.get('case_resolution_rate'))} "
-        f"verification={fmt_percent(data.get('verification_pass_rate'))} "
-        f"tool_failure={fmt_percent(data.get('tool_failure_rate'))}"
+        f"core: task_success={fmt_percent(data.get('task_success_rate'))} "
+        f"resolution={fmt_percent(data.get('case_resolution_rate'))} "
+        f"tool_selection={fmt_percent(data.get('tool_selection_accuracy'))} "
+        f"evidence_faithfulness={fmt_percent(data.get('evidence_faithfulness_rate'))} "
+        f"verification={fmt_percent(data.get('verification_pass_rate'))}"
+    )
+    replan_success = data.get('replan_success_rate')
+    replan_success_text = 'n/a' if replan_success is None else fmt_percent(replan_success)
+    avg_duration = data.get('avg_duration_seconds')
+    duration_text = 'n/a' if not isinstance(avg_duration, (int, float)) else f'{avg_duration:.2f}s'
+    print(
+        f"efficiency: avg_read_calls={data.get('avg_read_tool_calls', 0):.2f} "
+        f"avg_duration={duration_text} replan_success={replan_success_text}"
     )
     print(
-        f"tools: avg_read_calls={data.get('avg_read_tool_calls', 0):.2f} "
-        f"tool_failures={data.get('tool_failures', 0)}"
-    )
-    print(
-        f"governance: write_cases={writes} verified_write_cases={verified} "
-        f"policy_denials={data.get('policy_denials', 0)}"
-    )
-    print(
-        f"recovery: replanned_cases={data.get('replanned_cases', 0)} "
-        f"manual_handoff_cases={data.get('manual_handoff_cases', 0)} "
+        f"diagnostics: grounding_failures={data.get('evidence_grounding_failures', 0)} "
+        f"policy_denials={data.get('policy_denials', 0)} "
+        f"context_failures={data.get('context_isolation_failures', 0)} "
         f"task_failures={data.get('task_failures', 0)}"
-    )
-    print(
-        f"context: sanitized={data.get('context_isolation_sanitized_cases', 0)} "
-        f"failures={data.get('context_isolation_failures', 0)} "
-        f"grounding_passed={data.get('evidence_grounding_passed_cases', 0)} "
-        f"grounding_failures={data.get('evidence_grounding_failures', 0)}"
     )
     if show_cases:
         cases = data.get('cases') or []
@@ -520,11 +515,11 @@ def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
         for row in cases:
             print(
                 f"- {row.get('case_id')} {row.get('event_type')} {row.get('order_id')} "
-                f"status={row.get('status')} tools={row.get('tool_call_count', 0)} "
-                f"writes={row.get('write_invocation_count', 0)} "
+                f"status={row.get('status')} success={row.get('task_succeeded')} "
+                f"tools={row.get('tool_call_count', 0)} "
+                f"faithfulness={fmt_percent(row.get('evidence_faithfulness'))} "
                 f"replan={row.get('has_replan', False)}"
             )
-
 
 def compact_stage_sequence(sequence: list[Any]) -> list[str]:
     milestones = []
@@ -553,14 +548,22 @@ def print_eval_case(data: dict[str, Any], show_events: bool = False) -> None:
         f"plan_version={data.get('plan_version')}"
     )
     print(
-        f"outcome: resolved={data.get('resolved')} manual_review={data.get('manual_review')} "
+        f"outcome: task_succeeded={data.get('task_succeeded')} "
+        f"resolved={data.get('resolved')} manual_review={data.get('manual_review')} "
         f"verification={verification_status}"
     )
     print(
         f"tools: observed={data.get('tool_call_count', 0)} "
         f"scheduled={data.get('scheduled_tool_call_count', 0)} "
         f"failed={data.get('tool_failure_count', 0)} "
+        f"selection_accuracy={fmt_percent(data.get('tool_selection_accuracy'))} "
         f"unique={', '.join(trace.get('tools_used') or []) or 'none'}"
+    )
+    duration = data.get('duration_seconds')
+    duration_text = 'n/a' if not isinstance(duration, (int, float)) else f'{duration:.2f}s'
+    print(
+        f"agent_quality: evidence_faithfulness={fmt_percent(data.get('evidence_faithfulness'))} "
+        f"replan_success={data.get('replan_success')} duration={duration_text}"
     )
     if scheduler_sources:
         sources = ', '.join(f'{key}={value}' for key, value in sorted(scheduler_sources.items()))

@@ -82,25 +82,19 @@ python resolveops.py eval case <case-id> --events
 
 ## Metrics
 
-| Metric | Source of truth |
-|---|---|
-| Case Resolution Rate | `cases.status == resolved` |
-| Manual Review Cases | `cases.status == manual_review` |
-| Average Read Tool Calls | `tool_observation` events per Case |
-| Tool Failure Rate | failed `ToolResult` / total read-tool observations |
-| Approval Waiting Cases | pending `approvals` |
-| Approval Expired / Revoked Cases | approval records plus `approval_expired` / `approval_revoked` events |
-| Write Invocation Count | `tool_invocations` |
-| Verification Pass Rate | write invocations plus `verification_passed` / `verification_failed` events |
-| Recovery Count | `replan_requested`, `task_requeued`, `manual_review_required` events |
-| Policy Denial Count | `policy_denied` events |
-| Evidence Grounding Pass Count | `evidence_grounding_passed` events |
-| Evidence Grounding Failure Count | `evidence_grounding_failed` events |
-| Context Isolation Count | `context_isolation_sanitized` / `context_isolation_failed` events |
-| Manual Handoff Count | `handoff`, `manual_review_required` events |
-| Task Failure Count | failed `tasks` |
+ResolveOps keeps the public evaluation surface intentionally small. The goal is to prove Agent behavior, not to flood the project with vanity metrics.
 
-Resolution rate is not the only quality signal. A fault-injection Case may correctly end in `manual_review` if the safe outcome is to stop instead of writing stale business data.
+| Core metric | Source of truth | What it proves |
+|---|---|---|
+| Task Success Rate | Case is `resolved`, or reaches deliberate `manual_review` through handoff | The Agent either solves the Case or stops safely instead of hallucinating success |
+| Tool Selection Accuracy | successful read-tool observations / all read-tool observations | The Agent selected usable tools and did not keep making failed tool calls |
+| Evidence Faithfulness | executable actions linked to Evidence Grounding and `action_evidence` | The plan is supported by observed tool evidence, not only model text |
+| Verification Pass Rate | write invocations plus `verification_passed` / `verification_failed` events | Real business writes are checked by reading the source system again |
+| Recovery Efficiency | Replan success rate, average read-tool calls, average Case duration | The Agent can recover from state changes without excessive tool calls or latency |
+
+Auxiliary diagnostics are still returned for debugging and interview follow-up: policy denials, context isolation failures, approval expiry/revocation, task failures, grounding failures and manual handoffs.
+
+Do not claim “95% accuracy” before a fixed 30-50 Case benchmark dataset exists. Current metrics are execution-derived reliability metrics, suitable for regression testing and project demonstration.
 
 ## Per-Case evaluation
 
