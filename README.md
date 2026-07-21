@@ -313,7 +313,7 @@ Inside `chat`, use:
 /exit            leave chat
 ```
 
-Top-level `chat` is intentionally no-tool by default. It can explain ResolveOps, guide usage, and create or select Cases through explicit commands. Case-specific business questions should enter `/case <case-id>` so Case context stays isolated.
+Top-level `chat` is an operator-level LLM conversation without ERP tools. It can explain ResolveOps, guide usage, and create or select Cases through explicit slash commands. Case-specific business questions should enter `/case <case-id>` so Case context stays isolated. If the LLM provider is unavailable, ResolveOps returns a bounded fallback answer instead of calling tools or guessing business facts.
 
 You can also call Case commands directly:
 

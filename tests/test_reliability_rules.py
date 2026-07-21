@@ -24,7 +24,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from production.context import CaseContextBuilder, build_case_context, validate_case_context_isolation
-from production.main import CaseAskIn, CaseCreateIn, FaultInjectionRunIn, LogisticsLaneIn, OperatorIdentity, ask_case, audit_out, case_tool_trace, create_case, eval_case, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_fault_injection_enabled, require_role, run_fault_injection
+from production.main import CaseAskIn, CaseCreateIn, FaultInjectionRunIn, LogisticsLaneIn, OperatorChatIn, OperatorIdentity, ask_case, audit_out, case_tool_trace, create_case, eval_case, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_fault_injection_enabled, require_role, run_fault_injection
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
 import production.migrations as migration_module
 from production.migrations import apply_migrations, ensure_schema_migrations_table
@@ -1693,6 +1693,59 @@ def test_case_ask_endpoint_records_read_only_answer(monkeypatch):
     assert [event.kind for event in events] == ['case_question_asked', 'case_question_tool_observation', 'case_question_answered']
     assert approvals == []
     assert invocations == []
+
+
+def test_operator_chat_endpoint_uses_llm_agent_and_audits(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+
+    class FakeOperatorChatAgent:
+        def answer(self, question):
+            return {
+                'question': question,
+                'answer': 'LLM-level operator answer.',
+                'source': 'llm',
+                'tools_used': [],
+                'llm': {'status': 'success', 'model': 'test-model'},
+            }
+
+    monkeypatch.setattr(main_module, 'OperatorChatAgent', FakeOperatorChatAgent)
+    with Session(engine) as db:
+        db.add(Operator(
+            tenant_id='demo',
+            subject='ops',
+            role='ops_admin',
+            api_key_hash=operator_key_hash('ops-key'),
+            status='active',
+        ))
+        db.commit()
+
+    result = main_module.operator_chat(OperatorChatIn(question='Who are you?'), x_operator_key='ops-key')
+
+    assert result['answer'] == 'LLM-level operator answer.'
+    assert result['source'] == 'llm'
+    assert result['tools_used'] == []
+    with Session(engine) as db:
+        logs = db.scalars(select(AuditLog)).all()
+    assert len(logs) == 1
+    assert logs[0].action == 'operator_chat_answered'
+    assert logs[0].case_id is None
+
+
+def test_operator_chat_agent_falls_back_when_llm_is_unavailable():
+    from production.operator_chat import OperatorChatAgent
+
+    class BrokenLLM:
+        def chat(self, payload):
+            return LLMResult(status='failed', error_code='llm_not_configured', error_type='ConfigurationError')
+
+    result = OperatorChatAgent(BrokenLLM()).answer('hello')
+
+    assert result['source'] == 'fallback'
+    assert result['tools_used'] == []
+    assert result['llm']['error_code'] == 'llm_not_configured'
+    assert 'ResolveOps' in result['answer']
 
 
 def test_eval_summary_counts_recovery_and_failure_signals():

@@ -781,41 +781,9 @@ def cmd_case_chat(args: argparse.Namespace, client: ApiClient) -> int:
         print_case_answer(data, verbose=args.verbose, show_case=False, show_question=False)
 
 
-def answer_operator_question(question: str) -> str:
-    normalized = question.lower().strip()
-    if any(token in normalized for token in {'你好', 'hello', 'hi', '你是谁'}):
-        return (
-            '我是 ResolveOps，一个面向订单履约异常处理的企业级 Agent。'
-            '你可以让我解释项目、查看 Case、创建新 Case，或进入某个 Case 后分析异常。'
-        )
-    if '能做什么' in normalized or 'what can you do' in normalized:
-        return (
-            '我可以处理三类入口任务：1）解释 ResolveOps 的设计和能力；'
-            '2）通过 /new 创建订单异常 Case；3）通过 /case <case-id> 进入具体 Case，'
-            '查看工具调用、证据、审批、执行和验证过程。'
-        )
-    if '项目' in normalized or '干什么' in normalized or 'resolveops' in normalized:
-        return (
-            'ResolveOps 不是普通客服机器人，而是订单履约异常处置 Agent。'
-            '它围绕业务 Case 收集证据、规划方案、经过权限和审批控制后执行动作，并做结果验证。'
-        )
-    if '客服' in normalized or '区别' in normalized:
-        return (
-            '普通客服机器人主要回答问题；ResolveOps 的核心是处理业务异常 Case。'
-            '它会调用企业系统只读工具收集证据，并在受控审批后执行写操作，最后验证真实业务状态。'
-        )
-    if looks_like_case_creation(question):
-        return '你可以输入 /new 创建一个新的订单异常 Case。我会依次询问异常类型、订单号和原因。'
-    return (
-        '这是 ResolveOps 顶层对话窗口。当前不绑定具体 Case，也不会调用业务工具。'
-        '如果要创建异常，请输入 /new；如果要分析某个 Case，请输入 /case <case-id>；'
-        '如果要查看已有 Case，请输入 /cases。'
-    )
-
-
 def cmd_chat(args: argparse.Namespace, client: ApiClient) -> int:
     print(paint('ResolveOps Chat', 'green'))
-    print('Operator-level chat. No ERP tools are called here.')
+    print('Operator-level LLM chat. No ERP tools are called here.')
     print_operator_chat_help()
     prompt = f"{paint('[You]', 'yellow')} resolveops> "
     while True:
@@ -858,8 +826,15 @@ def cmd_chat(args: argparse.Namespace, client: ApiClient) -> int:
             case_id = text.split(maxsplit=1)[1].strip()
             nested_args = argparse.Namespace(case_id=case_id, events=args.events, verbose=args.verbose)
             return cmd_case_chat(nested_args, client)
-        print(f"\n{paint('[Answer]', 'blue')}")
-        print(answer_operator_question(text))
+        try:
+            data = client.request('POST', '/v1/chat', {'question': text})
+        except CliError as exc:
+            print(paint(f"error: {exc}", 'red'))
+            continue
+        source = data.get('source')
+        suffix = f" {paint(f'({source})', 'dim')}" if source else ''
+        print(f"\n{paint('[Answer]', 'blue')}{suffix}")
+        print(data.get('answer') or '')
 
 
 def cmd_fi_list(args: argparse.Namespace, client: ApiClient) -> int:

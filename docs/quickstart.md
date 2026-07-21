@@ -117,7 +117,7 @@ python resolveops.py chat
 python resolveops.py eval summary --limit 20
 ```
 
-Inside `chat`, use `/new` to create a Case, `/cases` to list recent Cases, and `/case <case-id>` to enter a Case-scoped Agent chat. Top-level chat does not call ERP tools; Case-specific business questions should enter one Case first.
+Inside `chat`, use `/new` to create a Case, `/cases` to list recent Cases, and `/case <case-id>` to enter a Case-scoped Agent chat. Top-level chat is an operator-level LLM conversation without ERP tools; Case-specific business questions should enter one Case first.
 
 Run tests:
 

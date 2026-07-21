@@ -390,13 +390,25 @@ def test_cli_case_chat_loops_over_case_scoped_questions(monkeypatch, capsys):
 
 
 def test_cli_top_level_chat_answers_without_case(monkeypatch, capsys):
-    inputs = iter(['你好', '我要创建一个库存不足case', '/exit'])
+    calls = []
+    inputs = iter(['hello', '/exit'])
 
     def fake_input(prompt):
         print(prompt, end='')
         return next(inputs)
 
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json})
+        return FakeResponse(data={
+            'question': json['question'],
+            'answer': 'LLM says hello from ResolveOps.',
+            'source': 'llm',
+            'tools_used': [],
+            'llm': {'status': 'success'},
+        })
+
     monkeypatch.setattr('builtins.input', fake_input)
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
     result = cli.main([
         '--base-url', 'http://api.local',
         '--operator-key', 'ops-key',
@@ -404,11 +416,17 @@ def test_cli_top_level_chat_answers_without_case(monkeypatch, capsys):
     ])
 
     assert result == 0
+    assert calls == [{
+        'method': 'POST',
+        'url': 'http://api.local/v1/chat',
+        'headers': {'X-Operator-Key': 'ops-key'},
+        'json': {'question': 'hello'},
+    }]
     out = capsys.readouterr().out
     assert 'ResolveOps Chat' in out
     assert '[You] resolveops>' in out
-    assert '我是 ResolveOps' in out
-    assert '/new 创建一个新的订单异常 Case' in out
+    assert '(llm)' in out
+    assert 'LLM says hello from ResolveOps.' in out
 
 
 def test_cli_top_level_chat_lists_cases(monkeypatch, capsys):

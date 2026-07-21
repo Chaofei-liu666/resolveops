@@ -23,6 +23,7 @@ from .tool_trace import build_tool_trace
 from .erpnext import ERPNextAdapter
 from .case_ask import CaseQuestionAgent
 from .context import CaseContextBuilder, validate_case_context_isolation
+from .operator_chat import OperatorChatAgent
 from .tools import BusinessReadTools
 
 SUPPORTED_EVENTS={'inventory_shortage','price_mismatch','delivery_delay','supplier_delay'}
@@ -48,6 +49,9 @@ class CaseCreateIn(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 class CaseAskIn(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+
+class OperatorChatIn(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
 
 class FaultInjectionRunIn(BaseModel):
@@ -415,6 +419,20 @@ def ask_case(case_id:str, payload: CaseAskIn, x_operator_key:str|None=Header(def
             'order_id':case.order_id,
             **answer,
         }
+
+@app.post('/v1/chat')
+def operator_chat(payload: OperatorChatIn, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        answer=OperatorChatAgent().answer(payload.question)
+        audit(db,identity,'operator_chat_answered','operator_chat',identity.subject,{
+            'question':payload.question,
+            'source':answer.get('source'),
+            'tools_used':answer.get('tools_used') or [],
+            'llm':answer.get('llm') or {},
+        })
+        db.commit()
+        return answer
 @app.get('/v1/config/logistics-lanes')
 def logistics_lanes(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), tenant_id:str='demo', active:bool|None=None):
     with Session(engine) as db:
