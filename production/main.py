@@ -329,7 +329,13 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
     task_succeeded=case.status=='resolved' or (case.status=='manual_review' and has_manual_handoff)
     tool_selection_accuracy=(len(tool_events)-len(failed_tool_events))/len(tool_events) if tool_events else 1
     if plan_actions:
-        grounded_actions=sum(1 for idx, action in enumerate(plan_actions,1) if action_evidence.get(str(idx)) or action_evidence.get(action.get('action_type')))
+        grounded_actions=sum(
+            1
+            for idx, action in enumerate(plan_actions,1)
+            if action_evidence.get(str(idx))
+            or action_evidence.get(action.get('action_id'))
+            or action_evidence.get(action.get('action_type'))
+        )
         evidence_faithfulness=grounded_actions/len(plan_actions)
     else:
         evidence_faithfulness=1 if not any(kind=='evidence_grounding_failed' for kind in kinds) else 0
