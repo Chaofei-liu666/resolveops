@@ -298,6 +298,8 @@ The launcher does not rebuild images every time. After changing backend code, ru
 docker compose up -d --build api worker
 ```
 
+For a short non-interactive screen recording, double-click `demo-record.cmd`. It starts services if needed and runs a scripted CLI demo without approving write actions.
+
 Check runtime:
 
 ```powershell
@@ -467,11 +469,15 @@ These can be added later if the use case justifies them. The current focus is re
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Architecture diagram](docs/architecture-diagram.md)
 - [Quickstart](docs/quickstart.md)
+- [CLI demo script](docs/demo-script.md)
 - [Runbook](docs/runbook.md)
 - [Deployment safety checklist](docs/deployment.md)
 - [Production readiness assessment](docs/production-readiness.md)
 - [Reliability evaluation and fault injection](docs/evals.md)
+- [Evaluation results](docs/evaluation-results.md)
+- [Interview guide](docs/interview-guide.md)
 - [Interview notes](docs/interview-notes.md)
 
 ## Security
