@@ -724,7 +724,7 @@ def cmd_init(args: argparse.Namespace, client: ApiClient | None = None) -> int:
         created_file = True
 
     print(paint('ResolveOps CLI', 'green'))
-    print('API-first Agent for enterprise order exception handling.')
+    print('API-first helper for order exception cases.')
     print()
     print(paint('[Init]', 'blue') + ' Checking local CLI config...')
     dir_status = 'created' if created_dir else 'exists'
@@ -1075,7 +1075,7 @@ def cmd_eval_case(args: argparse.Namespace, client: ApiClient) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog='resolveops', description='ResolveOps API-first Agent CLI')
+    parser = argparse.ArgumentParser(prog='resolveops', description='ResolveOps CLI')
     parser.add_argument('--base-url', default=None, help='ResolveOps API base URL')
     parser.add_argument('--operator-key', default=None, help='Operator API key')
     parser.add_argument('--json', action='store_true', help='Print raw JSON response')

@@ -13,7 +13,7 @@ from .config import settings
 from .llm_gateway import LLMGateway, LLMResult
 
 
-OPERATOR_CHAT_SYSTEM = """You are ResolveOps, an enterprise Agent for order fulfillment exception handling.
+OPERATOR_CHAT_SYSTEM = """You are ResolveOps, a CLI assistant for order fulfillment exception cases.
 You are in the operator-level chat before a specific Case is selected.
 This top-level chat is allowed to behave like a normal assistant for harmless no-tool conversation: explanation, writing, lightweight math, technical discussion, project Q&A, and creative requests are allowed.
 Boundary: no ERP tools are available here, no business writes are allowed, and you must not claim live ERP or Case facts that were not provided.
@@ -76,7 +76,7 @@ def fallback_operator_answer(question: str) -> str:
     normalized = question.lower().strip()
     if any(token in normalized for token in {'你好', 'hello', 'hi', '你是谁'}):
         return (
-            '我是 ResolveOps，一个面向订单履约异常处理的企业级 Agent。'
+            '我是 ResolveOps，一个用于订单履约异常处理的 CLI 助手。'
             '你可以让我解释项目、查看 Case、创建新 Case，或进入某个 Case 后分析异常。'
         )
     if '能做什么' in normalized or 'what can you do' in normalized:
@@ -87,7 +87,7 @@ def fallback_operator_answer(question: str) -> str:
         )
     if '项目' in normalized or '干什么' in normalized or 'resolveops' in normalized:
         return (
-            'ResolveOps 是订单履约异常处置 Agent。它围绕业务 Case 收集证据、规划方案，'
+            'ResolveOps 用来处理订单履约异常。它围绕业务 Case 收集证据、规划方案，'
             '经过权限和审批控制后执行动作，并做结果验证。'
         )
     if '客服' in normalized or '区别' in normalized:

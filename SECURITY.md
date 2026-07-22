@@ -1,13 +1,13 @@
 # Security Policy
 
-ResolveOps is a production-oriented Agent reference project, not a certified production ERP automation product.
+ResolveOps is a sandbox-ready Agent project, not a certified production ERP automation product.
 
 ## Supported usage
 
 Current supported usage:
 
 - local development;
-- job/project demonstration;
+- technical project review;
 - ERPNext sandbox testing;
 - controlled staging experiments.
 

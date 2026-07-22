@@ -1,6 +1,6 @@
 # ResolveOps architecture
 
-ResolveOps is an API-first Agent runtime for enterprise business exception handling.
+ResolveOps is an API-first Agent runtime for order fulfillment exception handling.
 
 It is not designed as a generic ERP Agent. ERPNext is the current reference sandbox and adapter target, but the main architectural boundaries are business-tool oriented and can be adapted to other systems.
 

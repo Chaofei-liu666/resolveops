@@ -1,6 +1,6 @@
 # ResolveOps reliability evaluation and fault injection
 
-ResolveOps evaluates Agent behavior from real execution trails.
+ResolveOps evaluates Agent behavior from stored Case execution trails.
 
 The goal is not to score whether the final text "sounds right". The goal is to verify whether the Agent safely handled a business Case:
 
@@ -40,7 +40,7 @@ docker compose --profile test run --rm test
 Latest local regression during development:
 
 ```text
-79 passed, 1 skipped
+105 passed, 1 skipped
 ```
 
 Representative unit risks:
@@ -85,7 +85,7 @@ python resolveops.py eval case <case-id> --events
 
 Do not use old debugging Cases as final project metrics. Historical Cases may mix early code versions, failed local setup attempts, manual fault injections and old event formats.
 
-For portfolio or resume numbers, create a fixed suite and only report metrics from that suite:
+For reported metrics, create a fixed suite and only report numbers from that suite:
 
 ```powershell
 python resolveops.py eval seed --suite core-v1 --order SAL-ORD-2026-00002
@@ -117,7 +117,7 @@ Some scenarios still require a scenario operation after seeding, such as approva
 
 ## Metrics
 
-ResolveOps keeps the public evaluation surface intentionally small. The goal is to prove Agent behavior, not to flood the project with vanity metrics.
+ResolveOps keeps the evaluation surface intentionally small. The goal is to check behavior, not to collect vanity metrics.
 
 The evaluation is split into three layers:
 
@@ -352,7 +352,7 @@ A sandbox evaluation dataset may contain:
 
 Therefore, a lower resolution rate does not automatically mean the Agent is weak.
 
-For enterprise Agents, safe stopping is a valid outcome when:
+Safe stopping is a valid outcome when:
 
 - required evidence is missing;
 - tool output is contradictory;

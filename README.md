@@ -1,11 +1,11 @@
 # ResolveOps
 
-ResolveOps is an API-first enterprise Agent for handling long-tail business exceptions.
+ResolveOps is a small API-first Agent runtime for order fulfillment exceptions.
 
-It is not an ERP chatbot and it is not a generic workflow demo. The core problem it targets is:
+The project starts from a narrow problem:
 
 ```text
-An enterprise system has already detected an exception.
+An ERP system has already detected an exception.
 The normal deterministic workflow cannot safely decide the next step.
 ResolveOps investigates, proposes an evidence-grounded plan, requests approval when needed,
 executes controlled actions, and verifies the final business state.
@@ -13,7 +13,7 @@ executes controlled actions, and verifies the final business state.
 
 Current reference integration: ERPNext.
 
-ERPNext is used as a real open-source ERP sandbox and system of record. The Agent architecture is intentionally not ERPNext-specific: read tools, action schemas, policy checks, approval binding, executors and verifiers can be adapted to SAP, WMS, CRM, ticketing systems, procurement systems, or internal platforms.
+ERPNext is used as the current open-source ERP sandbox and system of record. The code keeps the ERPNext adapter behind tool/action boundaries so the same runtime shape can be adapted to other business systems later.
 
 ## Why this project exists
 
@@ -35,9 +35,9 @@ order cannot be fulfilled
 -> did the external system actually change?
 ```
 
-That boundary is important. The project demonstrates how to build an Agent that can work with real business systems without giving the model uncontrolled write access.
+That boundary is the main design choice: the model can investigate and propose, but write access is still controlled by deterministic code.
 
-## What it demonstrates
+## Current coverage
 
 - Case-based durable execution, not one-off chat completion.
 - Read-only business tools exposed by schema and case type.
@@ -56,7 +56,7 @@ That boundary is important. The project demonstrates how to build an Agent that 
 - Context isolation across multiple Cases.
 - Lightweight verified lessons from successful Cases.
 - Fault injection against ERPNext sandbox data.
-- CLI-first operator/developer experience.
+- CLI-first operator/developer workflow.
 - Runtime status and execution evaluation APIs.
 
 ## Supported exception types
@@ -366,7 +366,7 @@ python resolveops.py eval case <case-id>
 python resolveops.py eval case <case-id> --events
 ```
 
-Use `--suite` for final portfolio metrics. Do not report numbers from a mixed historical database because it may include early debugging Cases, setup failures and old event formats.
+Use `--suite` for reported metrics. Do not report numbers from a mixed historical database because it may include early debugging Cases, setup failures and old event formats.
 
 Run fault injection in local/test/staging:
 
@@ -434,16 +434,16 @@ docker compose --profile test run --rm test
 Latest local regression during development:
 
 ```text
-79 passed, 1 skipped
+105 passed, 1 skipped
 ```
 
-## Production status
+## Current status
 
 ResolveOps is currently suitable for:
 
 ```text
 local development
-job/project demonstration
+technical project review
 ERPNext sandbox runs
 ```
 
@@ -462,7 +462,7 @@ ResolveOps intentionally avoids:
 - direct LLM access to ERP write APIs;
 - cloud deployment instructions in the main path.
 
-These can be added later if the use case justifies them. The current focus is reliable Agent execution against a real business system.
+These can be added later if the use case justifies them. The current focus is reliable execution against a real ERP sandbox.
 
 ## Documentation
 

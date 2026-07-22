@@ -14,7 +14,7 @@ production
 
 ### local
 
-用于本地开发和求职项目演示。
+用于本地开发和项目评审。
 
 允许：
 
@@ -261,7 +261,7 @@ docker compose down
 当前 ResolveOps 状态：
 
 ```text
-本地演示 / 求职展示：可以
+本地演示 / 技术项目评审：可以
 ERPNext 沙箱试运行：可以
 真实生产上线：暂不建议
 ```
