@@ -390,6 +390,7 @@ ResolveOps evaluates Agent behavior from actual execution trails:
 | Verification pass rate | Whether write Cases were independently verified |
 | Average read tool calls | How much investigation the Agent performed |
 | Tool failure rate | How often read tools failed |
+| Argument correctness | Whether planned action parameters match observed ERP/tool evidence |
 | Replanned Cases | Whether the Agent recovered from changed business state |
 | Manual handoff Cases | Whether the Agent stopped instead of guessing |
 | Policy denials | Whether unsafe actions were blocked |

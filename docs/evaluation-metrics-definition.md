@@ -135,6 +135,7 @@ Safe Handoff Rate
 Evidence Faithfulness
 Verification Pass Rate
 Tool Selection Accuracy
+Argument Correctness
 Unsafe Continuation Count
 Avg LLM Latency / Avg Queue Wait
 ```
@@ -713,7 +714,55 @@ ERPNext API 不可用
 
 ---
 
-### 5.3 Duplicate Tool Call Count
+### 5.3 Argument Correctness
+
+公式：
+
+```text
+argument_correctness =
+  valid_action_arguments / total_action_arguments_checked
+```
+
+当前实现：
+
+```text
+对每个 Case 的 Action Plan 重新执行 deterministic grounding validator。
+如果 Action 参数与真实工具观察一致，则计为正确；
+如果 SKU、仓库、数量、价格、供应商、日期等关键参数与证据不一致，则扣分。
+```
+
+参数含义：
+
+| 参数 | 含义 |
+|---|---|
+| `argument_correctness_rate` | 查询范围内 Action 参数正确率 |
+| `argument_checked_cases` | 发生 Action Plan、因此可以检查参数的 Case 数量 |
+| `argument_problem_cases` | 存在参数/证据不一致的 Case 数量 |
+
+示例：
+
+```text
+argument_correctness = 70.0%
+```
+
+含义：
+
+> Agent 不只是选对工具，还要把正确的业务参数传给工具，例如正确的 SKU、仓库、数量、价格差异、供应商和日期。
+
+为什么和 Tool Selection Accuracy 分开：
+
+```text
+Tool Selection Accuracy 关注“工具是否调用成功”。
+Argument Correctness 关注“工具参数是否和业务证据一致”。
+```
+
+面试解释：
+
+> 我把工具调用质量拆成两层：第一层是工具是否能成功执行，第二层是 LLM 生成的工具参数是否和 ERPNext 真实观察一致。后者用确定性规则校验，不依赖 LLM 自评。
+
+---
+
+### 5.4 Duplicate Tool Call Count
 
 公式：
 
@@ -749,7 +798,7 @@ get_inventory({"item_code":"SKU-A12","warehouse":"重庆仓 - ROPS"})
 
 ---
 
-### 5.4 Average Read Tool Calls
+### 5.5 Average Read Tool Calls
 
 公式：
 

@@ -554,6 +554,7 @@ def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
         f"core: task_success={fmt_percent(data.get('task_success_rate'))} "
         f"resolution={fmt_percent(data.get('case_resolution_rate'))} "
         f"tool_selection={fmt_percent(data.get('tool_selection_accuracy'))} "
+        f"argument_correctness={fmt_percent(data.get('argument_correctness_rate'))} "
         f"evidence_faithfulness={fmt_percent(data.get('evidence_faithfulness_rate'))} "
         f"verification={fmt_percent(data.get('verification_pass_rate'))}"
     )
@@ -596,6 +597,7 @@ def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
                 f"- {row.get('case_id')} {row.get('event_type')} {row.get('order_id')} "
                 f"status={row.get('status')} success={row.get('task_succeeded')} "
                 f"tools={row.get('tool_call_count', 0)} "
+                f"args={fmt_percent(row.get('argument_correctness'))} "
                 f"faithfulness={fmt_percent(row.get('evidence_faithfulness'))} "
                 f"replan={row.get('has_replan', False)}"
             )

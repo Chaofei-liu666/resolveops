@@ -23,6 +23,7 @@ from .tool_trace import build_tool_trace
 from .erpnext import ERPNextAdapter
 from .case_ask import CaseQuestionAgent
 from .context import CaseContextBuilder, validate_case_context_isolation
+from .evidence import validate_plan_grounding
 from .operator_chat import OperatorChatAgent
 from .tools import BusinessReadTools
 
@@ -292,6 +293,22 @@ def unsafe_continuation_count(kinds: list[str]) -> int:
         count+=1
     return count
 
+def argument_correctness_for_case(case: Case, plan_actions: list[dict[str, Any]]) -> tuple[float | None, list[str]]:
+    if not plan_actions:
+        return None, []
+    evidence=case.evidence if isinstance(case.evidence,dict) else {}
+    observations=evidence.get('observations') if isinstance(evidence.get('observations'),list) else []
+    plan=case.plan if isinstance(case.plan,dict) else {'actions':plan_actions}
+    if not observations:
+        return 0, ['missing observations for argument validation']
+    grounding=validate_plan_grounding(plan,observations,case.event_type)
+    problems=grounding.get('problems') or []
+    if not problems:
+        return 1, []
+    action_count=max(1,len(plan_actions))
+    problem_penalty=min(action_count,len(problems))/action_count
+    return max(0,1-problem_penalty), [str(problem) for problem in problems]
+
 def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], invocations: list[Invocation], tasks: list[Task]):
     kinds=[event.kind for event in events]
     plan_actions=(case.plan or {}).get('actions',[]) if isinstance(case.plan,dict) else []
@@ -346,6 +363,7 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         evidence_faithfulness=1 if not any(kind=='evidence_grounding_failed' for kind in kinds) else 0
     if any(kind=='evidence_grounding_failed' for kind in kinds):
         evidence_faithfulness=0
+    argument_correctness,argument_problems=argument_correctness_for_case(case,plan_actions)
     replan_success=None
     if 'replan_requested' in kinds:
         replan_success=case.status in {'resolved','manual_review','waiting_approval'} and 'worker_failure' not in kinds
@@ -411,6 +429,8 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'tool_trace_summary':trace_summary,
         'action_evidence':action_evidence,
         'evidence_faithfulness':evidence_faithfulness,
+        'argument_correctness':argument_correctness,
+        'argument_correctness_problems':argument_problems,
         'approval_count':len(approvals),
         'pending_approval_count':sum(1 for approval in approvals if approval.status=='pending'),
         'expired_approval_count':sum(1 for approval in approvals if approval.status=='expired'),
@@ -478,6 +498,7 @@ def eval_summary_out(rows):
     replanned=[row for row in rows if row.get('has_replan')]
     durations=[row.get('duration_seconds') for row in rows if isinstance(row.get('duration_seconds'),(int,float))]
     grounding_applicable=[row for row in rows if row.get('action_count',0)>0 or row.get('has_evidence_grounding_passed') or row.get('has_evidence_grounding_failure')]
+    argument_applicable=[row for row in rows if isinstance(row.get('argument_correctness'),(int,float))]
     context_failures=sum(1 for row in rows if row.get('has_context_isolation_failure'))
     trajectory_scores=[row.get('trajectory_quality_score') for row in rows if isinstance(row.get('trajectory_quality_score'),(int,float))]
     return {
@@ -510,6 +531,9 @@ def eval_summary_out(rows):
         'self_correction_cases':sum(1 for row in rows if row.get('self_correction_count',0)>0),
         'unsafe_continuation_cases':sum(1 for row in rows if row.get('unsafe_continuation_count',0)>0),
         'tool_selection_accuracy':sum(row.get('tool_selection_accuracy',1) for row in rows)/total if total else 0,
+        'argument_correctness_rate':sum(row.get('argument_correctness',0) for row in argument_applicable)/len(argument_applicable) if argument_applicable else 1,
+        'argument_checked_cases':len(argument_applicable),
+        'argument_problem_cases':sum(1 for row in argument_applicable if row.get('argument_correctness',1)<1),
         'tool_failure_rate':tool_failures/tool_calls if tool_calls else 0,
         'tool_failures':tool_failures,
         'planner_coverage_rate':sum(1 for row in rows if row.get('action_count',0)>0 or row.get('has_manual_handoff'))/total if total else 0,

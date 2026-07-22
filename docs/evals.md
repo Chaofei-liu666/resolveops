@@ -129,8 +129,9 @@ Task-level success
 
 | Core metric | Source of truth | What it proves |
 |---|---|---|
-| Task Success Rate | Case is `resolved`, or reaches deliberate `manual_review` through handoff | The Agent either solves the Case or stops safely instead of hallucinating success |
+| Task Success Rate | Case is `resolved`, reaches deliberate `manual_review` through handoff, or reaches `waiting_approval` with a policy-bound approval request | The Agent either solves the Case, safely escalates it, or produces a governed executable plan |
 | Tool Selection Accuracy | successful read-tool observations / all read-tool observations | The Agent selected usable tools and did not keep making failed tool calls |
+| Argument Correctness | planned action parameters checked against observed ERP/tool evidence | The Agent did not only choose a tool; it supplied correct SKU, warehouse, quantity, price, supplier or date parameters |
 | Evidence Faithfulness | executable actions linked to Evidence Grounding and `action_evidence` | The plan is supported by observed tool evidence, not only model text |
 | Verification Pass Rate | write invocations plus `verification_passed` / `verification_failed` events | Real business writes are checked by reading the source system again |
 | Recovery Efficiency | Replan success rate, average read-tool calls, average Case duration | The Agent can recover from state changes without excessive tool calls or latency |
