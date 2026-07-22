@@ -107,7 +107,8 @@ def investigate_with_agent(db, c, task_context):
             'error_code':(tool_result or {}).get('error_code') if isinstance(tool_result,dict) else None,
         })
         emit(db,c.id,'tool_observation',f'Agent called read tool: {name}.',{'tool':name,'arguments':args,'result':result,'tool_result':tool_result,'metadata':metadata})
-    conclusion=InvestigationAgent(tool_surface).run(c.order_id, observe, case_context)
+    agent=InvestigationAgent(tool_surface)
+    conclusion=agent.run(c.order_id, observe, case_context)
     previous_evidence=c.evidence
     c.evidence={'case_context':case_context,'observations':observations,'conclusion':conclusion,'replanning_context':task_context or None,'previous_evidence':previous_evidence if task_context else None}; proposals=conclusion.get('recommended_actions',[])
     emit(db,c.id,'agent_decision_trace','Agent produced an auditable decision summary from tool evidence.',{
@@ -123,7 +124,44 @@ def investigate_with_agent(db, c, task_context):
     grounding=validate_plan_grounding(plan,observations,c.event_type)
     c.evidence['tool_trace']=build_tool_trace(observations,plan,grounding)
     if not grounding['allowed']:
-        c.plan=plan; c.status='manual_review'; emit(db,c.id,'evidence_grounding_failed','Agent plan is not sufficiently supported by read-tool evidence.',grounding); return
+        repair_attempts=[]
+        for attempt in range(max(0,settings.agent_max_plan_repairs)):
+            emit(db,c.id,'plan_repair_requested','Evidence grounding failed; structured problems were sent back to the Agent for one bounded repair attempt.',{'attempt':attempt+1,'grounding':grounding,'failed_plan':plan})
+            repaired_conclusion=agent.repair_plan(c.order_id,observations,plan,grounding,case_context)
+            repair_record={
+                'attempt':attempt+1,
+                'status':repaired_conclusion.get('status'),
+                'plan_repair':repaired_conclusion.get('plan_repair') or {},
+                'llm_plan_repair':repaired_conclusion.get('llm_plan_repair') or {},
+                'missing_information':repaired_conclusion.get('missing_information') or [],
+            }
+            repair_attempts.append(repair_record)
+            repaired_proposals=repaired_conclusion.get('recommended_actions',[])
+            if repaired_conclusion.get('status')!='ready' or not repaired_proposals:
+                emit(db,c.id,'plan_repair_failed','Plan repair did not produce a safe executable proposal.',repair_record)
+                break
+            try:
+                repaired_plan=normalize_plan(repaired_proposals,repaired_conclusion.get('rationale',''),[f'E-{index+1:03d}' for index in range(len(observations))],action_types_for_case(c.event_type))
+            except (ValueError, TypeError) as exc:
+                repair_record['error']=str(exc)
+                emit(db,c.id,'plan_repair_failed','Plan repair output failed Action Plan validation.',repair_record)
+                break
+            repaired_grounding=validate_plan_grounding(repaired_plan,observations,c.event_type)
+            if repaired_grounding['allowed']:
+                conclusion=repaired_conclusion
+                plan=repaired_plan
+                grounding=repaired_grounding
+                c.evidence['conclusion']=conclusion
+                c.evidence['tool_trace']=build_tool_trace(observations,plan,grounding)
+                emit(db,c.id,'plan_repair_succeeded','Agent repaired its Action Plan after deterministic grounding feedback.',{'attempt':attempt+1,'grounding':grounding,'plan':plan})
+                break
+            repair_record['grounding']=repaired_grounding
+            grounding=repaired_grounding
+            plan=repaired_plan
+            c.evidence['tool_trace']=build_tool_trace(observations,plan,grounding)
+            emit(db,c.id,'plan_repair_failed','Repaired Action Plan still failed evidence grounding.',repair_record)
+        if not grounding['allowed']:
+            c.plan=plan; c.status='manual_review'; emit(db,c.id,'evidence_grounding_failed','Agent plan is not sufficiently supported by read-tool evidence after bounded repair.',{'grounding':grounding,'repair_attempts':repair_attempts}); return
     plan['evidence_grounding']=grounding
     emit(db,c.id,'evidence_grounding_passed','Agent plan passed deterministic evidence grounding.',grounding)
     for action in plan['actions']:

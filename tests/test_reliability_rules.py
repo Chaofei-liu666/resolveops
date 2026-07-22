@@ -448,6 +448,62 @@ def test_planner_schema_repair_failure_preserves_safe_handoff():
     assert conclusion['schema_repair']['status'] == 'failed'
 
 
+def test_plan_repair_uses_grounding_feedback_to_fix_action_arguments():
+    class RepairGateway:
+        def chat(self, payload):
+            assert 'grounding_problems' in payload['messages'][1]['content']
+            return LLMResult(status='success', response={
+                'choices':[{'message':{'content':json.dumps({
+                    'status': 'ready',
+                    'recommended_actions': [{
+                        'action_type': 'create_price_review_ticket',
+                        'input': {
+                            'sku': 'SKU-A12',
+                            'order_rate': 5000,
+                            'reference_rate': 4500,
+                            'difference': 500,
+                        },
+                    }],
+                    'alternatives': [],
+                    'rationale': 'Corrected reference_rate and difference from observed get_reference_price evidence.',
+                    'missing_information': [],
+                    'evidence_summary': ['get_order rate 5000', 'get_reference_price reference_rate 4500'],
+                    'decision_trace': ['fixed price review arguments from grounding feedback'],
+                    'rejected_actions': [],
+                })}}]
+            }, model='fake-model', latency_ms=1, usage={'total_tokens': 11})
+
+    observations = price_mismatch_observations()
+    failed_plan = normalize_plan([
+        {
+            'action_type': 'create_price_review_ticket',
+            'input': {'sku': 'SKU-A12', 'order_rate': 5000, 'reference_rate': 4000, 'difference': 1000},
+        }
+    ], 'bad price review plan', ['E-001', 'E-002'])
+    grounding = validate_plan_grounding(failed_plan, observations, 'price_mismatch')
+
+    repaired = InvestigationAgent(None, llm_gateway=RepairGateway()).repair_plan(
+        'SO-1',
+        observations,
+        failed_plan,
+        grounding,
+        {'scope': {'event_type': 'price_mismatch'}},
+    )
+
+    repaired_plan = normalize_plan(
+        repaired['recommended_actions'],
+        repaired['rationale'],
+        ['E-001', 'E-002'],
+        action_types_for_case('price_mismatch'),
+    )
+    repaired_grounding = validate_plan_grounding(repaired_plan, observations, 'price_mismatch')
+
+    assert repaired['status'] == 'ready'
+    assert repaired['plan_repair']['status'] == 'attempted'
+    assert repaired['llm_plan_repair']['usage']['total_tokens'] == 11
+    assert repaired_grounding['allowed'] is True
+
+
 def test_tool_budget_exhaustion_is_preserved_as_missing_information():
     class FakeGateway:
         def chat(self, _payload):

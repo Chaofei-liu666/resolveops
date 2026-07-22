@@ -548,23 +548,31 @@ unsafe_continuation_count =
 
 ```text
 self_correction_cases =
-  count(case has replan_requested or task_requeued)
+  count(case has plan_repair_requested, plan_repair_succeeded, replan_requested or task_requeued)
 ```
 
 参数含义：
 
 | 参数 | 含义 |
 |---|---|
+| `plan_repair_requested` | Action Plan 没有通过证据校验，系统把结构化错误反馈给 Agent 修复 |
+| `plan_repair_succeeded` | Agent 根据 grounding problems 修正了 Action 或参数，并通过二次证据校验 |
 | `replan_requested` | 执行前业务状态变化，旧方案失效，重新规划 |
 | `task_requeued` | Worker 中断后，安全的只读调查任务被重新入队 |
 
 含义：
 
-> Agent 或运行时是否能在状态变化、工具失败、Worker 中断后恢复，而不是直接崩掉。
+> Agent 或运行时是否能在计划失败、状态变化、工具失败、Worker 中断后恢复，而不是直接崩掉。
 
 示例：
 
 ```text
+Action Plan 参数不匹配
+-> evidence grounding failed
+-> plan_repair_requested
+-> Agent 修正 action arguments
+-> plan_repair_succeeded
+
 审批后源仓库存被故障注入改为 0
 -> executor preflight 重新查询库存
 -> 发现旧方案不再安全
@@ -924,6 +932,7 @@ llm_call_count =
 |---|---|
 | `conclusion.llm` | 主规划 LLM 调用 telemetry |
 | `conclusion.llm_repair` | JSON/schema 修复 LLM 调用 telemetry |
+| `conclusion.llm_plan_repair` | Evidence grounding 失败后的计划修复 LLM 调用 telemetry |
 
 示例：
 

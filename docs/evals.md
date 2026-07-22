@@ -143,14 +143,14 @@ Trajectory metrics check the path the Agent took, not only the final status:
 | Trajectory Quality Score | deterministic blend of stage coverage, tool success, evidence support and verification | The Case followed a plausible Agent path instead of merely ending in a good state |
 | Critical Stage Coverage | required milestones such as context, tools, plan/handoff, execution and verification | The Agent did not skip important phases |
 | Duplicate Tool Calls | repeated identical read-tool observations | Detects wasteful or looping tool behavior |
-| Self-Correction Count | `replan_requested` / `task_requeued` | Shows dynamic recovery after state drift or runtime interruption |
+| Self-Correction Count | `plan_repair_requested`, `plan_repair_succeeded`, `replan_requested`, `task_requeued` | Shows dynamic recovery after grounding failure, state drift or runtime interruption |
 | Unsafe Continuation Count | execution after grounding failure, or success-like continuation after failed verification | Detects dangerous error propagation |
 
 Process-control metrics are reported separately because they show whether the Agent is bounded and observable during execution:
 
 | Runtime metric | Source of truth | What it proves |
 |---|---|---|
-| LLM Call Count | `conclusion.llm` / `llm_repair` telemetry | The Agent is not allowed to loop invisibly |
+| LLM Call Count | `conclusion.llm`, `llm_repair`, `llm_plan_repair` telemetry | The Agent is not allowed to loop invisibly |
 | Total / Average Tokens | provider `usage` from `LLMResult.telemetry()` | Token cost is measurable per Case and over a run |
 | Average LLM Latency | `LLMResult.latency_ms` from the provider gateway | Separates model generation time from ERP/API and queue time |
 | Average / Max Tool Latency | `ToolResult.metadata.latency_ms` from read-tool scheduler observations | Shows whether external business systems or tool adapters are the bottleneck |

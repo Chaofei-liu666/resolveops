@@ -31,6 +31,13 @@ Do not add new business facts. Do not invent tool results. Use only the provided
 Return exactly one JSON object with keys: status, recommended_actions, alternatives, rationale, missing_information, evidence_summary, decision_trace, rejected_actions.
 status must be "ready" or "handoff"; recommended_actions, alternatives, missing_information, and evidence_summary must be arrays.
 Each recommended action must use action_type and input matching one available action schema.'''
+PLAN_REPAIR_SYSTEM='''You are ResolveOps' plan self-correction phase.
+The previous Action Plan failed deterministic evidence grounding. Repair the plan using only the provided observations, grounding problems and action schemas.
+Do not call tools. Do not invent facts. Do not weaken safety rules.
+If the problems can be fixed by correcting action arguments, removing an unsupported action, or choosing another supported action from existing evidence, return status="ready" with repaired recommended_actions.
+If the evidence is insufficient, return status="handoff" with missing_information and rejected_actions.
+Return JSON only with keys: status, recommended_actions, alternatives, rationale, missing_information, evidence_summary, decision_trace, rejected_actions.
+Every action input must match observed ERP/tool evidence such as SKU, warehouse, quantity, price, supplier, purchase order and dates.'''
 class InvestigationAgent:
     def __init__(self, tools, llm_gateway: LLMGateway | None = None):
         self.tools=tools
@@ -117,6 +124,56 @@ class InvestigationAgent:
         if budget_exhausted:
             conclusion['missing_information']=list(dict.fromkeys((conclusion.get('missing_information') or [])+['read-tool budget exhausted; plan uses only collected evidence']))
         return conclusion
+
+    def repair_plan(self, order_id: str, observations: list[dict[str, Any]], failed_plan: dict[str, Any], grounding: dict[str, Any], context: str | dict[str, Any] = '') -> dict[str, Any]:
+        event_type = self._event_type(context)
+        payload_data={
+            'order_id':order_id,
+            'current_date':date.today().isoformat(),
+            'case_context':context or None,
+            'observations':observations,
+            'failed_plan':failed_plan,
+            'grounding_problems':grounding.get('problems') or [],
+            'grounding_result':grounding,
+            'available_action_schemas':planner_action_catalog(event_type),
+        }
+        planner_rules=PLANNER_SYSTEM_BASE + '\n\n' + planner_action_instructions(event_type)
+        payload={
+            'messages':[
+                {'role':'system','content':PLAN_REPAIR_SYSTEM + '\n\n' + planner_rules},
+                {'role':'user','content':json.dumps(payload_data,ensure_ascii=False)},
+            ],
+            'response_format':{'type':'json_object'},
+            'temperature':0,
+        }
+        repair_result=self.llm.chat(payload)
+        if not repair_result.ok:
+            return {
+                'status':'handoff',
+                'recommended_actions':[],
+                'alternatives':[],
+                'rationale':'Plan repair LLM call failed; automation stopped before approval.',
+                'missing_information':[repair_result.error_code or 'llm_error'],
+                'evidence_summary':[],
+                'decision_trace':['plan repair failed before a governed action could be produced'],
+                'rejected_actions':[],
+                'llm_plan_repair':repair_result.telemetry(),
+                'plan_repair':{'status':'failed','reason':repair_result.error_code or 'llm_error'},
+            }
+        repaired=self._parse_conclusion((repair_result.first_message() or {}).get('content'))
+        repaired['llm_plan_repair']=repair_result.telemetry()
+        repaired['plan_repair']={
+            'status':'attempted',
+            'reason':'evidence_grounding_failed',
+            'problems':grounding.get('problems') or [],
+        }
+        if self._needs_schema_repair(repaired):
+            schema_repaired=self._repair_conclusion((repair_result.first_message() or {}).get('content'),payload_data,PLAN_REPAIR_SYSTEM,repaired)
+            if schema_repaired:
+                schema_repaired['llm_plan_repair']=repair_result.telemetry()
+                schema_repaired['plan_repair']=repaired['plan_repair'] | {'schema_repair':'applied'}
+                repaired=schema_repaired
+        return repaired
 
     def _repair_conclusion(self, raw_content: Any, evidence: dict[str, Any], planner_system: str, parse_error: dict[str, Any]) -> dict[str, Any] | None:
         payload={

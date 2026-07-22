@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     agent_max_investigation_turns: int = 8
     agent_max_read_tool_calls: int = 12
     agent_read_tool_parallelism: int = 4
+    agent_max_plan_repairs: int = 1
     agent_max_replans: int = 2
     approval_ttl_seconds: int = 3600
     enable_fault_injection: bool = False

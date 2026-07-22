@@ -219,6 +219,7 @@ def case_llm_usage(case: Case, events: list[Event]) -> dict[str, int | float]:
     usages=[
         llm_usage_from_telemetry(conclusion.get('llm') if isinstance(conclusion,dict) else None),
         llm_usage_from_telemetry(conclusion.get('llm_repair') if isinstance(conclusion,dict) else None),
+        llm_usage_from_telemetry(conclusion.get('llm_plan_repair') if isinstance(conclusion,dict) else None),
     ]
     # Handoff events can preserve a failed or fallback conclusion. Include only
     # token-bearing telemetry if present; do not count the same successful
@@ -231,6 +232,15 @@ def case_llm_usage(case: Case, events: list[Event]) -> dict[str, int | float]:
             usage=llm_usage_from_telemetry(telemetry)
             if usage.get('llm_calls'):
                 usages.append(usage)
+            repair_usage=llm_usage_from_telemetry(event_conclusion.get('llm_repair') if isinstance(event_conclusion.get('llm_repair'),dict) else None)
+            if repair_usage.get('llm_calls'):
+                usages.append(repair_usage)
+            plan_repair_usage=llm_usage_from_telemetry(event_conclusion.get('llm_plan_repair') if isinstance(event_conclusion.get('llm_plan_repair'),dict) else None)
+            if plan_repair_usage.get('llm_calls'):
+                usages.append(plan_repair_usage)
+        event_plan_repair_usage=llm_usage_from_telemetry(data.get('llm_plan_repair') if isinstance(data.get('llm_plan_repair'),dict) else None)
+        if event_plan_repair_usage.get('llm_calls'):
+            usages.append(event_plan_repair_usage)
     return merge_llm_usage(*usages)
 
 def tool_latency_stats(tool_events: list[Event]) -> dict[str, float | None]:
@@ -327,13 +337,14 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
     write_count=len(invocations)
     verification_passes=sum(1 for kind in kinds if kind=='verification_passed')
     verification_failures=sum(1 for kind in kinds if kind=='verification_failed')
-    recovery_events=[kind for kind in kinds if kind in {'replan_requested','task_requeued','manual_review_required'}]
+    recovery_events=[kind for kind in kinds if kind in {'replan_requested','task_requeued','manual_review_required','plan_repair_requested','plan_repair_succeeded'}]
     blocked_events=[kind for kind in kinds if kind in {'context_isolation_failed','evidence_grounding_failed','policy_denied','handoff','worker_failure','verification_failed','approval_expired','approval_revoked'}]
     stage_sequence=[
         kind for kind in kinds
         if kind in {
             'case_created','context_built','context_isolation_sanitized','context_isolation_failed',
             'tool_scheduled','tool_observation','evidence_grounding_passed','evidence_grounding_failed',
+            'plan_repair_requested','plan_repair_succeeded','plan_repair_failed',
             'agent_plan_created','approval_requested','approval_partial','approval_granted','approval_expired','approval_revoked',
             'execution_started','replan_requested','verification_passed','verification_failed',
             'lessons_recorded','handoff','manual_review_required','worker_failure',
@@ -395,7 +406,7 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         write_count==0 or verification_complete,
     ]
     critical_stage_coverage=sum(1 for item in critical_checks if item)/len(critical_checks)
-    self_correction_count=sum(1 for kind in kinds if kind in {'replan_requested','task_requeued'})
+    self_correction_count=sum(1 for kind in kinds if kind in {'replan_requested','task_requeued','plan_repair_requested','plan_repair_succeeded'})
     unsafe_count=unsafe_continuation_count(kinds)
     trajectory_quality_score=max(
         0,

@@ -43,6 +43,7 @@ That boundary is important. The project demonstrates how to build an Agent that 
 - Read-only business tools exposed by schema and case type.
 - Dynamic tool profile routing instead of exposing every tool to the LLM.
 - Evidence-grounded planning with deterministic validation before approval.
+- Bounded plan self-correction when evidence grounding fails.
 - Write actions represented as controlled action plans, not directly callable LLM tools.
 - Policy-controlled execution with role-based approval.
 - Approval binding to case, plan version and action hash.
