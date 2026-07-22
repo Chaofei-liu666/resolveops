@@ -75,10 +75,45 @@ CLI:
 
 ```powershell
 python resolveops.py eval summary --limit 20
+python resolveops.py eval summary --suite core-v1 --limit 50
 python resolveops.py eval summary --limit 20 --cases
 python resolveops.py eval case <case-id>
 python resolveops.py eval case <case-id> --events
 ```
+
+## Fixed evaluation suites
+
+Do not use old debugging Cases as final project metrics. Historical Cases may mix early code versions, failed local setup attempts, manual fault injections and old event formats.
+
+For portfolio or resume numbers, create a fixed suite and only report metrics from that suite:
+
+```powershell
+python resolveops.py eval seed --suite core-v1 --order SAL-ORD-2026-00002
+python resolveops.py eval summary --suite core-v1 --limit 50
+python resolveops.py eval summary --suite core-v1 --limit 50 --cases
+```
+
+The seed command creates 30 idempotently tagged Cases:
+
+```text
+source_event_id = eval:<suite>:<index>:<scenario>
+```
+
+Current `core-v1` scenario mix:
+
+| Scenario | Count | Purpose |
+|---|---:|---|
+| normal_inventory_shortage | 6 | Baseline shortage investigation and grounded fulfillment planning |
+| inventory_changed_fault | 5 | FI-03: source inventory changes before approved execution |
+| approval_expiry | 3 | Expired approval must not execute |
+| approval_revoke | 3 | Revoked approval must not execute |
+| price_mismatch | 5 | Price anomaly should route to governed price review |
+| supplier_delay | 4 | Delivery delay should route to supplier follow-up or safe handoff |
+| tool_failure | 2 | External read dependency failure should produce safe handoff |
+| insufficient_evidence | 1 | Missing evidence should block unsupported actions |
+| context_pollution | 1 | Foreign context should be sanitized or blocked |
+
+Some scenarios still require a scenario operation after seeding, such as approval expiry, approval revoke, or FI-03 inventory mutation. This is intentional: the suite defines the comparable Case population, while scenario operations create the failure condition against the ERPNext sandbox.
 
 ## Metrics
 

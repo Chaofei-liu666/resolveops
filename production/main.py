@@ -326,7 +326,12 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
     trace_summary=tool_trace.get('summary',{})
     verification_complete=write_count==0 or (verification_passes>=write_count and verification_failures==0)
     has_manual_handoff=any(kind in {'handoff','manual_review_required'} for kind in kinds)
-    task_succeeded=case.status=='resolved' or (case.status=='manual_review' and has_manual_handoff)
+    has_pending_approval=any(approval.status=='pending' for approval in approvals)
+    task_succeeded=(
+        case.status=='resolved'
+        or (case.status=='waiting_approval' and has_pending_approval and 'agent_plan_created' in kinds)
+        or (case.status=='manual_review' and has_manual_handoff)
+    )
     tool_selection_accuracy=(len(tool_events)-len(failed_tool_events))/len(tool_events) if tool_events else 1
     if plan_actions:
         grounded_actions=sum(
@@ -728,12 +733,18 @@ def audit_logs(x_operator_key:str|None=Header(default=None), x_operator:str|None
         if case_id: query=select(AuditLog).where(AuditLog.case_id==case_id).order_by(AuditLog.created_at.desc()).limit(limit)
         return [audit_out(log) for log in db.scalars(query).all()]
 @app.get('/v1/evals/summary')
-def eval_summary(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), limit:int=50):
+def eval_summary(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), limit:int=50, suite:str|None=None, source_event_prefix:str|None=None):
     limit=max(1,min(limit,200))
     with Session(engine) as db:
         identity=operator_identity_from_db(db,x_operator_key)
         require_role(identity,'ops_admin','config_admin')
-        cases=db.scalars(select(Case).order_by(Case.updated_at.desc()).limit(limit)).all()
+        query=select(Case).order_by(Case.updated_at.desc()).limit(limit)
+        prefix=source_event_prefix
+        if suite:
+            prefix=f'eval:{suite}:'
+        if prefix:
+            query=select(Case).where(Case.source_event_id.like(f'{prefix}%')).order_by(Case.updated_at.desc()).limit(limit)
+        cases=db.scalars(query).all()
         rows=[]
         for case in cases:
             events=db.scalars(select(Event).where(Event.case_id==case.id).order_by(Event.created_at)).all()
@@ -741,7 +752,10 @@ def eval_summary(x_operator_key:str|None=Header(default=None), x_operator:str|No
             invocations=db.scalars(select(Invocation).where(Invocation.case_id==case.id)).all()
             tasks=db.scalars(select(Task).where(Task.case_id==case.id)).all()
             rows.append(eval_case_out(case,events,approvals,invocations,tasks))
-        return eval_summary_out(rows)
+        result=eval_summary_out(rows)
+        result['eval_suite']=suite
+        result['source_event_prefix']=prefix
+        return result
 
 @app.get('/v1/evals/cases/{case_id}')
 def eval_case(case_id:str, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):

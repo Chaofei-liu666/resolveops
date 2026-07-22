@@ -37,6 +37,7 @@ from production.tool_scheduler import ReadToolCall, ReadToolScheduler, tool_sign
 from production.tools import BusinessReadTools, ToolSpec, summarize_customer_profile
 from production.tool_trace import build_tool_trace
 from production.worker import digest, execute
+from production.cli import fixed_eval_case_payloads
 
 
 def future_required_by(days: int = 10) -> str:
@@ -1933,3 +1934,51 @@ def test_eval_summary_counts_recovery_and_failure_signals():
     assert summary['duplicate_tool_call_count'] == 2
     assert summary['self_correction_cases'] == 1
     assert summary['unsafe_continuation_cases'] == 1
+
+
+def test_fixed_eval_suite_payloads_are_stable_and_tagged():
+    payloads = fixed_eval_case_payloads('core-v1', 'SAL-ORD-2026-00002', 'demo')
+    assert len(payloads) == 30
+    assert len({item['source_event_id'] for item in payloads}) == 30
+    assert payloads[0]['source_event_id'] == 'eval:core-v1:01:normal_inventory_shortage'
+    assert payloads[-1]['source_event_id'] == 'eval:core-v1:30:context_pollution'
+    assert {item['context']['eval_suite'] for item in payloads} == {'core-v1'}
+    assert {'inventory_shortage', 'price_mismatch', 'delivery_delay'} <= {item['event_type'] for item in payloads}
+
+
+def test_eval_summary_can_filter_fixed_suite_cases(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+    with Session(engine) as db:
+        db.add(Operator(
+            tenant_id='demo',
+            subject='ops',
+            role='ops_admin',
+            api_key_hash=operator_key_hash('ops-key'),
+            status='active',
+        ))
+        db.add(Case(
+            id='suite-case',
+            tenant_id='demo',
+            source_event_id='eval:core-v1:01:normal_inventory_shortage',
+            order_id='SO-EVAL',
+            event_type='inventory_shortage',
+            status='resolved',
+        ))
+        db.add(Case(
+            id='debug-case',
+            tenant_id='demo',
+            source_event_id='debug:manual-test',
+            order_id='SO-DEBUG',
+            event_type='inventory_shortage',
+            status='manual_review',
+        ))
+        db.commit()
+
+    result = main_module.eval_summary(x_operator_key='ops-key', limit=50, suite='core-v1')
+
+    assert result['eval_suite'] == 'core-v1'
+    assert result['source_event_prefix'] == 'eval:core-v1:'
+    assert result['total_cases'] == 1
+    assert result['cases'][0]['case_id'] == 'suite-case'

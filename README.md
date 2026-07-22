@@ -357,11 +357,15 @@ python resolveops.py approval revoke <approval-id> --reason "operator cancelled 
 Evaluate Agent execution:
 
 ```powershell
+python resolveops.py eval seed --suite core-v1 --order SAL-ORD-2026-00002
+python resolveops.py eval summary --suite core-v1 --limit 50
 python resolveops.py eval summary --limit 20
 python resolveops.py eval summary --limit 20 --cases
 python resolveops.py eval case <case-id>
 python resolveops.py eval case <case-id> --events
 ```
+
+Use `--suite` for final portfolio metrics. Do not report numbers from a mixed historical database because it may include early debugging Cases, setup failures and old event formats.
 
 Run fault injection in local/test/staging:
 
