@@ -473,7 +473,6 @@ These can be added later if the use case justifies them. The current focus is re
 
 ## Documentation
 
-- [Documentation index](docs/README.md)
 - [Architecture](docs/architecture.md)
 - [Quickstart](docs/quickstart.md)
 - [Runbook](docs/runbook.md)
