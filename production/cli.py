@@ -709,6 +709,72 @@ def cmd_status(args: argparse.Namespace, client: ApiClient) -> int:
     return 0
 
 
+def print_doctor_check(name: str, ok: bool, detail: str = '') -> None:
+    label = paint('[OK]', 'green') if ok else paint('[FAIL]', 'red')
+    print(f'{label} {name}' + (f': {detail}' if detail else ''))
+
+
+def doctor_request(client: ApiClient, method: str, path: str) -> tuple[bool, Any]:
+    headers = {}
+    if client.operator_key:
+        headers['X-Operator-Key'] = client.operator_key
+    try:
+        response = httpx.request(method, client.base_url + path, headers=headers, timeout=10)
+        if response.status_code >= 400:
+            try:
+                detail = response.json()
+            except Exception:
+                detail = response.text
+            return False, f'HTTP {response.status_code} {detail}'
+        return True, response.json() if response.content else None
+    except httpx.RequestError as exc:
+        return False, str(exc)
+
+
+def cmd_doctor(args: argparse.Namespace, client: ApiClient) -> int:
+    config, _ = load_or_create_cli_config()
+    print(paint('ResolveOps Doctor', 'green'))
+    print('Checks local CLI config, ResolveOps API, runtime dependencies and ERPNext sandbox readiness.')
+    print()
+    print_doctor_check('CLI config file', config_path().exists(), str(config_path()))
+    print_doctor_check('api_url configured', bool(config.get('api_url') or client.base_url), client.base_url)
+    print_doctor_check('operator_key configured', bool(client.operator_key), 'set' if client.operator_key else 'missing')
+
+    ok_health, health = doctor_request(client, 'GET', '/healthz')
+    print_doctor_check('ResolveOps API /healthz', ok_health, str(health))
+
+    ok_runtime, runtime = doctor_request(client, 'GET', '/v1/runtime/status')
+    runtime_status = runtime.get('status') if isinstance(runtime, dict) else runtime
+    print_doctor_check('Runtime status', ok_runtime and runtime_status == 'ready', str(runtime_status))
+    if isinstance(runtime, dict):
+        for warning in runtime.get('warnings') or []:
+            print(paint('[WARN]', 'yellow') + f' {warning}')
+
+    ok_sandbox, sandbox = doctor_request(client, 'GET', '/v1/sandbox/check')
+    sandbox_status = sandbox.get('status') if isinstance(sandbox, dict) else sandbox
+    print_doctor_check('ERPNext sandbox check', ok_sandbox and sandbox_status == 'ready', str(sandbox_status))
+    if isinstance(sandbox, dict):
+        for name, check in (sandbox.get('checks') or {}).items():
+            detail = ''
+            if isinstance(check, dict):
+                if check.get('error'):
+                    detail = check.get('error')
+                elif check.get('value') is not None:
+                    detail = compact_json(check.get('value'), 100)
+                print_doctor_check(f'  {name}', bool(check.get('ok')), detail)
+
+    print()
+    if not ok_health:
+        print(paint('[Next]', 'blue') + ' Start local services: resolveops.cmd or docker compose up -d --build')
+    elif not ok_runtime:
+        print(paint('[Next]', 'blue') + ' Check .env and container logs: docker compose logs api worker')
+    elif not ok_sandbox or sandbox_status != 'ready':
+        print(paint('[Next]', 'blue') + ' Prepare sandbox data: python resolveops.py sandbox seed')
+    else:
+        print(paint('[Ready]', 'green') + ' Runtime and sandbox are ready. Try: python resolveops.py chat')
+    return 0 if ok_health and ok_runtime else 1
+
+
 def cmd_init(args: argparse.Namespace, client: ApiClient | None = None) -> int:
     path = config_path()
     created_dir = False
@@ -1013,6 +1079,62 @@ def cmd_fi_run(args: argparse.Namespace, client: ApiClient) -> int:
     return 0
 
 
+def print_sandbox_check(data: dict[str, Any]) -> None:
+    print('ResolveOps Sandbox Check')
+    print(f"status: {data.get('status')}  env: {data.get('app_env')}")
+    defaults = data.get('defaults') or {}
+    if defaults:
+        print(f"order={defaults.get('order_id')} item={defaults.get('item_code')}")
+        print(f"route={defaults.get('source_warehouse')} -> {defaults.get('target_warehouse')}")
+    for name, check in (data.get('checks') or {}).items():
+        if not isinstance(check, dict):
+            print(f'- {name}: {check}')
+            continue
+        state = paint('ok', 'green') if check.get('ok') else paint('missing/error', 'red')
+        detail = check.get('error') or compact_json(check.get('value'), 160)
+        print(f'- {name}: {state}' + (f'  {detail}' if detail else ''))
+
+
+def cmd_sandbox_check(args: argparse.Namespace, client: ApiClient) -> int:
+    data = client.request('GET', '/v1/sandbox/check')
+    if args.json:
+        print_json(data)
+    else:
+        print_sandbox_check(data)
+    return 0 if data.get('status') == 'ready' else 1
+
+
+def cmd_sandbox_seed(args: argparse.Namespace, client: ApiClient) -> int:
+    payload = {
+        'tenant_id': args.tenant_id,
+        'order_id': args.order_id,
+        'item_code': args.item_code,
+        'customer': args.customer,
+        'source_warehouse': args.source_warehouse,
+        'target_warehouse': args.target_warehouse,
+        'source_qty': args.source_qty,
+        'transit_days': args.transit_days,
+        'cost_per_unit': args.cost_per_unit,
+        'company': args.company,
+        'difference_account': args.difference_account,
+        'valuation_rate': args.valuation_rate,
+        'set_stock': not args.no_stock,
+    }
+    data = client.request('POST', '/v1/sandbox/seed', {k: v for k, v in payload.items() if v is not None})
+    if args.json:
+        print_json(data)
+    else:
+        print('Sandbox seed completed')
+        for action in data.get('actions') or []:
+            print(f"- {action.get('type')}: {action.get('status')}")
+            erp = action.get('erpnext_result') or {}
+            if erp.get('stock_reconciliation'):
+                print(f"  erpnext_stock_reconciliation: {erp.get('stock_reconciliation')}")
+        print()
+        print_sandbox_check(data.get('check') or {})
+    return 0 if data.get('status') == 'ready' else 1
+
+
 def cmd_approval_approve(args: argparse.Namespace, client: ApiClient) -> int:
     data = client.request('POST', f'/v1/approvals/{args.approval_id}/approve')
     print_json(data) if args.json else print(f"approval {args.approval_id}: {data.get('status')}")
@@ -1096,6 +1218,9 @@ def build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser('status', help='Show runtime status')
     status.set_defaults(handler=cmd_status)
 
+    doctor = sub.add_parser('doctor', help='Diagnose CLI config, API runtime and ERPNext sandbox')
+    doctor.set_defaults(handler=cmd_doctor)
+
     chat = sub.add_parser('chat', help='Open the ResolveOps operator chat')
     chat.add_argument('--limit', type=int, default=10, help='Number of cases shown by /cases')
     chat.add_argument('--events', type=int, default=12, help='Number of recent events shown after entering /case')
@@ -1150,6 +1275,26 @@ def build_parser() -> argparse.ArgumentParser:
     fi_run.add_argument('--reason')
     fi_run.set_defaults(handler=cmd_fi_run)
 
+    sandbox = sub.add_parser('sandbox', help='ERPNext sandbox readiness commands')
+    sandbox_sub = sandbox.add_subparsers(dest='sandbox_command', required=True)
+    sandbox_check = sandbox_sub.add_parser('check', help='Check ERPNext sandbox resources used by the demo Case')
+    sandbox_check.set_defaults(handler=cmd_sandbox_check)
+    sandbox_seed = sandbox_sub.add_parser('seed', help='Seed ResolveOps sandbox routing data and optional ERPNext stock')
+    sandbox_seed.add_argument('--tenant', dest='tenant_id', default='demo')
+    sandbox_seed.add_argument('--order', dest='order_id', default='SAL-ORD-2026-00002')
+    sandbox_seed.add_argument('--item', dest='item_code', default='SKU-A12')
+    sandbox_seed.add_argument('--customer', default='恒远科技')
+    sandbox_seed.add_argument('--source-warehouse', default='重庆仓 - ROPS')
+    sandbox_seed.add_argument('--target-warehouse', default='Stores - ROPS')
+    sandbox_seed.add_argument('--source-qty', type=float, default=40)
+    sandbox_seed.add_argument('--transit-days', type=float, default=1)
+    sandbox_seed.add_argument('--cost-per-unit', type=float, default=8)
+    sandbox_seed.add_argument('--company')
+    sandbox_seed.add_argument('--difference-account')
+    sandbox_seed.add_argument('--valuation-rate', type=float)
+    sandbox_seed.add_argument('--no-stock', action='store_true', help='Only seed ResolveOps routing data; do not write ERPNext stock')
+    sandbox_seed.set_defaults(handler=cmd_sandbox_seed)
+
     approval = sub.add_parser('approval', help='Approval commands')
     approval_sub = approval.add_subparsers(dest='approval_command', required=True)
     approval_approve = approval_sub.add_parser('approve', help='Approve an approval request')
@@ -1202,7 +1347,7 @@ def main(argv: list[str] | None = None) -> int:
             or os.getenv('OPERATOR_API_KEY')
             or config.get('operator_key')
         )
-        if args.command not in {'init', 'config'} and not operator_key:
+        if args.command not in {'init', 'config', 'doctor'} and not operator_key:
             raise CliError('missing operator_key.\n' + config_edit_hint(created=config_created))
         client = ApiClient(base_url, operator_key)
         return args.handler(args, client)

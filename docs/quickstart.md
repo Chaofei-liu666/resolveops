@@ -116,6 +116,7 @@ Use the CLI:
 
 ```bash
 python resolveops.py status
+python resolveops.py doctor
 python resolveops.py chat
 python resolveops.py eval summary --limit 20
 ```
@@ -196,6 +197,34 @@ Check readiness:
 ```bash
 curl http://localhost:8090/readyz
 ```
+
+Run a full local diagnostic:
+
+```bash
+python resolveops.py doctor
+```
+
+`doctor` checks the CLI config, ResolveOps API, runtime status and the ERPNext sandbox resources used by the demo Case.
+
+Check the ERPNext sandbox data without writing anything:
+
+```bash
+python resolveops.py sandbox check
+```
+
+Prepare the sandbox route and demo stock through ResolveOps APIs:
+
+```bash
+python resolveops.py sandbox seed
+```
+
+This command updates ResolveOps logistics-lane config and, when `ENABLE_FAULT_INJECTION=true`, sets the source warehouse stock in ERPNext through Stock Reconciliation. It still goes through:
+
+```text
+CLI -> ResolveOps API -> ERPNextAdapter -> ERPNext REST API
+```
+
+It does not call ERPNext directly from the CLI and is forbidden when `APP_ENV=production`.
 
 Open ResolveOps chat:
 

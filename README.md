@@ -125,6 +125,27 @@ External adapters
 
 The CLI is only a presentation layer. It calls ResolveOps APIs and never talks to ERPNext directly. This keeps policy, audit, fault-injection gates and approval rules on the server side.
 
+## First run
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --build
+python resolveops.py init
+python resolveops.py config set operator_key local-ops-key
+python resolveops.py doctor
+python resolveops.py sandbox check
+python resolveops.py chat
+```
+
+For a full ERPNext-backed demo, configure `.env` with ERPNext and LLM credentials, then run:
+
+```powershell
+python resolveops.py sandbox seed
+python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-00002 --reason "sandbox demo"
+```
+
+See [docs/quickstart.md](docs/quickstart.md) for the detailed setup path.
+
 ## Tool design
 
 ResolveOps separates tools into two categories.

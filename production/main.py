@@ -67,6 +67,21 @@ class FaultInjectionRunIn(BaseModel):
     valuation_rate: float | None = Field(default=None, ge=0)
     reason: str | None = Field(default=None, max_length=500)
 
+class SandboxSeedIn(BaseModel):
+    tenant_id: str = Field(default='demo', min_length=1, max_length=80)
+    order_id: str = Field(default='SAL-ORD-2026-00002', min_length=1, max_length=160)
+    item_code: str = Field(default='SKU-A12', min_length=1, max_length=140)
+    customer: str = Field(default='恒远科技', min_length=1, max_length=140)
+    source_warehouse: str = Field(default='重庆仓 - ROPS', min_length=1, max_length=140)
+    target_warehouse: str = Field(default='Stores - ROPS', min_length=1, max_length=140)
+    source_qty: float = Field(default=40, ge=0)
+    transit_days: float = Field(default=1, gt=0)
+    cost_per_unit: float = Field(default=8, ge=0)
+    company: str | None = Field(default=None, min_length=1, max_length=140)
+    difference_account: str | None = Field(default=None, min_length=1, max_length=140)
+    valuation_rate: float | None = Field(default=None, ge=0)
+    set_stock: bool = True
+
 @dataclass(frozen=True)
 class OperatorIdentity:
     subject: str
@@ -144,6 +159,10 @@ def require_fault_injection_enabled() -> None:
         raise HTTPException(403, 'fault injection is forbidden in production')
     if not settings.enable_fault_injection:
         raise HTTPException(403, 'fault injection is disabled; set ENABLE_FAULT_INJECTION=true in local/test/staging')
+def require_non_production_sandbox() -> None:
+    env=(settings.app_env or 'local').strip().lower()
+    if env == 'production':
+        raise HTTPException(403, 'sandbox commands are forbidden in production')
 def event_out(e: Event): return {'id':e.id,'kind':e.kind,'message':e.message,'data':e.data,'created_at':e.created_at.isoformat() if e.created_at else None}
 def approval_out(a: Approval):
     return {'id':a.id,'case_id':a.case_id,'plan_version':a.plan_version,'status':a.status,'action_hash':a.action_hash,'action':a.action,'required_roles':a.required_roles,'approved_roles':a.approved_roles,'approver':a.approver,'expires_at':a.expires_at.isoformat() if a.expires_at else None,'revoked_at':a.revoked_at.isoformat() if a.revoked_at else None,'revoked_by':a.revoked_by,'revocation_reason':a.revocation_reason}
@@ -591,6 +610,136 @@ def runtime_status(x_operator_key:str|None=Header(default=None), x_operator:str|
         identity=operator_identity_from_db(db,x_operator_key)
         require_role(identity,'ops_admin','config_admin')
         return build_runtime_status(db)
+
+def sandbox_check_payload(db: Session, seed: SandboxSeedIn | None = None) -> dict:
+    payload = seed or SandboxSeedIn()
+    erp=ERPNextAdapter(settings.erpnext_base_url,settings.erpnext_api_key,settings.erpnext_api_secret)
+    checks: dict[str, Any] = {}
+
+    def check(name: str, fn):
+        try:
+            value=fn()
+            checks[name]={'ok': True, 'value': value}
+        except httpx.HTTPStatusError as exc:
+            status_code=exc.response.status_code if exc.response is not None else None
+            checks[name]={'ok': False, 'error': f'erpnext_http_{status_code}'}
+        except httpx.RequestError as exc:
+            checks[name]={'ok': False, 'error': 'erpnext_connection_failed', 'message': str(exc)}
+        except Exception as exc:
+            checks[name]={'ok': False, 'error': type(exc).__name__, 'message': str(exc)}
+
+    check('erpnext_sales_order', lambda: {'name': erp.sales_order(payload.order_id).get('name')})
+    check('erpnext_item', lambda: erp.resource_exists('Item', payload.item_code))
+    check('erpnext_customer', lambda: erp.resource_exists('Customer', payload.customer))
+    company=payload.company or settings.erpnext_company
+    difference_account=payload.difference_account or settings.erpnext_stock_difference_account
+    if company:
+        check('erpnext_company', lambda: erp.resource_exists('Company', company))
+    else:
+        checks['erpnext_company']={'ok': False, 'error': 'missing_company_config'}
+    if difference_account:
+        check('erpnext_stock_difference_account', lambda: erp.resource_exists('Account', difference_account))
+    else:
+        checks['erpnext_stock_difference_account']={'ok': False, 'error': 'missing_difference_account_config'}
+    check('erpnext_source_warehouse', lambda: erp.resource_exists('Warehouse', payload.source_warehouse))
+    check('erpnext_target_warehouse', lambda: erp.resource_exists('Warehouse', payload.target_warehouse))
+    check('source_stock', lambda: erp.stock(payload.item_code, payload.source_warehouse))
+    check('target_stock', lambda: erp.stock(payload.item_code, payload.target_warehouse))
+    lane=db.scalar(select(LogisticsLane).where(
+        LogisticsLane.tenant_id==payload.tenant_id,
+        LogisticsLane.source_warehouse==payload.source_warehouse,
+        LogisticsLane.target_warehouse==payload.target_warehouse,
+    ))
+    checks['resolveops_logistics_lane']={
+        'ok': lane is not None,
+        'value': lane_out(lane) if lane else {
+            'tenant_id': payload.tenant_id,
+            'source_warehouse': payload.source_warehouse,
+            'target_warehouse': payload.target_warehouse,
+            'expected_transit_days': payload.transit_days,
+            'expected_cost_per_unit': payload.cost_per_unit,
+        },
+    }
+    ready=all(check.get('ok') for check in checks.values())
+    return {
+        'status': 'ready' if ready else 'degraded',
+        'app_env': settings.app_env,
+        'defaults': payload.model_dump(),
+        'checks': checks,
+    }
+
+@app.get('/v1/sandbox/check')
+def sandbox_check(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        require_role(identity,'ops_admin','config_admin')
+        return sandbox_check_payload(db)
+
+@app.post('/v1/sandbox/seed')
+def sandbox_seed(payload: SandboxSeedIn, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
+    require_non_production_sandbox()
+    if payload.set_stock:
+        require_fault_injection_enabled()
+    company=payload.company or settings.erpnext_company
+    difference_account=payload.difference_account or settings.erpnext_stock_difference_account
+    valuation_rate=payload.valuation_rate if payload.valuation_rate is not None else settings.erpnext_default_valuation_rate
+    if payload.set_stock and not company:
+        raise HTTPException(422, 'company is required to seed ERPNext stock')
+    if payload.set_stock and not difference_account:
+        raise HTTPException(422, 'difference_account is required to seed ERPNext stock')
+    erp=ERPNextAdapter(settings.erpnext_base_url,settings.erpnext_api_key,settings.erpnext_api_secret)
+    actions=[]
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        require_role(identity,'ops_admin','config_admin')
+        lane=db.scalar(select(LogisticsLane).where(
+            LogisticsLane.tenant_id==payload.tenant_id,
+            LogisticsLane.source_warehouse==payload.source_warehouse,
+            LogisticsLane.target_warehouse==payload.target_warehouse,
+        ))
+        if lane:
+            lane.transit_days=payload.transit_days
+            lane.cost_per_unit=payload.cost_per_unit
+            lane.currency='CNY'
+            lane.active=True
+            actions.append({'type': 'logistics_lane', 'status': 'updated', 'lane': lane_out(lane)})
+        else:
+            lane=LogisticsLane(
+                tenant_id=payload.tenant_id,
+                source_warehouse=payload.source_warehouse,
+                target_warehouse=payload.target_warehouse,
+                transit_days=payload.transit_days,
+                cost_per_unit=payload.cost_per_unit,
+                currency='CNY',
+                active=True,
+            )
+            db.add(lane)
+            db.flush()
+            actions.append({'type': 'logistics_lane', 'status': 'created', 'lane': lane_out(lane)})
+        if payload.set_stock:
+            try:
+                before=erp.stock(payload.item_code,payload.source_warehouse)
+                result=erp.set_stock_balance_for_fault_injection(
+                    item_code=payload.item_code,
+                    warehouse=payload.source_warehouse,
+                    qty=payload.source_qty,
+                    company=company,
+                    difference_account=difference_account,
+                    valuation_rate=valuation_rate,
+                )
+                after=erp.stock(payload.item_code,payload.source_warehouse)
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                raise HTTPException(502, {
+                    'error': 'erpnext_sandbox_seed_failed',
+                    'erpnext_status_code': status_code,
+                    'message': 'ERPNext rejected the sandbox stock seed. Check integration user permissions and accounting fields.',
+                }) from exc
+            actions.append({'type': 'source_stock', 'status': 'set', 'before': before, 'after': after, 'erpnext_result': result})
+        audit(db,identity,'sandbox_seeded','sandbox',payload.tenant_id,{'actions':actions})
+        db.commit()
+        check=sandbox_check_payload(db,payload)
+        return {'status': check['status'], 'actions': actions, 'check': check}
 @app.get('/')
 def console():
     if not STATIC_DIR.exists(): raise HTTPException(404,'console static files not found')

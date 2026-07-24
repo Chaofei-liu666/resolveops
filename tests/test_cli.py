@@ -660,6 +660,90 @@ def test_cli_eval_case_calls_case_eval_endpoint(monkeypatch, capsys):
     assert 'Key Stage Sequence' in out
 
 
+def test_cli_doctor_checks_api_runtime_and_sandbox(monkeypatch, capsys):
+    calls = []
+
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json, 'timeout': timeout})
+        if url.endswith('/healthz'):
+            return FakeResponse(data={'status': 'ok'})
+        if url.endswith('/v1/runtime/status'):
+            return FakeResponse(data={'status': 'ready', 'checks': {'database': {'ok': True}}})
+        if url.endswith('/v1/sandbox/check'):
+            return FakeResponse(data={
+                'status': 'ready',
+                'app_env': 'local',
+                'defaults': {'order_id': 'SAL-ORD-2026-00002', 'item_code': 'SKU-A12'},
+                'checks': {'erpnext_sales_order': {'ok': True, 'value': {'name': 'SAL-ORD-2026-00002'}}},
+            })
+        return FakeResponse(status_code=404, data={'detail': 'not found'})
+
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
+    result = cli.main(['--base-url', 'http://api.local', '--operator-key', 'ops-key', 'doctor'])
+
+    assert result == 0
+    assert [call['url'] for call in calls] == [
+        'http://api.local/healthz',
+        'http://api.local/v1/runtime/status',
+        'http://api.local/v1/sandbox/check',
+    ]
+    assert all(call['headers'] == {'X-Operator-Key': 'ops-key'} for call in calls)
+    out = capsys.readouterr().out
+    assert 'ResolveOps Doctor' in out
+    assert 'ERPNext sandbox check' in out
+
+
+def test_cli_sandbox_seed_posts_through_resolveops_api(monkeypatch, capsys):
+    calls = []
+
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json, 'timeout': timeout})
+        return FakeResponse(data={
+            'status': 'ready',
+            'actions': [
+                {'type': 'logistics_lane', 'status': 'updated'},
+                {'type': 'source_stock', 'status': 'set', 'erpnext_result': {'stock_reconciliation': 'MAT-RECO-TEST'}},
+            ],
+            'check': {
+                'status': 'ready',
+                'app_env': 'local',
+                'defaults': {'order_id': 'SAL-ORD-2026-00002', 'item_code': 'SKU-A12'},
+                'checks': {'source_stock': {'ok': True, 'value': {'actual_qty': 40}}},
+            },
+        })
+
+    monkeypatch.setattr(cli.httpx, 'request', fake_request)
+    result = cli.main([
+        '--base-url', 'http://api.local',
+        '--operator-key', 'ops-key',
+        'sandbox', 'seed',
+        '--source-qty', '40',
+    ])
+
+    assert result == 0
+    assert calls == [{
+        'method': 'POST',
+        'url': 'http://api.local/v1/sandbox/seed',
+        'headers': {'X-Operator-Key': 'ops-key'},
+        'json': {
+            'tenant_id': 'demo',
+            'order_id': 'SAL-ORD-2026-00002',
+            'item_code': 'SKU-A12',
+            'customer': '恒远科技',
+            'source_warehouse': '重庆仓 - ROPS',
+            'target_warehouse': 'Stores - ROPS',
+            'source_qty': 40.0,
+            'transit_days': 1,
+            'cost_per_unit': 8,
+            'set_stock': True,
+        },
+        'timeout': 30,
+    }]
+    out = capsys.readouterr().out
+    assert 'Sandbox seed completed' in out
+    assert 'MAT-RECO-TEST' in out
+
+
 def test_cli_returns_error_for_failed_api(monkeypatch, capsys):
     monkeypatch.setattr(cli.httpx, 'request', lambda *args, **kwargs: FakeResponse(status_code=403, data={'detail': 'disabled'}))
 

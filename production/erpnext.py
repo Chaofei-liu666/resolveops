@@ -30,6 +30,17 @@ class ERPNextAdapter:
     def sales_order(self, name: str) -> dict:
         return self._get(f'/api/resource/Sales Order/{name}')
 
+    def resource_exists(self, doctype: str, name: str) -> dict:
+        """Check whether a named ERPNext resource is readable by the API user."""
+        try:
+            self._get(f'/api/resource/{doctype}/{name}')
+            return {'ok': True, 'doctype': doctype, 'name': name}
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code == 404:
+                return {'ok': False, 'doctype': doctype, 'name': name, 'error': 'not_found'}
+            return {'ok': False, 'doctype': doctype, 'name': name, 'error': f'http_{status_code}'}
+
     def stock(self, item_code: str, warehouse: str) -> dict:
         filters = f'[["item_code","=","{item_code}"],["warehouse","=","{warehouse}"]]'
         data = self._get('/api/resource/Bin', {'filters': filters, 'fields': '["actual_qty","reserved_qty","warehouse"]'})
