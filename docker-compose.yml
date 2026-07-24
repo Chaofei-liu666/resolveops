@@ -14,7 +14,6 @@ services:
     env_file: .env
     ports: ["8090:8080"]
     depends_on: {postgres: {condition: service_healthy}}
-    networks: [default, erpnext]
   worker:
     build:
       context: .
@@ -22,7 +21,6 @@ services:
     env_file: .env
     command: ["python","-m","production.worker"]
     depends_on: {postgres: {condition: service_healthy}}
-    networks: [default, erpnext]
   test:
     profiles: ["test"]
     build:
@@ -31,9 +29,4 @@ services:
     env_file: .env
     command: ["python","-m","pytest","-q"]
     depends_on: {postgres: {condition: service_healthy}}
-    networks: [default, erpnext]
 volumes: {postgres_data: {}}
-networks:
-  erpnext:
-    external: true
-    name: frappe_docker_frappe_network

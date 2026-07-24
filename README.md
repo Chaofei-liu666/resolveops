@@ -243,11 +243,18 @@ Edit `.env`:
 
 ```text
 APP_ENV=local
+POSTGRES_PASSWORD=resolveops
+DATABASE_URL=postgresql+psycopg://resolveops:resolveops@postgres:5432/resolveops
+WEBHOOK_SECRET=local-webhook-secret
+OPERATOR_API_KEY=local-ops-key
+```
+
+For full ERPNext and LLM runs, also configure:
+
+```text
 ERPNEXT_BASE_URL=...
 ERPNEXT_API_KEY=...
 ERPNEXT_API_SECRET=...
-WEBHOOK_SECRET=...
-OPERATOR_API_KEY=...
 LLM_BASE_URL=...
 LLM_API_KEY=...
 LLM_MODEL=...
@@ -449,7 +456,7 @@ ERPNext sandbox runs
 
 It is not yet a drop-in production system for real ERP write operations. Before production write access, add enterprise IAM, managed secrets, monitoring and alerting, backup/restore, load testing, least-privilege ERP roles, and an operational incident runbook.
 
-See [docs/production-readiness.md](docs/production-readiness.md).
+See [docs/deployment.md](docs/deployment.md).
 
 ## What is intentionally not included
 
@@ -466,13 +473,12 @@ These can be added later if the use case justifies them. The current focus is re
 
 ## Documentation
 
+- [Documentation index](docs/README.md)
 - [Architecture](docs/architecture.md)
 - [Quickstart](docs/quickstart.md)
 - [Runbook](docs/runbook.md)
 - [Deployment safety checklist](docs/deployment.md)
-- [Production readiness assessment](docs/production-readiness.md)
 - [Reliability evaluation and fault injection](docs/evals.md)
-- [Interview notes](docs/interview-notes.md)
 
 ## Security
 

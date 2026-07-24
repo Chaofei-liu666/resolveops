@@ -41,6 +41,8 @@ The Agent is useful when the next step depends on scattered evidence, business c
 
 ## High-level flow
 
+![ResolveOps Agent architecture](resolveops-agent-architecture.png)
+
 ```text
 External event / CLI / API
   -> Case

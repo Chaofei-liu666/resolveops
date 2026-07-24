@@ -1,0 +1,21 @@
+# Optional override for connecting ResolveOps containers to an existing ERPNext
+# Docker network.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.erpnext.yml up -d --build
+#
+# Override the network name if your ERPNext stack uses a different one:
+#   ERPNEXT_DOCKER_NETWORK=my_erpnext_network docker compose -f docker-compose.yml -f docker-compose.erpnext.yml up -d --build
+
+services:
+  api:
+    networks: [default, erpnext]
+  worker:
+    networks: [default, erpnext]
+  test:
+    networks: [default, erpnext]
+
+networks:
+  erpnext:
+    external: true
+    name: ${ERPNEXT_DOCKER_NETWORK:-frappe_docker_frappe_network}

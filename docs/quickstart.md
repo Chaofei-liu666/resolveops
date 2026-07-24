@@ -54,9 +54,12 @@ For local inspection, keep:
 ```text
 APP_ENV=local
 POSTGRES_PASSWORD=resolveops
+DATABASE_URL=postgresql+psycopg://resolveops:resolveops@postgres:5432/resolveops
 WEBHOOK_SECRET=local-webhook-secret
 OPERATOR_API_KEY=local-ops-key
 ```
+
+If you change `POSTGRES_PASSWORD`, update the password in `DATABASE_URL` as well.
 
 Start services:
 
@@ -155,7 +158,32 @@ The ERPNext integration user should be able to read:
 
 For sandbox write tests, it also needs permission to create the draft/test documents used by ResolveOps, such as Stock Entry, Material Request, Price Review records or Supplier Follow-up records depending on the scenario.
 
-If ERPNext runs in a different Docker network, make sure `ERPNEXT_BASE_URL` is reachable from inside the ResolveOps containers.
+If ERPNext runs on the host machine, use:
+
+```text
+ERPNEXT_BASE_URL=http://host.docker.internal:8000
+```
+
+If ERPNext runs in another Docker Compose network, attach ResolveOps to that external network with the optional override file:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.erpnext.yml up -d --build
+```
+
+The default external network name is `frappe_docker_frappe_network`. Override it when needed:
+
+```bash
+ERPNEXT_DOCKER_NETWORK=<your-network> docker compose -f docker-compose.yml -f docker-compose.erpnext.yml up -d --build
+```
+
+PowerShell:
+
+```powershell
+$env:ERPNEXT_DOCKER_NETWORK="<your-network>"
+docker compose -f docker-compose.yml -f docker-compose.erpnext.yml up -d --build
+```
+
+The base `docker-compose.yml` does not require ERPNext's Docker network. This keeps the project startable on a clean machine before ERPNext is connected.
 
 Restart:
 
