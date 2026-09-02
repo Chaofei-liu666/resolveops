@@ -719,15 +719,26 @@ def sandbox_seed(payload: SandboxSeedIn, x_operator_key:str|None=Header(default=
         if payload.set_stock:
             try:
                 before=erp.stock(payload.item_code,payload.source_warehouse)
-                result=erp.set_stock_balance_for_fault_injection(
-                    item_code=payload.item_code,
-                    warehouse=payload.source_warehouse,
-                    qty=payload.source_qty,
-                    company=company,
-                    difference_account=difference_account,
-                    valuation_rate=valuation_rate,
-                )
-                after=erp.stock(payload.item_code,payload.source_warehouse)
+                current_qty=float(before.get('actual_qty') or 0)
+                target_qty=float(payload.source_qty)
+                # ERPNext rejects a Stock Reconciliation with no quantity delta.
+                # A demo seed must be safely repeatable, so keep an already-correct
+                # sandbox unchanged instead of submitting a no-op transaction.
+                if abs(current_qty-target_qty) < 0.000001:
+                    result=None
+                    after=before
+                    status='already_set'
+                else:
+                    result=erp.set_stock_balance_for_fault_injection(
+                        item_code=payload.item_code,
+                        warehouse=payload.source_warehouse,
+                        qty=payload.source_qty,
+                        company=company,
+                        difference_account=difference_account,
+                        valuation_rate=valuation_rate,
+                    )
+                    after=erp.stock(payload.item_code,payload.source_warehouse)
+                    status='set'
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code if exc.response is not None else None
                 raise HTTPException(502, {
@@ -735,7 +746,7 @@ def sandbox_seed(payload: SandboxSeedIn, x_operator_key:str|None=Header(default=
                     'erpnext_status_code': status_code,
                     'message': 'ERPNext rejected the sandbox stock seed. Check integration user permissions and accounting fields.',
                 }) from exc
-            actions.append({'type': 'source_stock', 'status': 'set', 'before': before, 'after': after, 'erpnext_result': result})
+            actions.append({'type': 'source_stock', 'status': status, 'before': before, 'after': after, 'erpnext_result': result})
         audit(db,identity,'sandbox_seeded','sandbox',payload.tenant_id,{'actions':actions})
         db.commit()
         check=sandbox_check_payload(db,payload)

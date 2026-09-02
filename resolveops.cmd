@@ -23,10 +23,16 @@ if errorlevel 1 (
 
 docker compose version >nul 2>&1
 if errorlevel 1 (
-  echo [Error] Docker Compose was not available. Start Docker Desktop, then reopen this file.
-  echo.
-  cmd /k
-  exit /b 1
+  docker-compose version >nul 2>&1
+  if errorlevel 1 (
+    echo [Error] Docker Compose was not available. Start Docker Desktop, then reopen this file.
+    echo.
+    cmd /k
+    exit /b 1
+  )
+  set "COMPOSE_CMD=docker-compose"
+) else (
+  set "COMPOSE_CMD=docker compose"
 )
 
 docker info >nul 2>&1
@@ -64,13 +70,23 @@ if errorlevel 1 (
   )
 )
 
-echo [Docker] Starting ResolveOps services...
-docker compose up -d
+if "%ERPNEXT_DOCKER_NETWORK%"=="" set "ERPNEXT_DOCKER_NETWORK=frappe_docker_frappe_network"
+docker network inspect "%ERPNEXT_DOCKER_NETWORK%" >nul 2>&1
+if errorlevel 1 (
+  echo [Error] ERPNext Docker network was not found: %ERPNEXT_DOCKER_NETWORK%
+  echo Start the ERPNext sandbox first, then reopen this file.
+  echo.
+  cmd /k
+  exit /b 1
+)
+
+echo [Docker] Starting ResolveOps services with ERPNext network access...
+%COMPOSE_CMD% -f docker-compose.yml -f docker-compose.erpnext.yml up -d --build api worker
 if errorlevel 1 (
   echo.
   echo [Error] Failed to start ResolveOps services.
   echo Make sure Docker Desktop is running, then try:
-  echo   docker compose up -d
+  echo   %COMPOSE_CMD% -f docker-compose.yml -f docker-compose.erpnext.yml up -d --build api worker
   echo.
   cmd /k
   exit /b 1
@@ -93,7 +109,7 @@ if "%READY%"=="0" (
   echo.
   echo [Error] ResolveOps API did not become ready in time.
   echo Check service logs:
-  echo   docker compose logs --tail=100 api
+  echo   %COMPOSE_CMD% -f docker-compose.yml -f docker-compose.erpnext.yml logs --tail=100 api
   echo.
   echo If authentication failed, edit:
   echo   %USERPROFILE%\.resolveops\config.json
