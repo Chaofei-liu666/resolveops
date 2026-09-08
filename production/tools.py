@@ -102,6 +102,46 @@ class ToolSpec:
         }
 
 
+def schema_validation_errors(schema: dict[str, Any], value: Any, path: str = 'arguments') -> list[str]:
+    """Validate Tool Schema again at the server boundary.
+
+    Provider-side function calling is not an authorization boundary. This
+    rejects malformed or out-of-contract arguments before an adapter is called.
+    """
+    expected = schema.get('type')
+    type_ok = {
+        'object': isinstance(value, dict),
+        'array': isinstance(value, list),
+        'string': isinstance(value, str),
+        'number': isinstance(value, (int, float)) and not isinstance(value, bool),
+        'integer': isinstance(value, int) and not isinstance(value, bool),
+        'boolean': isinstance(value, bool),
+    }
+    if expected and not type_ok.get(expected, True):
+        return [f'{path} must be {expected}']
+    if 'enum' in schema and value not in schema['enum']:
+        return [f'{path} must be one of {schema["enum"]}']
+
+    errors: list[str] = []
+    if expected == 'object':
+        properties = schema.get('properties') or {}
+        for field in schema.get('required') or []:
+            if field not in value:
+                errors.append(f'{path}.{field} is required')
+        if schema.get('additionalProperties') is False:
+            for field in value:
+                if field not in properties:
+                    errors.append(f'{path}.{field} is not allowed')
+        for field, field_value in value.items():
+            field_schema = properties.get(field)
+            if isinstance(field_schema, dict):
+                errors.extend(schema_validation_errors(field_schema, field_value, f'{path}.{field}'))
+    elif expected == 'array' and isinstance(schema.get('items'), dict):
+        for index, item in enumerate(value):
+            errors.extend(schema_validation_errors(schema['items'], item, f'{path}[{index}]'))
+    return errors
+
+
 class ToolRegistry:
     """Registry owns the LLM-visible schema and the internal execution map."""
 
@@ -124,10 +164,25 @@ class ToolRegistry:
     def execute(self, name: str, arguments: dict[str, Any], order_id: str) -> dict[str, Any]:
         return self.execute_result(name, arguments, order_id).observation_result()
 
-    def execute_result(self, name: str, arguments: dict[str, Any], order_id: str) -> ToolResult:
+    def validate_arguments(self, name: str, arguments: Any) -> ToolResult | None:
         spec = self.specs.get(name)
         if not spec:
             return ToolResult.failure('tool_not_registered')
+        errors = schema_validation_errors(spec.parameters, arguments)
+        if errors:
+            return ToolResult.failure(
+                'invalid_tool_arguments',
+                error_type='ToolArgumentValidationError',
+                source_system=spec.source_system,
+                metadata={'schema_errors': errors},
+            )
+        return None
+
+    def execute_result(self, name: str, arguments: dict[str, Any], order_id: str) -> ToolResult:
+        validation_failure = self.validate_arguments(name, arguments)
+        if validation_failure:
+            return validation_failure
+        spec = self.specs[name]
         if not spec.executor:
             return ToolResult.failure('tool_not_executable_by_this_runtime', source_system=spec.source_system)
         data = spec.executor(arguments, order_id)
@@ -240,6 +295,9 @@ class BusinessReadTools:
         try:
             if name not in self.enabled_tool_names:
                 return ToolResult.failure('tool_not_enabled_for_case_type', source_system=self.metadata(name).get('source_system'))
+            validation_failure = self.registry.validate_arguments(name, arguments)
+            if validation_failure:
+                return validation_failure
             order = self.adapter.sales_order(order_id) if name == 'get_inventory' else None
             allowed, reason = allow_read_tool(name, arguments, order)
             if not allowed:

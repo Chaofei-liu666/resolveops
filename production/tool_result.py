@@ -53,6 +53,7 @@ class ToolResult:
         retryable: bool = False,
         source_system: str | None = None,
         side_effect_committed: bool | None = False,
+        metadata: dict[str, Any] | None = None,
     ) -> 'ToolResult':
         return cls(
             status='failed',
@@ -63,6 +64,7 @@ class ToolResult:
             source_system=source_system,
             side_effect_committed=side_effect_committed,
             evidence_usable=False,
+            metadata=metadata,
         )
 
     def to_dict(self) -> dict[str, Any]:

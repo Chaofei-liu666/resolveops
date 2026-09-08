@@ -34,7 +34,7 @@ from production.policy import action_policy, allow_read_tool
 from production.runtime_status import build_runtime_status, expected_migration_versions
 from production.tool_result import ToolResult
 from production.tool_scheduler import ReadToolCall, ReadToolScheduler, tool_signature
-from production.tools import BusinessReadTools, ToolSpec, summarize_customer_profile
+from production.tools import BusinessReadTools, ToolRegistry, ToolSpec, summarize_customer_profile
 from production.tool_trace import build_tool_trace
 from production.worker import digest, execute
 from production.cli import fixed_eval_case_payloads
@@ -580,6 +580,46 @@ def test_tool_spec_generates_llm_function_schema():
     assert schema['function']['description'] == 'Read stock.'
     assert schema['function']['parameters']['additionalProperties'] is False
     assert spec.metadata()['source_system'] == 'WMSAdapter'
+
+
+def test_tool_schema_is_enforced_at_the_server_boundary():
+    calls = []
+    registry = ToolRegistry([
+        ToolSpec(
+            name='get_inventory',
+            description='Read inventory.',
+            parameters={
+                'type': 'object',
+                'properties': {
+                    'item_code': {'type': 'string'},
+                    'warehouse': {'type': 'string', 'enum': ['WH-1']},
+                },
+                'required': ['item_code', 'warehouse'],
+                'additionalProperties': False,
+            },
+            permission='inventory:read',
+            side_effect='none',
+            risk_level='low',
+            source_system='WMSAdapter',
+            executor=lambda args, _order_id: calls.append(args) or {'actual_qty': 10},
+        )
+    ])
+
+    missing = registry.execute_result('get_inventory', {'item_code': 'SKU-A12'}, 'SO-1')
+    wrong_type = registry.execute_result('get_inventory', {'item_code': 12, 'warehouse': 'WH-1'}, 'SO-1')
+    invalid_enum = registry.execute_result('get_inventory', {'item_code': 'SKU-A12', 'warehouse': 'WH-2'}, 'SO-1')
+    extra_field = registry.execute_result('get_inventory', {'item_code': 'SKU-A12', 'warehouse': 'WH-1', 'tenant_id': 'other'}, 'SO-1')
+
+    for result in (missing, wrong_type, invalid_enum, extra_field):
+        assert result.error_code == 'invalid_tool_arguments'
+        assert result.error_type == 'ToolArgumentValidationError'
+        assert result.evidence_usable is False
+        assert result.to_dict()['metadata']['schema_errors']
+    assert calls == []
+
+    success = registry.execute_result('get_inventory', {'item_code': 'SKU-A12', 'warehouse': 'WH-1'}, 'SO-1')
+    assert success.status == 'success'
+    assert calls == [{'item_code': 'SKU-A12', 'warehouse': 'WH-1'}]
 
 
 def test_llm_tool_schema_excludes_runtime_governance_metadata():
