@@ -56,7 +56,7 @@ That boundary is the main design choice: the model can investigate and propose, 
 - Context isolation across multiple Cases.
 - Lightweight verified lessons from successful Cases.
 - Fault injection against ERPNext sandbox data.
-- CLI-first operator/developer workflow.
+- Textual Agent Workbench for operators plus non-interactive developer commands.
 - Runtime status and execution evaluation APIs.
 
 ## Supported exception types
@@ -89,7 +89,7 @@ Business exception
 ## Architecture
 
 ```text
-CLI / API / ERPNext Webhook
+Agent Workbench / API / ERPNext Webhook
         |
         v
 FastAPI Control Plane
@@ -107,10 +107,10 @@ PostgreSQL
         v
 Worker / Agent Runtime
         |
+        +--> Agent primitives: LLMRequest / LLMResult / ToolSchema
+        +--> Agent runtime: message boundary + bounded read-tool loop
+        +--> ResolveOps domain: CaseProfile + ToolRegistry + ActionRegistry
         +--> CaseContextBuilder
-        +--> ToolRegistry + ToolProfileRouter
-        +--> BusinessReadTools
-        +--> LLMGateway
         +--> ActionRegistry
         +--> EvidenceGrounding
         +--> PolicyEngine
@@ -123,7 +123,23 @@ External adapters
   - SAP/WMS/CRM/ticketing adapters later
 ```
 
-The CLI is only a presentation layer. It calls ResolveOps APIs and never talks to ERPNext directly. This keeps policy, audit, fault-injection gates and approval rules on the server side.
+The Agent Workbench is only a presentation layer. It calls ResolveOps APIs and never talks to ERPNext directly. This keeps policy, audit, fault-injection gates and approval rules on the server side.
+
+The runtime uses a small three-layer dependency direction rather than a large
+generic framework:
+
+```text
+Agent primitives (provider-neutral contracts)
+  -> Agent runtime (bounded LLM -> read tool -> observation loop)
+    -> ResolveOps domain (CaseProfile, prompts, evidence, policy and actions)
+
+Adapters stay outside this stack: LLMGateway / ERPNextAdapter / PostgreSQL / FastAPI / Workbench.
+```
+
+`ToolSchema` is the LLM-visible minimum; `ToolSpec` adds ResolveOps execution
+and governance metadata. Write actions are still tools, but are intentionally
+not LLM-callable: they move through grounding, Policy, Approval, Preflight,
+Executor and read-after-write verification.
 
 ## First run
 
@@ -134,7 +150,8 @@ python resolveops.py init
 python resolveops.py config set operator_key local-ops-key
 python resolveops.py doctor
 python resolveops.py sandbox check
-python resolveops.py chat
+python -m pip install -r requirements-cli.txt
+python resolveops.py console
 ```
 
 For a full ERPNext-backed demo, configure `.env` with ERPNext and LLM credentials, then run:
@@ -298,10 +315,10 @@ Open:
 
 ```text
 Swagger: http://localhost:8090/docs
-Console: http://localhost:8090
+Agent Workbench: python resolveops.py console
 ```
 
-## CLI usage
+## Workbench and CLI setup
 
 Initialize local CLI config:
 
@@ -314,7 +331,7 @@ python resolveops.py config show
 
 `config show` masks the operator key. Case commands still require an explicit `<case-id>` so different business Cases do not accidentally share context.
 
-On Windows, you can also double-click `resolveops.cmd` in the project directory. It opens a terminal, initializes the local CLI config if needed, starts Docker services with `docker compose up -d`, waits for the API, and then opens ResolveOps chat. If authentication fails, edit:
+On Windows, you can also double-click `resolveops.cmd` in the project directory. It initializes the local CLI config if needed, installs the small Textual Workbench dependency on first use, starts Docker services, waits for the API, and opens the ResolveOps Agent Workbench. If authentication fails, edit:
 
 ```text
 C:\Users\<you>\.resolveops\config.json
@@ -332,40 +349,46 @@ Check runtime:
 python resolveops.py status
 ```
 
-Open the operator-level chat:
+Reset the local ERPNext demo state before a repeated inventory-shortage run:
+
+```bash
+python resolveops.py sandbox seed
+```
+
+This restores the demo source warehouse to `40` units and target warehouse to `0` units through ResolveOps, so a completed transfer does not make the next run appear falsely unresolved.
+
+Open the single interactive operator interface:
 
 ```powershell
-python resolveops.py chat
+python resolveops.py console
 ```
 
-Inside `chat`, use:
+The Workbench has one persistent screen: the left pane lists Cases and the right pane contains the current conversation and Agent trace. It starts in `GENERAL` mode; free text is an operator-level LLM conversation with no ERP tools. Select a Case in the left pane or use `/focus <case-id>` to enter an explicit Case context. `/back` returns to `GENERAL` without closing the application.
+
+Workbench commands:
 
 ```text
-/new             create a new Case interactively
-/cases           list recent Cases
-/eval            show Agent evaluation summary
-/case <case-id>  enter one Case-scoped Agent chat
-/status          show runtime status
-/exit            leave chat
+/new                     create a new Case with the form
+/focus <case-id>         enter an explicit Case context
+/back                    return to GENERAL
+/refresh                 refresh runtime, Cases and active trace
+/events                  expand or collapse active Case event detail
+/eval                    append evaluation summary to the trace
+/approve [approval-id]   confirm a pending approval
+/revoke [approval-id]    revoke a pending approval with confirmation
+/quit                    leave the Workbench
 ```
 
-Top-level `chat` is an operator-level LLM conversation without ERP tools. It can answer general no-tool questions, explain ResolveOps, guide usage, and create or select Cases through explicit slash commands. Case-specific business questions should enter `/case <case-id>` so Case context stays isolated. If you ask which underlying model is configured, ResolveOps answers from server config (`LLM_MODEL` / `LLM_BASE_URL`) without exposing `LLM_API_KEY`. If the LLM provider is unavailable, ResolveOps returns a bounded fallback answer instead of calling tools or guessing business facts.
+When a Case is active, questions use only that Case's context and may call its read tools. The Workbench never mixes transcripts between Cases. General and Case answers stream over SSE; background investigation instead appends durable lifecycle and business events, so token deltas and hidden reasoning are never persisted. Approval controls only call existing ResolveOps approval APIs; the server still enforces operator role, plan binding, preflight and verification.
 
-You can also call Case commands directly:
+Non-interactive commands remain useful for scripting and diagnosis:
 
 ```powershell
 python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-00002 --reason "manual CLI test"
 python resolveops.py case list
 python resolveops.py case show <case-id>
-python resolveops.py case watch <case-id>
-python resolveops.py case chat <case-id>
+python resolveops.py case ask <case-id> "Why not create a purchase request?"
 ```
-
-`case watch` prints a live, colorized Case event trace. It shows read-tool calls, Agent decision summaries, approvals, executor activity, verification and safe handoff events without giving the CLI direct ERPNext access.
-
-`case chat` opens an interactive Case-scoped Agent session. Free-text input is sent to the read-only Case question endpoint; slash commands such as `/show`, `/events`, `/eval` and `/exit` stay in the CLI layer. General no-tool chat is allowed, but business tools remain scoped to Case questions and never execute writes.
-
-The human CLI output is concise by default. Use `--verbose` on `case ask` or `case chat` to show rationale, used evidence and safe next steps.
 
 Ask a Case-scoped read-only Agent question:
 

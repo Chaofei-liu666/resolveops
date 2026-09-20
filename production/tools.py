@@ -14,44 +14,26 @@ from .erpnext import ERPNextAdapter
 from .models import LogisticsLane
 from .policy import allow_read_tool
 from .tool_result import ToolResult
+from .agent_core.contracts import ToolSchema
+from .case_profiles import case_profile
 
 engine = create_engine(settings.database_url, pool_pre_ping=True)
 
 ToolExecutor = Callable[[dict[str, Any], str], dict[str, Any]]
 
-READ_TOOL_PROFILES: dict[str, set[str]] = {
-    'inventory_shortage': {
-        'get_order',
-        'get_inventory',
-        'list_alternative_warehouses',
-        'get_customer_profile',
-        'get_item_supply_profile',
-        'get_inbound_purchase',
-        'get_transfer_options',
-    },
-    'price_mismatch': {
-        'get_order',
-        'get_reference_price',
-        'get_customer_profile',
-    },
-    'delivery_delay': {
-        'get_order',
-        'get_inbound_purchase',
-        'get_item_supply_profile',
-        'get_customer_profile',
-    },
-}
-
-
 def read_tool_names_for_case(event_type: str | None) -> set[str]:
-    return READ_TOOL_PROFILES.get(event_type or 'inventory_shortage', {'get_order'})
+    return set(case_profile(event_type).read_tools)
 
 
 @dataclass(frozen=True)
-class ToolSpec:
-    name: str
-    description: str
-    parameters: dict[str, Any]
+class ToolSpec(ToolSchema):
+    """ResolveOps runtime extension of an LLM-visible ``ToolSchema``.
+
+    ``ToolSchema`` is the agent-core contract; this domain type adds only
+    execution and governance metadata.  Write actions use the same type with
+    ``llm_callable=False`` and are invoked exclusively by the governed
+    executor after Policy/Approval, never by provider tool-calling.
+    """
     permission: str
     side_effect: str
     risk_level: str

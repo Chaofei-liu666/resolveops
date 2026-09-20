@@ -187,3 +187,11 @@ def build_tool_trace(
         'action_evidence': action_evidence,
         'observations': rows,
     }
+
+
+def bind_plan_evidence_refs(plan: dict[str, Any], trace: dict[str, Any]) -> None:
+    """Attach only deterministic supporting Evidence IDs to each Action."""
+    action_evidence = trace.get('action_evidence') if isinstance(trace, dict) else {}
+    action_evidence = action_evidence if isinstance(action_evidence, dict) else {}
+    for action in _actions(plan):
+        action['evidence_refs'] = list(action_evidence.get(_action_label(action), []))

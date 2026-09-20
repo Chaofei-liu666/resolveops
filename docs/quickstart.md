@@ -83,7 +83,7 @@ Open:
 
 ```text
 Swagger: http://localhost:8090/docs
-Console: http://localhost:8090
+Agent Workbench: python resolveops.py console
 ```
 
 Initialize local CLI config:
@@ -106,7 +106,7 @@ python resolveops.py config show
 
 `config show` masks the operator key. You can still override values per command with `--base-url` and `--operator-key`, or with `RESOLVEOPS_API_URL` / `RESOLVEOPS_OPERATOR_KEY`.
 
-On Windows, you can also double-click `resolveops.cmd` in the project directory. It opens a terminal, initializes the local CLI config if needed, checks runtime status, and then opens ResolveOps chat. If authentication fails, edit:
+On Windows, you can also double-click `resolveops.cmd` in the project directory. It initializes the local CLI config if needed, installs the Textual Workbench dependency on first use, starts the local services, and then opens the ResolveOps Agent Workbench. If authentication fails, edit:
 
 ```text
 C:\Users\<you>\.resolveops\config.json
@@ -117,11 +117,12 @@ Use the CLI:
 ```bash
 python resolveops.py status
 python resolveops.py doctor
-python resolveops.py chat
+python -m pip install -r requirements-cli.txt
+python resolveops.py console
 python resolveops.py eval summary --limit 20
 ```
 
-Inside `chat`, use `/new` to create a Case, `/cases` to list recent Cases, and `/case <case-id>` to enter a Case-scoped Agent chat. Top-level chat is an operator-level LLM conversation without ERP tools; it can answer general no-tool questions and disclose the configured `LLM_MODEL` / `LLM_BASE_URL` without exposing API keys. Case-specific business questions should enter one Case first.
+`console` is the only interactive interface. Its left pane lists Cases; its right pane keeps the current General or Case conversation, Agent trace, and approval controls together. General chat has no ERP tools. Select a Case or use `/focus <case-id>` before asking Case-specific questions; `/back` returns to General without closing the Workbench. General and Case answer text streams over SSE; background Case investigation renders durable lifecycle/business events instead of persisting model token deltas.
 
 Run tests:
 
@@ -212,13 +213,13 @@ Check the ERPNext sandbox data without writing anything:
 python resolveops.py sandbox check
 ```
 
-Prepare the sandbox route and demo stock through ResolveOps APIs:
+Restore the sandbox route and demo stock through ResolveOps APIs:
 
 ```bash
 python resolveops.py sandbox seed
 ```
 
-This command updates ResolveOps logistics-lane config and, when `ENABLE_FAULT_INJECTION=true`, sets the source warehouse stock in ERPNext through Stock Reconciliation. It still goes through:
+This command updates ResolveOps logistics-lane config and, when `ENABLE_FAULT_INJECTION=true`, resets the source warehouse stock to `40` and target warehouse stock to `0` in ERPNext through Stock Reconciliation. Run it before each repeated inventory-shortage demo. It still goes through:
 
 ```text
 CLI -> ResolveOps API -> ERPNextAdapter -> ERPNext REST API
@@ -226,35 +227,36 @@ CLI -> ResolveOps API -> ERPNextAdapter -> ERPNext REST API
 
 It does not call ERPNext directly from the CLI and is forbidden when `APP_ENV=production`.
 
-Open ResolveOps chat:
+Open the ResolveOps Agent Workbench:
 
 ```bash
-python resolveops.py chat
+python resolveops.py console
 ```
 
-Inside chat:
+Inside the Workbench:
 
 ```text
-/new             create a new Case interactively
-/cases           list recent Cases
-/case <case-id>  enter one Case-scoped Agent chat
+/new                     create a new Case
+/focus <case-id>         select one Case explicitly
+/back                    return to General chat
+/refresh                 refresh Cases and active Case events
+/events                  expand/collapse detailed event data
+/eval                    show evaluation summary
+/role <role>             switch a seeded local demo identity
+/reset-demo              reset source/target stock for the next demo run
+/approve [approval-id]   approve after a confirmation dialog
+/revoke [approval-id]    revoke after a confirmation dialog
+/quit                    leave the Workbench
 ```
 
-You can also create a Case directly:
+For scripts and diagnostics, the non-interactive CLI remains available:
 
 ```bash
 python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-00002 --reason "sandbox run"
 python resolveops.py case list
 python resolveops.py case show <case-id>
-python resolveops.py case watch <case-id>
-python resolveops.py case chat <case-id>
+python resolveops.py case ask <case-id> "Why not create a purchase request?"
 ```
-
-`case watch` is the CLI trace view. It polls ResolveOps APIs and prints Case events such as read-tool calls, Agent decision summaries, approvals, execution, verification and handoff.
-
-`case chat` starts an interactive Case-scoped read-only Agent session. Use `/show`, `/events`, `/help` and `/exit` inside the session. General no-tool chat is allowed, but business tools remain scoped to Case questions and never execute writes.
-
-Default CLI answers hide rationale and safe next steps to keep the terminal readable. Add `--verbose` to `case ask` or `case chat` when debugging.
 
 Ask a Case-scoped read-only Agent question:
 

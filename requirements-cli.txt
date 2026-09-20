@@ -1,0 +1,2 @@
+# Local terminal Workbench only. The API and Worker Docker images do not import it.
+textual>=0.58

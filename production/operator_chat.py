@@ -11,13 +11,14 @@ from typing import Any
 
 from .config import settings
 from .llm_gateway import LLMGateway, LLMResult
+from .agent_core import LLMRequest
 
 
-OPERATOR_CHAT_SYSTEM = """You are ResolveOps, a CLI assistant for order fulfillment exception cases.
+OPERATOR_CHAT_SYSTEM = """You are ResolveOps, an enterprise Agent Workbench assistant for order fulfillment exception cases.
 You are in the operator-level chat before a specific Case is selected.
 This top-level chat is allowed to behave like a normal assistant for harmless no-tool conversation: explanation, writing, lightweight math, technical discussion, project Q&A, and creative requests are allowed.
 Boundary: no ERP tools are available here, no business writes are allowed, and you must not claim live ERP or Case facts that were not provided.
-Do not force every answer back to order handling. Mention /new or /case <case-id> only when the user asks to create/analyze a business exception or when it is genuinely relevant.
+Do not force every answer back to order handling. Mention /new or /focus <case-id> only when the user asks to create/analyze a business exception or when it is genuinely relevant.
 If the operator asks what underlying model is configured, use the provided configured_model and configured_base_url values.
 Never reveal API keys or secrets.
 Use the provided recent conversation history to understand references like "刚刚", "继续", and "为什么".
@@ -76,13 +77,13 @@ def fallback_operator_answer(question: str) -> str:
     normalized = question.lower().strip()
     if any(token in normalized for token in {'你好', 'hello', 'hi', '你是谁'}):
         return (
-            '我是 ResolveOps，一个用于订单履约异常处理的 CLI 助手。'
-            '你可以让我解释项目、查看 Case、创建新 Case，或进入某个 Case 后分析异常。'
+            '我是 ResolveOps，一个用于订单履约异常处理的 Agent Workbench。'
+            '你可以让我解释项目、创建新 Case，或显式选择某个 Case 后分析异常。'
         )
     if '能做什么' in normalized or 'what can you do' in normalized:
         return (
             '我可以处理三类入口任务：解释 ResolveOps 的设计和能力；'
-            '通过 /new 创建订单异常 Case；通过 /case <case-id> 进入具体 Case，'
+            '通过 /new 创建订单异常 Case；通过 /focus <case-id> 进入具体 Case，'
             '查看工具调用、证据、审批、执行和验证过程。'
         )
     if '项目' in normalized or '干什么' in normalized or 'resolveops' in normalized:
@@ -104,9 +105,9 @@ def fallback_operator_answer(question: str) -> str:
             '让异常也能被稳妥安排。'
         )
     return (
-        '这是 ResolveOps 顶层对话窗口。当前不绑定具体 Case，也不会调用业务工具。'
-        '如果要创建异常，请输入 /new；如果要分析某个 Case，请输入 /case <case-id>；'
-        '如果要查看已有 Case，请输入 /cases。普通无工具问题也可以直接问。'
+        '这是 ResolveOps Workbench 的顶层对话。当前不绑定具体 Case，也不会调用业务工具。'
+        '如果要创建异常，请输入 /new；如果要分析某个 Case，请从左侧选择或输入 /focus <case-id>。'
+        '普通无工具问题也可以直接问。'
     )
 
 
@@ -128,7 +129,7 @@ class OperatorChatAgent:
                     f'current_date={date.today().isoformat()}\n'
                     f'configured_model={settings.llm_model or "not configured"}\n'
                     f'configured_base_url={settings.llm_base_url or "not configured"}\n'
-                    'Context: this is top-level ResolveOps chat. No tools are available here.'
+                    'Context: this is the Workbench General view. No tools are available here.'
                 ),
             },
         ]
@@ -162,6 +163,40 @@ class OperatorChatAgent:
             'llm': result.telemetry(),
             'history_items': len(safe_history),
         }
+
+    def stream_answer(self, question: str, history: list[dict[str, str]] | None = None):
+        """Stream only the visible General-chat reply, never a business tool trace."""
+        safe_history = normalize_chat_history(history)
+        if is_model_identity_question(question):
+            answer = configured_model_answer(question)['answer']
+            yield {'type': 'start', 'source': 'system_config'}
+            yield {'type': 'delta', 'text': answer}
+            yield {'type': 'done', 'answer': answer, 'source': 'system_config', 'tools_used': []}
+            return
+        messages: list[dict[str, str]] = [
+            {'role': 'system', 'content': OPERATOR_CHAT_SYSTEM},
+            {'role': 'user', 'content': (
+                f'current_date={date.today().isoformat()}\n'
+                f'configured_model={settings.llm_model or "not configured"}\n'
+                f'configured_base_url={settings.llm_base_url or "not configured"}\n'
+                'Context: this is the Workbench General view. No tools are available here.'
+            )},
+            *safe_history,
+            {'role': 'user', 'content': question},
+        ]
+        emitted = False
+        for event in self.llm.stream_chat(LLMRequest(messages=messages, temperature=0.3).to_payload()):
+            if event.get('type') == 'delta':
+                emitted = True
+            if event.get('type') == 'done' and not emitted and not str(event.get('answer') or '').strip():
+                event = {'type': 'error', 'error_code': 'empty_llm_answer'}
+            if event.get('type') == 'error' and not emitted:
+                fallback = fallback_operator_answer(question)
+                yield {'type': 'start', 'source': 'fallback'}
+                yield {'type': 'delta', 'text': fallback}
+                yield {'type': 'done', 'answer': fallback, 'source': 'fallback', 'tools_used': []}
+                return
+            yield event
 
     @staticmethod
     def _fallback(question: str, result: LLMResult) -> dict[str, Any]:

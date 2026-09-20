@@ -10,6 +10,21 @@ if errorlevel 1 (
   exit /b 1
 )
 
+python -c "import textual" >nul 2>&1
+if errorlevel 1 (
+  echo [Setup] Installing the ResolveOps Workbench dependency for first use...
+  python -m pip install -r requirements-cli.txt
+  if errorlevel 1 (
+    echo.
+    echo [Error] Could not install the Workbench dependency.
+    echo Connect to the internet, then run:
+    echo   python -m pip install -r requirements-cli.txt
+    echo.
+    cmd /k
+    exit /b 1
+  )
+)
+
 python resolveops.py init
 echo.
 
@@ -121,9 +136,9 @@ if "%READY%"=="0" (
 python resolveops.py status
 echo.
 
-echo Opening ResolveOps chat...
+echo Opening ResolveOps Agent Workbench...
 echo.
-python resolveops.py chat
+python resolveops.py console
 
 echo If authentication failed, edit:
 echo   %USERPROFILE%\.resolveops\config.json

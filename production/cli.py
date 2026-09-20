@@ -10,18 +10,17 @@ import argparse
 import json
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-import httpx
+import httpx  # compatibility: CLI tests patch the shared transport module
+from .api_client import ApiClient, ApiClientError, compact_json
 
 
 DEFAULT_BASE_URL = 'http://localhost:8090'
 CONFIG_DIR_NAME = '.resolveops'
 CONFIG_FILE_NAME = 'config.json'
-TERMINAL_CASE_STATUSES = {'waiting_approval', 'manual_review', 'resolved'}
 FIXED_EVAL_CASES = [
     ('normal_inventory_shortage', 'inventory_shortage', 'baseline shortage case expected to create a grounded fulfillment plan'),
     ('normal_inventory_shortage', 'inventory_shortage', 'baseline shortage case expected to create a grounded fulfillment plan'),
@@ -130,36 +129,6 @@ def config_edit_hint(created: bool = False) -> str:
     )
 
 
-class ApiClient:
-    def __init__(self, base_url: str, operator_key: str | None) -> None:
-        self.base_url = base_url.rstrip('/')
-        self.operator_key = operator_key
-
-    def request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> Any:
-        headers = {}
-        if self.operator_key:
-            headers['X-Operator-Key'] = self.operator_key
-        response = httpx.request(
-            method,
-            self.base_url + path,
-            headers=headers,
-            json=payload,
-            timeout=30,
-        )
-        if response.status_code >= 400:
-            try:
-                detail = response.json()
-            except Exception:
-                detail = response.text
-            hint = ''
-            if response.status_code in {401, 403}:
-                hint = '\n' + config_edit_hint()
-            raise CliError(f'{method} {path} failed: HTTP {response.status_code} {detail}{hint}')
-        if not response.content:
-            return None
-        return response.json()
-
-
 def print_json(data: Any) -> None:
     print(json.dumps(data, ensure_ascii=False, indent=2))
 
@@ -172,13 +141,6 @@ def paint(text: str, color: str) -> str:
     if not supports_color():
         return text
     return f"{ANSI.get(color, '')}{text}{ANSI['reset']}"
-
-
-def compact_json(value: Any, max_len: int = 180) -> str:
-    if value is None:
-        return ''
-    text = json.dumps(value, ensure_ascii=False, separators=(',', ':'))
-    return text if len(text) <= max_len else text[: max_len - 3] + '...'
 
 
 def fmt_percent(value: Any) -> str:
@@ -313,82 +275,6 @@ def print_case_summary(case: dict[str, Any]) -> None:
             print(f"- {event.get('kind')}: {event.get('message')}")
 
 
-def event_style(kind: str) -> tuple[str, str]:
-    if kind in {'case_created', 'context_built'}:
-        return '[Case]', 'white'
-    if kind in {'tool_scheduled', 'tool_observation', 'case_question_tool_observation'}:
-        return '[Tool]', 'cyan'
-    if kind in {'agent_decision_trace', 'agent_plan_created', 'evidence_grounding_passed'}:
-        return '[Agent]', 'magenta'
-    if kind in {'approval_requested', 'approval_partial', 'approval_granted'}:
-        return '[Approval]', 'yellow'
-    if kind in {'execution_started'}:
-        return '[Executor]', 'blue'
-    if kind in {'verification_passed', 'lessons_recorded'}:
-        return '[Verify]', 'green'
-    if kind in {'handoff', 'manual_review_required', 'worker_failure', 'policy_denied', 'evidence_grounding_failed', 'verification_failed', 'approval_expired', 'approval_revoked'}:
-        return '[Stop]', 'red'
-    if kind in {'replan_requested', 'task_requeued'}:
-        return '[Replan]', 'yellow'
-    if kind in {'case_question_asked', 'case_question_answered'}:
-        return '[Ask]', 'green'
-    return '[Event]', 'white'
-
-
-def format_event(event: dict[str, Any]) -> str:
-    kind = event.get('kind') or 'event'
-    label, color = event_style(kind)
-    data = event.get('data') or {}
-    message = event.get('message') or ''
-    created = event.get('created_at') or ''
-    head = f"{paint(label, color)} {paint(kind, 'dim')} {message}"
-
-    if kind in {'tool_scheduled', 'tool_observation', 'case_question_tool_observation'}:
-        tool = data.get('tool')
-        if not tool and 'Agent called read tool:' in message:
-            tool = message.split('Agent called read tool:', 1)[1].strip().rstrip('.')
-        if not tool and 'Case question called read tool:' in message:
-            tool = message.split('Case question called read tool:', 1)[1].strip().rstrip('.')
-        status = data.get('status') or ((data.get('tool_result') or {}).get('status') if isinstance(data.get('tool_result'), dict) else None)
-        scheduler = data.get('scheduler') or ((data.get('tool_result') or {}).get('scheduler') if isinstance(data.get('tool_result'), dict) else {})
-        result = data.get('result')
-        suffix = f" tool={tool}"
-        if status:
-            suffix += f" status={status}"
-        if scheduler:
-            suffix += f" scheduler={compact_json(scheduler, 80)}"
-        if result:
-            suffix += f" result={compact_json(result, 180)}"
-        return f"{head}{suffix}"
-
-    if kind == 'agent_decision_trace':
-        trace = data.get('decision_trace') or []
-        rejected = data.get('rejected_actions') or []
-        missing = data.get('missing_information') or []
-        details = []
-        if trace:
-            details.append(f"decisions={compact_json(trace, 220)}")
-        if rejected:
-            details.append(f"rejected={compact_json(rejected, 180)}")
-        if missing:
-            details.append(f"missing={compact_json(missing, 160)}")
-        return f"{head} {' '.join(details)}".rstrip()
-
-    if kind in {'agent_plan_created', 'approval_requested', 'approval_partial', 'approval_granted'}:
-        return f"{head} {compact_json(data, 240)}".rstrip()
-
-    if kind in {'replan_requested', 'handoff', 'manual_review_required', 'worker_failure', 'verification_failed'}:
-        return f"{head} {compact_json(data, 240)}".rstrip()
-
-    return f"{head} {paint(created, 'dim')}".rstrip()
-
-
-def print_case_watch_header(case_id: str) -> None:
-    print(paint('ResolveOps live Case trace', 'green'))
-    print(f"case: {case_id}")
-    print(paint('Press Ctrl+C to stop watching.', 'dim'))
-
-
 def print_case_answer(data: dict[str, Any], *, verbose: bool = False, show_case: bool = True, show_question: bool = True) -> None:
     if show_case:
         print(paint(
@@ -428,90 +314,6 @@ def print_case_answer(data: dict[str, Any], *, verbose: bool = False, show_case:
                 print(f"- {step}")
 
 
-def print_case_chat_help() -> None:
-    print('Commands:')
-    print('  /show        show current Case summary')
-    print('  /events      show recent Case event trace')
-    print('  /eval        show current Case Agent evaluation metrics')
-    print('  /help        show this help')
-    print('  /exit        leave the Case chat')
-    print('Any other input is sent as a Case-scoped read-only Agent question.')
-    print('General no-tool chat is allowed; business tools stay scoped to Case questions.')
-
-
-def print_operator_chat_help() -> None:
-    print('Commands:')
-    print('  /status          show ResolveOps runtime status')
-    print('  /cases           list recent Cases')
-    print('  /eval            show Agent evaluation summary')
-    print('  /new             create a new Case interactively')
-    print('  /case <case-id>  enter one Case-scoped Agent chat')
-    print('  /help            show this help')
-    print('  /exit            leave ResolveOps chat')
-    print('Free text is handled as a no-tool operator-level chat with short-term context.')
-    print('Case-specific questions require /case <case-id> so business context stays isolated.')
-
-
-def looks_like_case_creation(text: str) -> bool:
-    normalized = text.lower()
-    markers = (
-        'create case', 'new case', 'open case',
-        '创建case', '创建 case', '新建case', '新建 case',
-        '库存不足', '价格异常', '价格不一致', '延期', '供应商延期',
-    )
-    return any(marker in normalized for marker in markers)
-
-
-def prompt_required(label: str, *, default: str | None = None) -> str:
-    suffix = f' [{default}]' if default else ''
-    while True:
-        value = input(f'{label}{suffix}: ').strip()
-        if value:
-            return value
-        if default is not None:
-            return default
-        print(paint('This field is required.', 'red'))
-
-
-def choose_event_type() -> str:
-    options = {
-        '1': 'inventory_shortage',
-        '2': 'price_mismatch',
-        '3': 'delivery_delay',
-        '4': 'supplier_delay',
-    }
-    print('Case type:')
-    print('  1. inventory_shortage  库存不足')
-    print('  2. price_mismatch      价格不一致')
-    print('  3. delivery_delay      交付延期')
-    print('  4. supplier_delay      供应商延期')
-    while True:
-        value = input('Choose type [1]: ').strip() or '1'
-        if value in options:
-            return options[value]
-        if value in options.values():
-            return value
-        print(paint('Invalid Case type. Use 1-4 or the event_type name.', 'red'))
-
-
-def create_case_interactively(client: ApiClient) -> dict[str, Any]:
-    print(paint('[New Case]', 'green'))
-    event_type = choose_event_type()
-    order_id = prompt_required('Order ID')
-    reason = prompt_required('Reason', default='created from ResolveOps chat')
-    payload = {
-        'tenant_id': 'demo',
-        'event_type': event_type,
-        'order_id': order_id,
-        'reason': reason,
-    }
-    data = client.request('POST', '/v1/cases', payload)
-    duplicate = ' duplicate=true' if data.get('duplicate') else ''
-    print(f"case created: {data.get('case_id')} status={data.get('status')}{duplicate}")
-    print(f"next: /case {data.get('case_id')}")
-    return data
-
-
 def fixed_eval_case_payloads(suite: str, order_id: str, tenant_id: str) -> list[dict[str, Any]]:
     payloads = []
     for index, (scenario, event_type, expected_signal) in enumerate(FIXED_EVAL_CASES, 1):
@@ -529,15 +331,6 @@ def fixed_eval_case_payloads(suite: str, order_id: str, tenant_id: str) -> list[
             },
         })
     return payloads
-
-
-def print_recent_case_events(case: dict[str, Any], limit: int = 12) -> None:
-    events = case.get('events') or []
-    if not events:
-        print('No events recorded for this Case.')
-        return
-    for event in events[-limit:]:
-        print(format_event(event))
 
 
 def print_eval_summary(data: dict[str, Any], show_cases: bool = False) -> None:
@@ -771,7 +564,7 @@ def cmd_doctor(args: argparse.Namespace, client: ApiClient) -> int:
     elif not ok_sandbox or sandbox_status != 'ready':
         print(paint('[Next]', 'blue') + ' Prepare sandbox data: python resolveops.py sandbox seed')
     else:
-        print(paint('[Ready]', 'green') + ' Runtime and sandbox are ready. Try: python resolveops.py chat')
+        print(paint('[Ready]', 'green') + ' Runtime and sandbox are ready. Try: python resolveops.py console')
     return 0 if ok_health and ok_runtime else 1
 
 
@@ -818,10 +611,10 @@ def cmd_init(args: argparse.Namespace, client: ApiClient | None = None) -> int:
             print(paint('[Config]', 'red') + f' Invalid config: {exc}')
             print(f'Edit: {path}')
             print()
-    print(paint('[Next]', 'cyan') + ' Start chat:')
-    print('python resolveops.py chat')
+    print(paint('[Next]', 'cyan') + ' Start Workbench:')
+    print('python resolveops.py console')
     print()
-    print(paint('[Note]', 'dim') + ' Case commands still require an explicit <case-id> to preserve Case context isolation.')
+    print(paint('[Note]', 'dim') + ' Case work is isolated by explicit Case selection in the Workbench.')
     return 0
 
 
@@ -898,147 +691,18 @@ def cmd_case_ask(args: argparse.Namespace, client: ApiClient) -> int:
     return 0
 
 
-def cmd_case_watch(args: argparse.Namespace, client: ApiClient) -> int:
-    print_case_watch_header(args.case_id)
-    seen: set[str] = set()
-    start = time.monotonic()
-    last_status = None
+def cmd_console(args: argparse.Namespace, client: ApiClient) -> int:
+    """Launch the single interactive ResolveOps operator interface."""
     try:
-        while True:
-            data = client.request('GET', f'/v1/cases/{args.case_id}')
-            status = data.get('status')
-            if status != last_status:
-                print(f"{paint('status', 'green')}: {status}")
-                last_status = status
-            for event in data.get('events') or []:
-                event_id = str(event.get('id') or f"{event.get('kind')}:{event.get('created_at')}")
-                if event_id in seen:
-                    continue
-                seen.add(event_id)
-                print(format_event(event))
-            if not args.follow and status in TERMINAL_CASE_STATUSES:
-                break
-            if args.timeout and time.monotonic() - start >= args.timeout:
-                print(paint('watch timeout reached', 'yellow'))
-                break
-            time.sleep(max(0.2, args.interval))
-    except KeyboardInterrupt:
-        print()
-        print(paint('watch stopped', 'yellow'))
-    return 0
-
-
-def cmd_case_chat(args: argparse.Namespace, client: ApiClient) -> int:
-    case = client.request('GET', f'/v1/cases/{args.case_id}')
-    print(paint('ResolveOps Case Chat', 'green'))
-    print(f"case: {case.get('id')} type={case.get('event_type')} order={case.get('order_id')} status={case.get('status')}")
-    print_case_chat_help()
-    prompt = f"{paint('[You]', 'yellow')} resolveops {str(args.case_id)[:8]}> "
-    while True:
-        try:
-            question = input(prompt).strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            print(paint('chat stopped', 'yellow'))
-            return 0
-        if not question:
-            continue
-        lowered = question.lower()
-        if lowered in {'/exit', '/quit', 'exit', 'quit'}:
-            return 0
-        if lowered in {'/help', 'help', '?'}:
-            print_case_chat_help()
-            continue
-        if lowered == '/show':
-            case = client.request('GET', f'/v1/cases/{args.case_id}')
-            print_case_summary(case)
-            continue
-        if lowered == '/events':
-            case = client.request('GET', f'/v1/cases/{args.case_id}')
-            print_recent_case_events(case, limit=args.events)
-            continue
-        if lowered == '/eval':
-            try:
-                data = client.request('GET', f'/v1/evals/cases/{args.case_id}')
-                print_eval_case(data, show_events=False)
-            except CliError as exc:
-                print(paint(f"error: {exc}", 'red'))
-            continue
-        try:
-            data = client.request('POST', f'/v1/cases/{args.case_id}/ask', {'question': question})
-        except CliError as exc:
-            print(paint(f"error: {exc}", 'red'))
-            continue
-        print_case_answer(data, verbose=args.verbose, show_case=False, show_question=False)
-
-
-def cmd_chat(args: argparse.Namespace, client: ApiClient) -> int:
-    print(paint('ResolveOps Chat', 'green'))
-    print('Operator-level LLM chat. No ERP tools are called here.')
-    print_operator_chat_help()
-    prompt = f"{paint('[You]', 'yellow')} resolveops> "
-    history: list[dict[str, str]] = []
-    max_history_items = 12
-    while True:
-        try:
-            text = input(prompt).strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            print(paint('chat stopped', 'yellow'))
-            return 0
-        if not text:
-            continue
-        lowered = text.lower()
-        if lowered in {'/exit', '/quit', 'exit', 'quit'}:
-            return 0
-        if lowered in {'/help', 'help', '?'}:
-            print_operator_chat_help()
-            continue
-        if lowered == '/status':
-            try:
-                print_status(client.request('GET', '/v1/runtime/status'))
-            except CliError as exc:
-                print(paint(f"error: {exc}", 'red'))
-            continue
-        if lowered == '/cases':
-            try:
-                data = client.request('GET', f'/v1/cases?limit={args.limit}')
-                print('Cases')
-                for case in data:
-                    print(f"- {case.get('id')}  {case.get('event_type')}  {case.get('order_id')}  {case.get('status')}")
-            except CliError as exc:
-                print(paint(f"error: {exc}", 'red'))
-            continue
-        if lowered == '/eval':
-            try:
-                data = client.request('GET', f'/v1/evals/summary?limit={args.limit}')
-                print_eval_summary(data, show_cases=False)
-            except CliError as exc:
-                print(paint(f"error: {exc}", 'red'))
-            continue
-        if lowered == '/new':
-            try:
-                create_case_interactively(client)
-            except CliError as exc:
-                print(paint(f"error: {exc}", 'red'))
-            continue
-        if lowered.startswith('/case '):
-            case_id = text.split(maxsplit=1)[1].strip()
-            nested_args = argparse.Namespace(case_id=case_id, events=args.events, verbose=args.verbose)
-            return cmd_case_chat(nested_args, client)
-        try:
-            data = client.request('POST', '/v1/chat', {'question': text, 'history': history[-max_history_items:]})
-        except CliError as exc:
-            print(paint(f"error: {exc}", 'red'))
-            continue
-        source = data.get('source')
-        suffix = f" {paint(f'({source})', 'dim')}" if source else ''
-        answer_text = data.get('answer') or ''
-        print(f"\n{paint('[Answer]', 'blue')}{suffix}")
-        print(answer_text)
-        history.append({'role': 'user', 'content': text})
-        history.append({'role': 'assistant', 'content': answer_text})
-        history = history[-max_history_items:]
+        from .console import run_workbench
+    except ModuleNotFoundError as exc:
+        if exc.name == 'textual':
+            raise CliError(
+                'ResolveOps Workbench requires Textual. Install it once with:\n'
+                'python -m pip install -r requirements-cli.txt'
+            ) from exc
+        raise
+    return run_workbench(client, case_limit=args.case_limit, poll_interval=args.poll_interval)
 
 
 def cmd_fi_list(args: argparse.Namespace, client: ApiClient) -> int:
@@ -1113,6 +777,7 @@ def cmd_sandbox_seed(args: argparse.Namespace, client: ApiClient) -> int:
         'source_warehouse': args.source_warehouse,
         'target_warehouse': args.target_warehouse,
         'source_qty': args.source_qty,
+        'target_qty': args.target_qty,
         'transit_days': args.transit_days,
         'cost_per_unit': args.cost_per_unit,
         'company': args.company,
@@ -1221,11 +886,10 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser('doctor', help='Diagnose CLI config, API runtime and ERPNext sandbox')
     doctor.set_defaults(handler=cmd_doctor)
 
-    chat = sub.add_parser('chat', help='Open the ResolveOps operator chat')
-    chat.add_argument('--limit', type=int, default=10, help='Number of cases shown by /cases')
-    chat.add_argument('--events', type=int, default=12, help='Number of recent events shown after entering /case')
-    chat.add_argument('--verbose', action='store_true', help='Show rationale, used evidence and safe next steps in Case chat')
-    chat.set_defaults(handler=cmd_chat)
+    console = sub.add_parser('console', help='Open the ResolveOps Agent Workbench')
+    console.add_argument('--case-limit', type=int, default=24, help='Recent Cases shown in the Workbench')
+    console.add_argument('--poll-interval', type=float, default=1.0, help='Active Case refresh interval in seconds')
+    console.set_defaults(handler=cmd_console)
 
     case = sub.add_parser('case', help='Case commands')
     case_sub = case.add_subparsers(dest='case_command', required=True)
@@ -1247,17 +911,6 @@ def build_parser() -> argparse.ArgumentParser:
     case_ask.add_argument('question', nargs='+')
     case_ask.add_argument('--verbose', action='store_true', help='Show rationale, used evidence and safe next steps')
     case_ask.set_defaults(handler=cmd_case_ask)
-    case_watch = case_sub.add_parser('watch', help='Watch a live colorized Case event trace')
-    case_watch.add_argument('case_id')
-    case_watch.add_argument('--interval', type=float, default=1.0, help='Polling interval in seconds')
-    case_watch.add_argument('--timeout', type=float, default=60.0, help='Maximum watch time in seconds; 0 disables timeout')
-    case_watch.add_argument('--follow', action='store_true', help='Keep watching after waiting_approval/manual_review/resolved')
-    case_watch.set_defaults(handler=cmd_case_watch)
-    case_chat = case_sub.add_parser('chat', help='Open an interactive Case-scoped Agent chat')
-    case_chat.add_argument('case_id')
-    case_chat.add_argument('--events', type=int, default=12, help='Number of recent events shown by /events')
-    case_chat.add_argument('--verbose', action='store_true', help='Show rationale, used evidence and safe next steps for each answer')
-    case_chat.set_defaults(handler=cmd_case_chat)
 
     fi = sub.add_parser('fi', help='Fault injection commands')
     fi_sub = fi.add_subparsers(dest='fi_command', required=True)
@@ -1287,6 +940,7 @@ def build_parser() -> argparse.ArgumentParser:
     sandbox_seed.add_argument('--source-warehouse', default='重庆仓 - ROPS')
     sandbox_seed.add_argument('--target-warehouse', default='Stores - ROPS')
     sandbox_seed.add_argument('--source-qty', type=float, default=40)
+    sandbox_seed.add_argument('--target-qty', type=float, default=0, help='Target warehouse stock after reset')
     sandbox_seed.add_argument('--transit-days', type=float, default=1)
     sandbox_seed.add_argument('--cost-per-unit', type=float, default=8)
     sandbox_seed.add_argument('--company')
@@ -1351,8 +1005,9 @@ def main(argv: list[str] | None = None) -> int:
             raise CliError('missing operator_key.\n' + config_edit_hint(created=config_created))
         client = ApiClient(base_url, operator_key)
         return args.handler(args, client)
-    except CliError as exc:
-        print(f'error: {exc}', file=sys.stderr)
+    except (CliError, ApiClientError) as exc:
+        hint = '\n' + config_edit_hint() if isinstance(exc, ApiClientError) and ('HTTP 401' in str(exc) or 'HTTP 403' in str(exc)) else ''
+        print(f'error: {exc}{hint}', file=sys.stderr)
         return 1
 
 

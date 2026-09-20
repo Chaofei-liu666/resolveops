@@ -6,10 +6,9 @@ from typing import Any
 from .actions import planner_action_catalog, planner_action_instructions, registered_action_types
 from .config import settings
 from .llm_gateway import LLMGateway
-from .tool_result import ToolResult
-from .tool_scheduler import ReadToolCall, ReadToolScheduler
+from .agent_core import ReadToolLoop, convert_to_llm_messages
 SYSTEM='''You are ResolveOps' investigation agent for ERP business exceptions.
-Use a deliberate loop: form a hypothesis, call the single most useful read tool, and update your hypothesis from its result. Never invent facts or propose direct ERP writes.
+Use a deliberate loop: form a hypothesis, call the single most useful read tool, and update your hypothesis from its result. On TURN 1, get_order is the only available Tool: read the actual SKU, target warehouse, required quantity and delivery constraint first. From TURN 2 onward, choose only the additional read Tools justified by that observed order. Never invent facts or propose direct ERP writes.
 Investigate dynamically from case_context.scope.event_type:
 - inventory_shortage: may be caused by available stock, reservations, inbound supply, transfer feasibility, or customer constraints.
 - price_mismatch: compare the order item rate against reference price evidence; do not propose changing ERP prices directly. If a mismatch is supported, propose create_price_review_ticket.
@@ -21,6 +20,7 @@ Before recommending create_price_review_ticket, you must have read the order and
 Before recommending create_supplier_followup_task, you must have read the order and get_inbound_purchase for the same SKU. The inbound schedule_date must be later than the customer delivery date.
 When evidence is sufficient, return ONLY JSON with: status (ready|handoff), recommended_actions (array), alternatives (array), rationale (string), missing_information (array), evidence_summary (array), decision_trace (array), and rejected_actions (array). A recommended plan may contain one action or a coordinated set of actions. Choose based on evidence; do not always combine actions. Write actions are not directly callable tools; propose them only in recommended_actions using the Action Schemas supplied by the runtime. Include risk, preconditions and expected_effect. decision_trace must be concise audit notes, not hidden chain-of-thought. rejected_actions must explain plausible actions that were considered but not selected.'''
 PLANNER_SYSTEM_BASE='''You are the planning phase of ResolveOps. Use only the supplied ERP observations as facts. Tool errors mean unknown, never a negative fact. Return JSON only with status, recommended_actions, alternatives, rationale, missing_information, evidence_summary, decision_trace, rejected_actions. missing_information must be an array. recommended_actions is an array with one to three actions. decision_trace is an array of short audit notes explaining what evidence changed the decision; do not include hidden chain-of-thought. rejected_actions is an array of objects with action_type and reason. Choose a single action when it is best; choose a coordinated set only when the combined evidence makes it better.
+Write rationale, evidence_summary, decision_trace, missing_information, alternatives, and rejected_actions.reason in concise Chinese suitable for an operator-facing audit display. Keep JSON keys, Tool names, Action types, ERP IDs, field names, quantities, dates, and currencies unchanged. Do not expose hidden chain-of-thought; state only factual evidence and the resulting decision.
 For inventory_shortage, recommended actions must jointly resolve the shortage. Customer allows_partial_delivery=true permits split delivery as an option; false blocks it; null is unknown. get_transfer_options is the only evidence for transfer transit days and unit cost. get_item_supply_profile is the only evidence for replenishment lead time. Never claim a route or purchase can meet the delivery date without a tool result supporting that claim. Do not hand off only because purchase unit cost is unknown when the action is a reversible draft purchase request and lead time evidence meets the delivery date; put non-blocking gaps in missing_information and return ready.
 For price_mismatch, compare the Sales Order item rate with get_reference_price.reference_rate. If they differ and both facts are observed, propose create_price_review_ticket. Never propose directly changing the Sales Order price.
 For price_mismatch, do not use inventory or replenishment actions.
@@ -30,75 +30,67 @@ REPAIR_SYSTEM='''You repair ResolveOps planner output into valid JSON only.
 Do not add new business facts. Do not invent tool results. Use only the provided evidence and available action schemas.
 Return exactly one JSON object with keys: status, recommended_actions, alternatives, rationale, missing_information, evidence_summary, decision_trace, rejected_actions.
 status must be "ready" or "handoff"; recommended_actions, alternatives, missing_information, and evidence_summary must be arrays.
-Each recommended action must use action_type and input matching one available action schema.'''
+Each recommended action must use action_type and input matching one available action schema. Write all human-readable decision fields in concise Chinese, while preserving JSON keys, Tool names, Action types, ERP IDs, field names, quantities, dates, and currencies.'''
 PLAN_REPAIR_SYSTEM='''You are ResolveOps' plan self-correction phase.
 The previous Action Plan failed deterministic evidence grounding. Repair the plan using only the provided observations, grounding problems and action schemas.
 Do not call tools. Do not invent facts. Do not weaken safety rules.
 If the problems can be fixed by correcting action arguments, removing an unsupported action, or choosing another supported action from existing evidence, return status="ready" with repaired recommended_actions.
 If the evidence is insufficient, return status="handoff" with missing_information and rejected_actions.
 Return JSON only with keys: status, recommended_actions, alternatives, rationale, missing_information, evidence_summary, decision_trace, rejected_actions.
-Every action input must match observed ERP/tool evidence such as SKU, warehouse, quantity, price, supplier, purchase order and dates.'''
+Every action input must match observed ERP/tool evidence such as SKU, warehouse, quantity, price, supplier, purchase order and dates. Write all human-readable decision fields in concise Chinese, while preserving JSON keys, Tool names, Action types, ERP IDs, field names, quantities, dates, and currencies.'''
 class InvestigationAgent:
     def __init__(self, tools, llm_gateway: LLMGateway | None = None):
         self.tools=tools
         self.llm=llm_gateway or LLMGateway()
-    def run(self, order_id, on_observation, context: str | dict[str, Any] = ''):
+    def run(self, order_id, on_observation, context: str | dict[str, Any] = '', on_lifecycle=None):
+        """Run business investigation on top of the reusable bounded read loop."""
         user=f'Investigate order {order_id}. Start by reading the order.'
         context_text = self._context_text(context)
         if context_text: user+=f'\nCase context: {context_text}. Treat previous availability as stale when context shows replanning or preflight failure; gather fresh evidence before proposing any action.'
-        messages=[{'role':'system','content':SYSTEM},{'role':'user','content':user}]
-        seen={}
-        failed_tools=[]
-        observations=[]
-        budget_exhausted=False
-        scheduler=ReadToolScheduler(self.tools, max_workers=settings.agent_read_tool_parallelism)
-        max_turns=max(1, settings.agent_max_investigation_turns)
-        max_read_tool_calls=max(1, settings.agent_max_read_tool_calls)
-        for _ in range(max_turns):
-            # DeepSeek Thinking mode supports automatic tool choice, not a
-            # forced function name. Evidence validation below prevents a plan
-            # being created when the model skips the necessary read calls.
-            payload={'messages':messages,'tools':self.tools.definitions(),'tool_choice':'auto','temperature':0}
-            llm_result=self.llm.chat(payload)
-            if not llm_result.ok:
-                return {'status':'handoff','recommended_actions':[],'alternatives':[],'rationale':'LLM investigation call failed before sufficient evidence was gathered.','missing_information':[llm_result.error_code or 'llm_error'],'llm':llm_result.telemetry()}
-            message=llm_result.first_message() or {}; messages.append(message); calls=message.get('tool_calls') or []
-            if not calls:
-                break
-            batch=[]
-            malformed=[]
-            for call in calls:
-                if len(observations) >= max_read_tool_calls:
-                    budget_exhausted=True
-                    break
-                try:
-                    args=json.loads(call['function']['arguments'] or '{}')
-                    if not isinstance(args, dict):
-                        raise ValueError('tool arguments must be a JSON object')
-                except (json.JSONDecodeError, ValueError, TypeError) as exc:
-                    malformed.append((call, ToolResult.failure('invalid_tool_arguments', error_type=type(exc).__name__)))
-                    continue
-                batch.append(ReadToolCall(call_id=call['id'],name=call['function']['name'],arguments=args))
-            for call, tool_result in malformed:
-                failed_tools.append(call['function']['name'])
-                result=tool_result.observation_result()
-                on_observation(call['function']['name'],{},result,tool_result.to_dict())
-                observations.append({'tool':call['function']['name'],'arguments':{},'result':result,'tool_result':tool_result.to_dict(),'scheduler':{'source':'invalid_arguments'}})
-                messages.append({'role':'tool','tool_call_id':call['id'],'content':json.dumps(tool_result.to_dict(),ensure_ascii=False)})
-            for execution in scheduler.execute_batch(batch, order_id, seen):
-                call=execution.call
-                tool_result=execution.result
-                result=tool_result.observation_result()
-                scheduler_meta={'source':execution.source,'signature':execution.signature}
-                tool_result_dict=tool_result.to_dict()
-                tool_result_dict['scheduler'] = scheduler_meta
-                on_observation(call.name,call.arguments,result,tool_result_dict)
-                observations.append({'tool':call.name,'arguments':call.arguments,'result':result,'tool_result':tool_result_dict,'scheduler':scheduler_meta})
-                if result.get('error'): failed_tools.append(call.name)
-                messages.append({'role':'tool','tool_call_id':call.call_id,'content':json.dumps(tool_result_dict,ensure_ascii=False)})
-            if budget_exhausted:
-                break
-        return self._plan(order_id, observations, failed_tools, context, budget_exhausted)
+        messages=convert_to_llm_messages(system_prompt=SYSTEM, user_message=user)
+        loop=ReadToolLoop(
+            llm=self.llm, tools=self.tools,
+            max_turns=settings.agent_max_investigation_turns,
+            max_tool_calls=settings.agent_max_read_tool_calls,
+            parallelism=settings.agent_read_tool_parallelism,
+            tool_definitions_for_turn=self._tool_definitions_for_turn,
+        )
+        run=loop.run(messages=messages, order_id=order_id, on_observation=on_observation, on_event=on_lifecycle)
+        read_loop_telemetry = list(run.llm_telemetries or [])
+        if run.stop_reason == 'llm_error' and not run.observations:
+            return {
+                'status':'handoff','recommended_actions':[],'alternatives':[],
+                'rationale':'LLM investigation call failed before sufficient evidence was gathered.',
+                'missing_information':[str((run.last_llm_telemetry or {}).get('error_code') or 'llm_error')],
+                'llm':run.last_llm_telemetry or {},
+                'llm_read_loop':read_loop_telemetry,
+                'stop_reason':run.stop_reason,
+            }
+        conclusion=self._plan(
+            order_id, run.observations, run.failed_tools, context,
+            budget_exhausted=run.stop_reason == 'max_tool_calls',
+        )
+        conclusion['stop_reason']=run.stop_reason
+        conclusion['llm_read_loop']=read_loop_telemetry
+        # ``llm`` remains for backward compatibility; the explicit name lets
+        # observability distinguish the Planner request from read-loop turns.
+        conclusion['llm_planner']=conclusion.get('llm') or {}
+        return conclusion
+
+    def _tool_definitions_for_turn(self, turn: int) -> list[dict[str, Any]]:
+        """Expose order facts first; later batches are grounded in real order scope.
+
+        The generic runtime owns loop mechanics. This business-level selector
+        only narrows the Tool surface for the initial evidence-gathering turn.
+        """
+        definitions = self.tools.definitions()
+        if turn != 1:
+            return definitions
+        order_definition = [
+            item for item in definitions
+            if isinstance(item, dict) and str(item.get('function', {}).get('name') or '') == 'get_order'
+        ]
+        return order_definition or definitions
 
     def _plan(self, order_id, observations, failed_tools, context: str | dict[str, Any], budget_exhausted=False):
         if not observations:
@@ -256,6 +248,18 @@ class InvestigationAgent:
                 else:
                     normalized_rejections.append({'action_type':'unknown','reason':str(item)})
             result['rejected_actions']=normalized_rejections
+            # ``handoff`` is a terminal safety outcome, not a weakly-approved
+            # plan.  Some providers nevertheless emit a manual-ticket
+            # candidate alongside it.  Preserve that choice as an auditable
+            # rejection, but never let it cross the Action Plan boundary.
+            if result['status'] == 'handoff' and result['recommended_actions']:
+                for action in result['recommended_actions']:
+                    action_type = str(action.get('action_type') or action.get('action') or action.get('tool') or 'unknown') if isinstance(action, dict) else 'unknown'
+                    result['rejected_actions'].append({
+                        'action_type': action_type,
+                        'reason': 'Agent 已选择 Handoff；该候选不构成可执行 Action Plan。',
+                    })
+                result['recommended_actions']=[]
             return result
         except (ValueError,json.JSONDecodeError):
             return {

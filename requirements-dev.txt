@@ -1,2 +1,3 @@
 -r requirements-prod.txt
+-r requirements-cli.txt
 pytest>=8.3,<9.0

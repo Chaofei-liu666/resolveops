@@ -91,12 +91,13 @@ Worker
   - retry/manual-review transitions
 
 Agent runtime
+  - Agent primitives: LLMRequest, LLMResult, ToolSchema and AgentEvent
+  - message conversion boundary (only standard system/user/assistant/tool messages reach an LLM)
+  - bounded read-tool loop with turn/tool budgets and stop_reason
+  - ResolveOps CaseProfile, tool registry and action registry
   - context builder
-  - tool registry
-  - tool profile router
   - read tool scheduler
-  - LLM gateway
-  - action registry
+  - LLM gateway adapter
   - evidence validator
   - policy engine
   - executor registry
@@ -146,7 +147,10 @@ ResolveOps separates read tools and write actions.
 
 ### Read tools
 
-Read tools are LLM-callable and represented by `ToolSpec`.
+Read tools are LLM-callable. `ToolSchema` is the minimal provider-visible
+contract (`name`, `description`, `parameters`); ResolveOps extends it as
+`ToolSpec` with runtime metadata such as permission, source system and
+execution binding. The LLM sees only the schema, not governance internals.
 
 Each read tool declares:
 

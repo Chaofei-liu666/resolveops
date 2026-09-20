@@ -24,7 +24,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from production.context import CaseContextBuilder, build_case_context, validate_case_context_isolation
-from production.main import CaseAskIn, CaseCreateIn, FaultInjectionRunIn, LogisticsLaneIn, OperatorChatIn, OperatorIdentity, ask_case, audit_out, case_tool_trace, create_case, eval_case, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_fault_injection_enabled, require_role, run_fault_injection
+from production.main import CaseAskIn, CaseCreateIn, FaultInjectionRunIn, LogisticsLaneIn, OperatorChatIn, OperatorIdentity, ask_case, audit_out, case_run_metrics, case_tool_trace, create_case, eval_case, eval_case_out, eval_summary_out, operator_identity_from_db, operator_key_hash, require_fault_injection_enabled, require_role, run_fault_injection
 from production.memory import candidate_lessons_from_verified_action, record_verified_lessons, relevant_lessons_for_case
 import production.migrations as migration_module
 from production.migrations import apply_migrations, ensure_schema_migrations_table
@@ -35,7 +35,7 @@ from production.runtime_status import build_runtime_status, expected_migration_v
 from production.tool_result import ToolResult
 from production.tool_scheduler import ReadToolCall, ReadToolScheduler, tool_signature
 from production.tools import BusinessReadTools, ToolRegistry, ToolSpec, summarize_customer_profile
-from production.tool_trace import build_tool_trace
+from production.tool_trace import bind_plan_evidence_refs, build_tool_trace
 from production.worker import digest, execute
 from production.cli import fixed_eval_case_payloads
 
@@ -248,6 +248,18 @@ def test_tool_trace_links_observations_to_supported_action():
     assert trace['observations'][1]['supports_actions'] == [action_id]
 
 
+def test_action_evidence_refs_are_bound_to_only_the_supporting_observations():
+    plan = normalize_plan([
+        {'action_type': 'transfer_stock', 'input': {
+            'source': '重庆仓 - ROPS', 'target': 'Stores - ROPS', 'sku': 'SKU-A12', 'quantity': 10,
+        }},
+    ], 'grounded', ['E-001', 'E-002', 'E-003', 'E-004', 'E-005', 'E-006'])
+    trace = build_tool_trace(grounded_observations(), plan)
+    bind_plan_evidence_refs(plan, trace)
+
+    assert plan['actions'][0]['evidence_refs'] == ['E-001', 'E-002', 'E-003', 'E-004']
+
+
 def test_case_tool_trace_is_derived_for_legacy_case_without_stored_trace():
     plan = normalize_plan([
         {'action_type':'create_price_review_ticket','input':{
@@ -396,6 +408,19 @@ def test_tool_error_is_unknown_not_negative_fact():
     conclusion = InvestigationAgent._parse_conclusion('not json')
     assert conclusion['status'] == 'handoff'
     assert 'schema' in conclusion['rationale'].lower()
+
+
+def test_handoff_never_exposes_a_candidate_as_an_executable_action_plan():
+    conclusion = InvestigationAgent._parse_conclusion(json.dumps({
+        'status': 'handoff',
+        'recommended_actions': [{'action_type': 'create_manual_ticket', 'input': {}}],
+        'alternatives': [],
+        'rationale': '订单读取失败，无法安全决策。',
+        'missing_information': ['get_order unavailable'],
+    }))
+
+    assert conclusion['recommended_actions'] == []
+    assert conclusion['rejected_actions'][-1]['action_type'] == 'create_manual_ticket'
 
 
 def test_planner_schema_repair_retries_once_before_handoff():
@@ -1561,6 +1586,80 @@ def test_eval_case_requires_write_verification():
     assert 'execution_started' in result['stage_sequence']
 
 
+def test_case_llm_usage_counts_every_durable_read_turn_and_planner_request():
+    case = Case(id='case-llm', tenant_id='demo', order_id='SO-1', status='running')
+    def telemetry(prompt, completion, latency):
+        return {
+            'status': 'success', 'latency_ms': latency,
+            'usage': {'prompt_tokens': prompt, 'completion_tokens': completion, 'total_tokens': prompt + completion},
+        }
+
+    reads = [telemetry(10, 5, 100), telemetry(11, 6, 110), telemetry(12, 7, 120), telemetry(13, 8, 130)]
+    planner = telemetry(20, 10, 200)
+    events = [Event(case_id='case-llm', kind='turn_start', message='turn', data={'turn': turn}) for turn in range(1, 5)]
+    events.append(Event(case_id='case-llm', kind='agent_decision_trace', message='plan', data={
+        'llm_read_loop': reads, 'llm_planner': planner,
+    }))
+
+    usage = main_module.case_llm_usage(case, events)
+
+    assert usage['llm_calls'] == 5
+    assert usage['observed_llm_calls'] == 5
+    assert usage['token_usage_calls'] == 5
+    assert usage['latency_sample_calls'] == 5
+    assert usage['total_tokens'] == 102
+    assert usage['latency_ms_total'] == 660
+
+
+def test_case_llm_usage_marks_legacy_turn_metrics_as_inferred_not_observed():
+    case = Case(
+        id='case-legacy-llm', tenant_id='demo', order_id='SO-1', status='running',
+        evidence={'conclusion': {'llm': {
+            'status': 'success', 'latency_ms': 200,
+            'usage': {'prompt_tokens': 20, 'completion_tokens': 10, 'total_tokens': 30},
+        }}},
+    )
+    events = [Event(case_id=case.id, kind='turn_start', message='turn', data={'turn': turn}) for turn in range(1, 5)]
+    events.append(Event(case_id=case.id, kind='agent_decision_trace', message='plan', data={}))
+
+    usage = main_module.case_llm_usage(case, events)
+
+    assert usage['llm_calls'] == 5
+    assert usage['observed_llm_calls'] == 1
+    assert usage['token_usage_calls'] == 1
+    assert usage['total_tokens'] == 30
+
+
+def test_tool_latency_excludes_cached_reuse_and_duplicate_reads_reset_after_replan():
+    case = Case(id='case-tool-metrics', tenant_id='demo', order_id='SO-1', status='running')
+    events = [
+        Event(case_id=case.id, kind='context_built', message='context', data={}),
+        Event(case_id=case.id, kind='tool_observation', message='executed', data={
+            'tool': 'get_order', 'arguments': {'order_id': 'SO-1'},
+            'tool_result': {'status': 'success', 'metadata': {'latency_ms': 50}, 'scheduler': {'source': 'executed'}},
+        }),
+        Event(case_id=case.id, kind='tool_observation', message='cached', data={
+            'tool': 'get_order', 'arguments': {'order_id': 'SO-1'},
+            'tool_result': {'status': 'success', 'metadata': {'latency_ms': 50}, 'scheduler': {'source': 'cache'}},
+        }),
+        Event(case_id=case.id, kind='replan_requested', message='replan', data={}),
+        Event(case_id=case.id, kind='context_built', message='fresh context', data={}),
+        Event(case_id=case.id, kind='tool_observation', message='fresh read', data={
+            'tool': 'get_order', 'arguments': {'order_id': 'SO-1'},
+            'tool_result': {'status': 'success', 'metadata': {'latency_ms': 70}, 'scheduler': {'source': 'executed'}},
+        }),
+    ]
+
+    result = eval_case_out(case, events, [], [], [])
+
+    assert result['observed_tool_latency_count'] == 2
+    assert result['avg_tool_latency_ms'] == 60
+    assert result['max_tool_latency_ms'] == 70
+    assert result['duplicate_tool_call_count'] == 1
+    assert result['replan_count'] == 1
+    assert result['plan_repair_count'] == 0
+
+
 def test_eval_case_counts_tool_failures_and_context_isolation():
     case = Case(id='case-2', tenant_id='demo', order_id='SO-2', status='manual_review', plan_version=0)
     events = [
@@ -1616,6 +1715,29 @@ def test_eval_case_endpoint_requires_ops_role_and_returns_case_metrics(monkeypat
     assert result['write_invocation_count'] == 1
     assert result['verification_complete'] is True
     assert result['tool_call_count'] == 1
+
+
+def test_case_run_metrics_allow_case_viewers_and_exclude_eval_scores(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+    with Session(engine) as db:
+        db.add(Operator(
+            tenant_id='demo', subject='warehouse', role='warehouse_manager',
+            api_key_hash=operator_key_hash('warehouse-key'), status='active',
+        ))
+        db.add(Case(id='case-metrics', tenant_id='demo', order_id='SO-1', status='running'))
+        db.add(Event(case_id='case-metrics', kind='tool_observation', message='read', data={
+            'tool': 'get_order', 'result': {}, 'tool_result': {'status': 'success'},
+        }))
+        db.commit()
+
+    result = case_run_metrics('case-metrics', x_operator_key='warehouse-key')
+
+    assert result['case_id'] == 'case-metrics'
+    assert result['tool_call_count'] == 1
+    assert 'task_succeeded' not in result
+    assert 'trajectory_quality_score' not in result
 
 
 def test_case_question_agent_can_call_read_tool_before_answering():

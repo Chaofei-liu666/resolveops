@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     llm_base_url: str | None = None
     llm_api_key: str | None = None
     llm_model: str | None = None
+    llm_timeout_seconds: float = 60
+    llm_max_retries: int = 1
     agent_max_investigation_turns: int = 8
     agent_max_read_tool_calls: int = 12
     agent_read_tool_parallelism: int = 4

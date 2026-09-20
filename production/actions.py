@@ -9,30 +9,13 @@ from dataclasses import dataclass
 from typing import Any, Callable
 from uuid import uuid4
 from .tools import ToolSpec, object_schema
+from .case_profiles import case_profile
 
 Validator = Callable[[dict[str, Any]], dict[str, Any]]
 ResourceKeys = Callable[[dict[str, Any]], list[str]]
 
-ACTION_PROFILES: dict[str, set[str]] = {
-    'inventory_shortage': {
-        'transfer_stock',
-        'create_purchase_request',
-        'draft_customer_notification',
-        'create_manual_ticket',
-    },
-    'price_mismatch': {
-        'create_price_review_ticket',
-        'create_manual_ticket',
-    },
-    'delivery_delay': {
-        'create_supplier_followup_task',
-        'create_manual_ticket',
-    },
-}
-
-
 def action_types_for_case(event_type: str | None) -> set[str]:
-    return ACTION_PROFILES.get(event_type or 'inventory_shortage', {'create_manual_ticket'})
+    return set(case_profile(event_type).action_types)
 
 
 @dataclass(frozen=True)
@@ -336,10 +319,16 @@ def normalize_proposal(proposal: dict[str, Any], rationale: str, evidence_refs: 
 
 
 def normalize_plan(proposals: list[dict[str, Any]], rationale: str, evidence_refs: list[str] | None = None, allowed_action_types: set[str] | None = None) -> dict[str, Any]:
-    """A plan may contain one action or a coordinated set of actions."""
+    """Create an unbound plan; grounding attaches only supporting evidence.
+
+    ``evidence_refs`` remains accepted for compatibility with older callers,
+    but a global list of all observations must never be written into every
+    Action. The deterministic trace layer attaches the minimal per-Action set
+    after it has checked tool arguments and results.
+    """
     if not isinstance(proposals, list) or not proposals or len(proposals) > 3:
         raise ValueError('recommended_actions must contain between one and three actions')
-    actions = [normalize_proposal(proposal, rationale, evidence_refs) for proposal in proposals]
+    actions = [normalize_proposal(proposal, rationale, []) for proposal in proposals]
     if allowed_action_types is not None:
         disallowed = [action['action_type'] for action in actions if action['action_type'] not in allowed_action_types]
         if disallowed:

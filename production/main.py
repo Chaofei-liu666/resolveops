@@ -8,7 +8,7 @@ from typing import Any, Literal
 from uuid import uuid4
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, select, text
@@ -26,6 +26,7 @@ from .context import CaseContextBuilder, validate_case_context_isolation
 from .evidence import validate_plan_grounding
 from .operator_chat import OperatorChatAgent
 from .tools import BusinessReadTools
+from .events import emit
 
 SUPPORTED_EVENTS={'inventory_shortage','price_mismatch','delivery_delay','supplier_delay'}
 
@@ -75,6 +76,7 @@ class SandboxSeedIn(BaseModel):
     source_warehouse: str = Field(default='重庆仓 - ROPS', min_length=1, max_length=140)
     target_warehouse: str = Field(default='Stores - ROPS', min_length=1, max_length=140)
     source_qty: float = Field(default=40, ge=0)
+    target_qty: float = Field(default=0, ge=0)
     transit_days: float = Field(default=1, gt=0)
     cost_per_unit: float = Field(default=8, ge=0)
     company: str | None = Field(default=None, min_length=1, max_length=140)
@@ -109,7 +111,13 @@ async def lifespan(app: FastAPI):
 app=FastAPI(title='ResolveOps', version='1.0.0', lifespan=lifespan)
 if STATIC_DIR.exists():
     app.mount('/static', StaticFiles(directory=STATIC_DIR), name='static')
-def emit(db, case_id, kind, message, data=None): db.add(Event(case_id=case_id,kind=kind,message=message,data=data or {}))
+
+def sse_event(event: str, data: dict[str, Any]) -> str:
+    """Narrow SSE envelope used by the Workbench; never serialize hidden prompts."""
+    return f'event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n'
+
+def sse_response(events):
+    return StreamingResponse(events, media_type='text/event-stream', headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 def audit(db, identity: OperatorIdentity, action: str, resource_type: str, resource_id: str, data=None, case_id: str|None=None):
     db.add(AuditLog(actor=identity.subject,role=identity.role,action=action,resource_type=resource_type,resource_id=resource_id,case_id=case_id,data={**(data or {}),'tenant_id':identity.tenant_id}))
 def operator_key_hash(key: str) -> str:
@@ -207,20 +215,26 @@ def metric_number(value: Any) -> float | None:
 
 def llm_usage_from_telemetry(telemetry: dict[str, Any] | None) -> dict[str, int | float]:
     if not isinstance(telemetry,dict):
-        return {'llm_calls':0,'prompt_tokens':0,'completion_tokens':0,'total_tokens':0,'latency_ms_total':0}
+        return {
+            'llm_calls':0, 'prompt_tokens':0, 'completion_tokens':0,
+            'total_tokens':0, 'token_usage_calls':0,
+            'latency_ms_total':0, 'latency_sample_calls':0,
+        }
     usage=telemetry.get('usage') if isinstance(telemetry.get('usage'),dict) else {}
     total=token_value(usage,'total_tokens','total_token_count')
     prompt=token_value(usage,'prompt_tokens','input_tokens','prompt_token_count')
     completion=token_value(usage,'completion_tokens','output_tokens','completion_token_count')
     if not total:
         total=prompt+completion
-    latency_ms=metric_number(telemetry.get('latency_ms')) or 0
+    latency_ms=metric_number(telemetry.get('latency_ms'))
     return {
-        'llm_calls':1 if telemetry.get('status') or usage or latency_ms else 0,
+        'llm_calls':1 if telemetry.get('status') or usage or latency_ms is not None else 0,
         'prompt_tokens':prompt,
         'completion_tokens':completion,
         'total_tokens':total,
-        'latency_ms_total':latency_ms,
+        'token_usage_calls':1 if usage else 0,
+        'latency_ms_total':latency_ms or 0,
+        'latency_sample_calls':1 if latency_ms is not None else 0,
     }
 
 def merge_llm_usage(*items: dict[str, int | float]) -> dict[str, int | float]:
@@ -229,38 +243,61 @@ def merge_llm_usage(*items: dict[str, int | float]) -> dict[str, int | float]:
         'prompt_tokens':sum(item.get('prompt_tokens',0) for item in items),
         'completion_tokens':sum(item.get('completion_tokens',0) for item in items),
         'total_tokens':sum(item.get('total_tokens',0) for item in items),
+        'token_usage_calls':sum(item.get('token_usage_calls',0) for item in items),
         'latency_ms_total':sum(item.get('latency_ms_total',0) for item in items),
+        'latency_sample_calls':sum(item.get('latency_sample_calls',0) for item in items),
     }
 
 def case_llm_usage(case: Case, events: list[Event]) -> dict[str, int | float]:
     evidence=case.evidence if isinstance(case.evidence,dict) else {}
     conclusion=evidence.get('conclusion') if isinstance(evidence.get('conclusion'),dict) else {}
-    usages=[
-        llm_usage_from_telemetry(conclusion.get('llm') if isinstance(conclusion,dict) else None),
-        llm_usage_from_telemetry(conclusion.get('llm_repair') if isinstance(conclusion,dict) else None),
-        llm_usage_from_telemetry(conclusion.get('llm_plan_repair') if isinstance(conclusion,dict) else None),
-    ]
-    # Handoff events can preserve a failed or fallback conclusion. Include only
-    # token-bearing telemetry if present; do not count the same successful
-    # conclusion twice when it is already stored on the Case.
+    def telemetry_items(value: Any) -> list[dict[str, Any]]:
+        if isinstance(value,dict):
+            return [value]
+        if isinstance(value,list):
+            return [item for item in value if isinstance(item,dict)]
+        return []
+
+    usages=[]
+    durable_telemetry=False
+    # Every investigation publishes its complete request telemetry in the
+    # durable decision event. Prefer it over ``case.evidence``, which holds
+    # only the newest investigation after a replan.
     for event in events:
         data=event.data or {}
+        for field in ('llm_read_loop','llm_planner','llm_repair','llm_plan_repair'):
+            items=telemetry_items(data.get(field))
+            if items:
+                durable_telemetry=True
+                usages.extend(llm_usage_from_telemetry(item) for item in items)
+        # Older events only embedded an entire conclusion. Keep them readable
+        # without double-counting new structured telemetry above.
         event_conclusion=data.get('conclusion') if isinstance(data.get('conclusion'),dict) else None
-        if event_conclusion and event_conclusion is not conclusion:
-            telemetry=event_conclusion.get('llm') if isinstance(event_conclusion.get('llm'),dict) else None
-            usage=llm_usage_from_telemetry(telemetry)
-            if usage.get('llm_calls'):
-                usages.append(usage)
-            repair_usage=llm_usage_from_telemetry(event_conclusion.get('llm_repair') if isinstance(event_conclusion.get('llm_repair'),dict) else None)
-            if repair_usage.get('llm_calls'):
-                usages.append(repair_usage)
-            plan_repair_usage=llm_usage_from_telemetry(event_conclusion.get('llm_plan_repair') if isinstance(event_conclusion.get('llm_plan_repair'),dict) else None)
-            if plan_repair_usage.get('llm_calls'):
-                usages.append(plan_repair_usage)
-        event_plan_repair_usage=llm_usage_from_telemetry(data.get('llm_plan_repair') if isinstance(data.get('llm_plan_repair'),dict) else None)
-        if event_plan_repair_usage.get('llm_calls'):
-            usages.append(event_plan_repair_usage)
-    return merge_llm_usage(*usages)
+        if event_conclusion and not any(field in data for field in ('llm_read_loop','llm_planner','llm_repair','llm_plan_repair')):
+            planner_field='llm_planner' if event_conclusion.get('llm_planner') else 'llm'
+            for field in ('llm_read_loop',planner_field,'llm_repair','llm_plan_repair'):
+                usages.extend(llm_usage_from_telemetry(item) for item in telemetry_items(event_conclusion.get(field)))
+
+    if not durable_telemetry:
+        # Legacy Cases did not preserve every read-loop request. They retain
+        # enough lifecycle events to infer the request count, while token and
+        # latency totals stay explicitly limited to observed telemetry.
+        planner_field='llm_planner' if conclusion.get('llm_planner') else 'llm'
+        for field in ('llm_read_loop',planner_field,'llm_repair','llm_plan_repair'):
+            usages.extend(llm_usage_from_telemetry(item) for item in telemetry_items(conclusion.get(field)))
+
+    merged=merge_llm_usage(*usages)
+    observed_calls=int(merged['llm_calls'])
+    inferred_read_turns=sum(1 for event in events if event.kind=='turn_start')
+    inferred_planner_calls=sum(
+        1 for event in events
+        if event.kind=='agent_decision_trace'
+        and ('llm_planner' not in (event.data or {}) or bool((event.data or {}).get('llm_planner')))
+    )
+    inferred_plan_repairs=sum(1 for event in events if event.kind=='plan_repair_requested')
+    merged['observed_llm_calls']=observed_calls
+    merged['llm_calls']=max(observed_calls,inferred_read_turns+inferred_planner_calls+inferred_plan_repairs)
+    return merged
 
 def tool_latency_stats(tool_events: list[Event]) -> dict[str, float | None]:
     latencies=[]
@@ -268,6 +305,11 @@ def tool_latency_stats(tool_events: list[Event]) -> dict[str, float | None]:
         data=event.data or {}
         tool_result=data.get('tool_result') if isinstance(data.get('tool_result'),dict) else {}
         metadata=tool_result.get('metadata') if isinstance(tool_result.get('metadata'),dict) else {}
+        scheduler=tool_result.get('scheduler') if isinstance(tool_result.get('scheduler'),dict) else {}
+        # Cache and deduplication reuse a prior result. Its latency belongs to
+        # the originating execution, not to this logical read invocation.
+        if scheduler.get('source') and scheduler.get('source') != 'executed':
+            continue
         latency=metric_number(metadata.get('latency_ms'))
         if latency is not None:
             latencies.append(latency)
@@ -300,9 +342,28 @@ def event_tool_signature(event: Event) -> str | None:
         return None
     return json.dumps({'tool':tool,'arguments':arguments}, ensure_ascii=False, sort_keys=True)
 
-def count_duplicate_tool_observations(tool_events: list[Event]) -> int:
-    signatures=[sig for sig in (event_tool_signature(event) for event in tool_events) if sig]
-    return max(0, len(signatures)-len(set(signatures)))
+def count_duplicate_tool_observations(events: list[Event]) -> int:
+    """Count repeated reads only within one investigation context.
+
+    A replan deliberately starts a fresh Context Snapshot and may read the
+    same ERP fact again; that is not a duplicate scheduler decision.
+    """
+    seen=set()
+    duplicates=0
+    for event in events:
+        if event.kind=='context_built':
+            seen.clear()
+            continue
+        if event.kind!='tool_observation':
+            continue
+        signature=event_tool_signature(event)
+        if not signature:
+            continue
+        if signature in seen:
+            duplicates+=1
+        else:
+            seen.add(signature)
+    return duplicates
 
 def event_index(kinds: list[str], kind: str) -> int | None:
     try:
@@ -407,7 +468,9 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         duration_seconds=max(timestamps).timestamp()-min(timestamps).timestamp()
     llm_usage=case_llm_usage(case, events)
     llm_latency_ms_total=llm_usage.get('latency_ms_total',0)
-    avg_llm_latency_ms=(llm_latency_ms_total/llm_usage['llm_calls']) if llm_usage['llm_calls'] else None
+    observed_llm_calls=llm_usage.get('observed_llm_calls',0)
+    llm_latency_sample_count=llm_usage.get('latency_sample_calls',0)
+    avg_llm_latency_ms=(llm_latency_ms_total/llm_latency_sample_count) if llm_latency_sample_count else None
     tool_latency=tool_latency_stats(tool_events)
     queue_wait_ms=case_queue_wait_ms(case, events, tasks)
     read_tool_budget=max(1, settings.agent_max_read_tool_calls)
@@ -416,7 +479,7 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'read-tool budget exhausted' in str(item)
         for item in ((case.evidence or {}).get('conclusion') or {}).get('missing_information',[])
     ) if isinstance(case.evidence,dict) else False
-    duplicate_tool_call_count=count_duplicate_tool_observations(tool_events)
+    duplicate_tool_call_count=count_duplicate_tool_observations(events)
     critical_checks=[
         'context_built' in kinds or 'context_isolation_failed' in kinds,
         bool(tool_events) or has_manual_handoff,
@@ -425,6 +488,11 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         write_count==0 or verification_complete,
     ]
     critical_stage_coverage=sum(1 for item in critical_checks if item)/len(critical_checks)
+    replan_count=sum(1 for kind in kinds if kind=='replan_requested')
+    plan_repair_count=sum(1 for kind in kinds if kind=='plan_repair_requested')
+    # Kept for aggregate evaluation compatibility. The per-Case UI exposes
+    # Replan and Plan Repair separately rather than conflating lifecycle
+    # events into a pseudo-count.
     self_correction_count=sum(1 for kind in kinds if kind in {'replan_requested','task_requeued','plan_repair_requested','plan_repair_succeeded'})
     unsafe_count=unsafe_continuation_count(kinds)
     trajectory_quality_score=max(
@@ -484,6 +552,9 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'has_manual_handoff':has_manual_handoff,
         'duration_seconds':duration_seconds,
         'llm_call_count':llm_usage['llm_calls'],
+        'llm_telemetry_call_count':observed_llm_calls,
+        'llm_token_usage_call_count':llm_usage.get('token_usage_calls',0),
+        'llm_latency_sample_count':llm_latency_sample_count,
         'llm_prompt_tokens':llm_usage['prompt_tokens'],
         'llm_completion_tokens':llm_usage['completion_tokens'],
         'llm_total_tokens':llm_usage['total_tokens'],
@@ -498,6 +569,8 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'read_tool_budget_used':read_tool_budget_used,
         'read_tool_budget_exhausted':read_tool_budget_exhausted,
         'duplicate_tool_call_count':duplicate_tool_call_count,
+        'replan_count':replan_count,
+        'plan_repair_count':plan_repair_count,
         'critical_stage_coverage':critical_stage_coverage,
         'self_correction_count':self_correction_count,
         'unsafe_continuation_count':unsafe_count,
@@ -505,6 +578,22 @@ def eval_case_out(case: Case, events: list[Event], approvals: list[Approval], in
         'stage_sequence':stage_sequence,
         'event_kinds':kinds,
     }
+
+
+CASE_RUN_METRIC_FIELDS = (
+    'case_id', 'status', 'plan_version', 'duration_seconds',
+    'llm_call_count', 'llm_telemetry_call_count', 'llm_prompt_tokens', 'llm_completion_tokens',
+    'llm_total_tokens', 'llm_token_usage_call_count', 'avg_llm_latency_ms', 'llm_latency_sample_count',
+    'tool_call_count', 'scheduled_tool_call_count', 'tool_failure_count',
+    'avg_tool_latency_ms', 'max_tool_latency_ms', 'observed_tool_latency_count',
+    'replan_count', 'plan_repair_count', 'duplicate_tool_call_count',
+)
+
+
+def case_run_metrics_out(case: Case, events: list[Event], approvals: list[Approval], invocations: list[Invocation], tasks: list[Task]) -> dict:
+    """Return observable facts for one Case run, never aggregate evaluation scores."""
+    source = eval_case_out(case, events, approvals, invocations, tasks)
+    return {field: source.get(field) for field in CASE_RUN_METRIC_FIELDS}
 def eval_summary_out(rows):
     total=len(rows)
     resolved=sum(1 for row in rows if row['resolved'])
@@ -718,27 +807,35 @@ def sandbox_seed(payload: SandboxSeedIn, x_operator_key:str|None=Header(default=
             actions.append({'type': 'logistics_lane', 'status': 'created', 'lane': lane_out(lane)})
         if payload.set_stock:
             try:
-                before=erp.stock(payload.item_code,payload.source_warehouse)
-                current_qty=float(before.get('actual_qty') or 0)
-                target_qty=float(payload.source_qty)
-                # ERPNext rejects a Stock Reconciliation with no quantity delta.
-                # A demo seed must be safely repeatable, so keep an already-correct
-                # sandbox unchanged instead of submitting a no-op transaction.
-                if abs(current_qty-target_qty) < 0.000001:
-                    result=None
-                    after=before
-                    status='already_set'
-                else:
-                    result=erp.set_stock_balance_for_fault_injection(
-                        item_code=payload.item_code,
-                        warehouse=payload.source_warehouse,
-                        qty=payload.source_qty,
-                        company=company,
-                        difference_account=difference_account,
-                        valuation_rate=valuation_rate,
-                    )
-                    after=erp.stock(payload.item_code,payload.source_warehouse)
-                    status='set'
+                # Reset both sides of the demonstration route. A completed
+                # transfer changes target stock, so restoring only the source
+                # side would make the next Case incorrectly look resolved.
+                for label, warehouse, desired_qty in (
+                    ('source_stock', payload.source_warehouse, payload.source_qty),
+                    ('target_stock', payload.target_warehouse, payload.target_qty),
+                ):
+                    before=erp.stock(payload.item_code, warehouse)
+                    current_qty=float(before.get('actual_qty') or 0)
+                    target_qty=float(desired_qty)
+                    # ERPNext rejects a Stock Reconciliation with no quantity delta.
+                    # A demo seed must be safely repeatable, so keep an already-correct
+                    # sandbox unchanged instead of submitting a no-op transaction.
+                    if abs(current_qty-target_qty) < 0.000001:
+                        result=None
+                        after=before
+                        status='already_set'
+                    else:
+                        result=erp.set_stock_balance_for_fault_injection(
+                            item_code=payload.item_code,
+                            warehouse=warehouse,
+                            qty=target_qty,
+                            company=company,
+                            difference_account=difference_account,
+                            valuation_rate=valuation_rate,
+                        )
+                        after=erp.stock(payload.item_code, warehouse)
+                        status='set'
+                    actions.append({'type': label, 'status': status, 'before': before, 'after': after, 'erpnext_result': result})
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code if exc.response is not None else None
                 raise HTTPException(502, {
@@ -746,7 +843,6 @@ def sandbox_seed(payload: SandboxSeedIn, x_operator_key:str|None=Header(default=
                     'erpnext_status_code': status_code,
                     'message': 'ERPNext rejected the sandbox stock seed. Check integration user permissions and accounting fields.',
                 }) from exc
-            actions.append({'type': 'source_stock', 'status': status, 'before': before, 'after': after, 'erpnext_result': result})
         audit(db,identity,'sandbox_seeded','sandbox',payload.tenant_id,{'actions':actions})
         db.commit()
         check=sandbox_check_payload(db,payload)
@@ -894,6 +990,73 @@ def operator_chat(payload: OperatorChatIn, x_operator_key:str|None=Header(defaul
         })
         db.commit()
         return answer
+
+@app.post('/v1/chat/stream')
+def operator_chat_stream(payload: OperatorChatIn, x_operator_key:str|None=Header(default=None)):
+    """SSE for the Workbench General view. General chat has no ERP tools."""
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db, x_operator_key)
+    def events():
+        completed: dict[str, Any] | None = None
+        for item in OperatorChatAgent().stream_answer(payload.question, history=payload.history):
+            kind = str(item.get('type') or 'message')
+            if kind == 'done':
+                completed = item
+            yield sse_event(kind, item)
+        if completed is not None:
+            with Session(engine) as db:
+                audit(db, identity, 'operator_chat_streamed', 'operator_chat', identity.subject, {
+                    'question': payload.question, 'history_items': len(payload.history or []),
+                    'source': completed.get('source'), 'tools_used': [], 'streaming': True,
+                })
+                db.commit()
+    return sse_response(events())
+
+@app.post('/v1/cases/{case_id}/ask/stream')
+def ask_case_stream(case_id:str, payload: CaseAskIn, x_operator_key:str|None=Header(default=None)):
+    """SSE Case Q&A: server-controlled read tools, streamed final answer."""
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db, x_operator_key)
+        case=db.get(Case, case_id)
+        if not case:
+            raise HTTPException(404, 'case not found')
+        context=CaseContextBuilder(db).build(case_id, {'reason':'operator_case_question_stream'})
+        isolation=validate_case_context_isolation(context)
+        if not isolation['allowed']:
+            raise HTTPException(409, {'error':'context_isolation_failed','isolation':isolation})
+        order_id, event_type, durable_case_id = case.order_id, case.event_type, case.id
+        emit(db, durable_case_id, 'case_question_asked', 'Operator asked a streaming Case-scoped question.', {
+            'question': payload.question, 'actor': identity.subject, 'role': identity.role, 'streaming': True,
+        })
+        db.commit()
+    def events():
+        completed: dict[str, Any] | None = None
+        tools=BusinessReadTools(ERPNextAdapter(settings.erpnext_base_url, settings.erpnext_api_key, settings.erpnext_api_secret), event_type)
+        def record_observation(observation: dict[str, Any]) -> None:
+            with Session(engine) as event_db:
+                emit(event_db, durable_case_id, 'case_question_tool_called', f"Case question called read tool: {observation.get('tool')}.", {
+                    'tool': observation.get('tool'), 'arguments': observation.get('arguments') or {},
+                })
+                emit(event_db, durable_case_id, 'case_question_tool_observation', f"Case question called read tool: {observation.get('tool')}.", observation)
+                event_db.commit()
+        for item in CaseQuestionAgent(tools).stream_answer(
+            order_id=order_id, question=payload.question, case_context=context, on_observation=record_observation,
+        ):
+            kind=str(item.get('type') or 'message')
+            if kind == 'done':
+                completed=item
+            yield sse_event(kind, item)
+        if completed is not None:
+            with Session(engine) as event_db:
+                emit(event_db, durable_case_id, 'case_question_answered', 'Agent streamed a Case-scoped answer without executing writes.', {
+                    'question': payload.question, 'answer': completed.get('answer'),
+                    'used_tools': completed.get('used_tools') or [], 'streaming': True,
+                })
+                audit(event_db, identity, 'case_question_streamed', 'case', durable_case_id, {
+                    'question': payload.question, 'used_tools': completed.get('used_tools') or [], 'streaming': True,
+                }, case_id=durable_case_id)
+                event_db.commit()
+    return sse_response(events())
 @app.get('/v1/config/logistics-lanes')
 def logistics_lanes(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None), tenant_id:str='demo', active:bool|None=None):
     with Session(engine) as db:
@@ -1059,6 +1222,25 @@ def case_detail(case_id:str, x_operator_key:str|None=Header(default=None), x_ope
             'tasks':[task_out(t) for t in tasks],
             'events':[event_out(e) for e in events],
         }
+
+@app.get('/v1/cases/{case_id}/metrics')
+def case_run_metrics(case_id:str, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
+    """Read technical observability facts for the selected Case.
+
+    Any authenticated operator who can inspect the Case can inspect its own
+    run metrics.  Aggregate evaluation scores remain under the ops-only eval
+    endpoints and are deliberately excluded here.
+    """
+    with Session(engine) as db:
+        operator_identity_from_db(db,x_operator_key)
+        case=db.get(Case,case_id)
+        if not case: raise HTTPException(404,'case not found')
+        events=db.scalars(select(Event).where(Event.case_id==case_id).order_by(Event.created_at)).all()
+        approvals=db.scalars(select(Approval).where(Approval.case_id==case_id)).all()
+        invocations=db.scalars(select(Invocation).where(Invocation.case_id==case_id)).all()
+        tasks=db.scalars(select(Task).where(Task.case_id==case_id)).all()
+        return case_run_metrics_out(case,events,approvals,invocations,tasks)
+
 @app.post('/v1/approvals/{approval_id}/approve')
 def approve(approval_id:str, x_operator_key:str|None=Header(default=None, alias='X-Operator-Key'), x_operator:str|None=Header(default=None, alias='X-Operator'), x_operator_role:str|None=Header(default=None, alias='X-Operator-Role')):
     with Session(engine) as db:

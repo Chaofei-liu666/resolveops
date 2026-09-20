@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 
 import production.cli as cli
 
@@ -52,7 +54,7 @@ def test_cli_init_creates_local_config_template(monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert 'ResolveOps CLI' in out
     assert '[Init] Checking local CLI config' in out
-    assert '[Next] Start chat' in out
+    assert '[Next] Start Workbench' in out
 
 
 def test_cli_config_set_and_show_mask_secret(monkeypatch, tmp_path, capsys):
@@ -292,251 +294,39 @@ def test_cli_case_show_prints_agent_decision_trace(capsys):
     assert 'supplier unit cost remains unknown' in out
 
 
-def test_cli_case_watch_prints_live_tool_and_agent_events(monkeypatch, capsys):
+def test_cli_console_launches_the_single_interactive_workbench(monkeypatch):
     calls = []
+    fake_console = types.ModuleType('production.console')
 
-    def fake_request(method, url, headers=None, json=None, timeout=None):
-        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json, 'timeout': timeout})
-        return FakeResponse(data={
-            'id': 'CASE-1',
-            'status': 'waiting_approval',
-            'events': [
-                {'id': '1', 'kind': 'case_created', 'message': 'Operator-created Case received.', 'data': {}, 'created_at': '2026-07-20T00:00:00'},
-                {'id': '2', 'kind': 'tool_observation', 'message': 'Agent called read tool: get_inventory.', 'data': {'tool': 'get_inventory', 'result': {'available_qty': 40}}, 'created_at': '2026-07-20T00:00:01'},
-                {'id': '3', 'kind': 'agent_decision_trace', 'message': 'Agent produced an auditable decision summary from tool evidence.', 'data': {'decision_trace': ['Compared transfer and purchase.']}, 'created_at': '2026-07-20T00:00:02'},
-            ],
-        })
+    def run_workbench(client, *, case_limit, poll_interval):
+        calls.append({'client': client, 'case_limit': case_limit, 'poll_interval': poll_interval})
+        return 0
 
-    monkeypatch.setattr(cli.httpx, 'request', fake_request)
-    result = cli.main([
-        '--base-url', 'http://api.local',
-        '--operator-key', 'ops-key',
-        'case', 'watch', 'CASE-1',
-        '--timeout', '1',
-    ])
-
-    assert result == 0
-    assert calls == [{
-        'method': 'GET',
-        'url': 'http://api.local/v1/cases/CASE-1',
-        'headers': {'X-Operator-Key': 'ops-key'},
-        'json': None,
-        'timeout': 30,
-    }]
-    out = capsys.readouterr().out
-    assert 'ResolveOps live Case trace' in out
-    assert '[Tool]' in out
-    assert 'get_inventory' in out
-    assert '[Agent]' in out
-    assert 'Compared transfer and purchase' in out
-
-
-def test_cli_case_chat_loops_over_case_scoped_questions(monkeypatch, capsys):
-    calls = []
-    inputs = iter(['Why did it stop?', '/events', '/exit'])
-
-    def fake_input(prompt):
-        print(prompt, end='')
-        return next(inputs)
-
-    def fake_request(method, url, headers=None, json=None, timeout=None):
-        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json, 'timeout': timeout})
-        if method == 'GET':
-            return FakeResponse(data={
-                'id': 'CASE-1',
-                'event_type': 'inventory_shortage',
-                'order_id': 'SO-1',
-                'status': 'manual_review',
-                'events': [
-                    {'id': '1', 'kind': 'tool_observation', 'message': 'Agent called read tool: get_order.', 'data': {'tool': 'get_order'}, 'created_at': '2026-07-20T00:00:00'},
-                ],
-            })
-        return FakeResponse(data={
-            'case_id': 'CASE-1',
-            'event_type': 'inventory_shortage',
-            'order_id': 'SO-1',
-            'status': 'manual_review',
-            'question': json['question'],
-            'answer': 'It stopped because the required order evidence is unavailable.',
-            'rationale': 'Tool failures are treated as unknown facts.',
-            'used_tools': ['get_order'],
-            'used_evidence': [],
-            'safe_next_steps': ['Restore ERPNext connectivity.'],
-            'observations': [{'tool': 'get_order', 'scheduler': {'source': 'executed'}, 'result': {'error': 'tool_execution_failed'}}],
-        })
-
-    monkeypatch.setattr(cli.httpx, 'request', fake_request)
-    monkeypatch.setattr('builtins.input', fake_input)
+    fake_console.run_workbench = run_workbench
+    monkeypatch.setitem(sys.modules, 'production.console', fake_console)
 
     result = cli.main([
         '--base-url', 'http://api.local',
         '--operator-key', 'ops-key',
-        'case', 'chat', 'CASE-1',
+        'console', '--case-limit', '12', '--poll-interval', '2',
     ])
 
     assert result == 0
-    assert calls[0]['method'] == 'GET'
-    assert calls[1]['method'] == 'POST'
-    assert calls[1]['url'] == 'http://api.local/v1/cases/CASE-1/ask'
-    assert calls[1]['json'] == {'question': 'Why did it stop?'}
-    assert calls[2]['method'] == 'GET'
-    out = capsys.readouterr().out
-    assert 'ResolveOps Case Chat' in out
-    assert '[You] resolveops CASE-1>' in out
-    assert '[Answer]' in out
-    assert 'It stopped because' in out
-    assert '[Tool]' in out
-    assert '[Rationale]' not in out
+    assert calls[0]['client'].base_url == 'http://api.local'
+    assert calls[0]['client'].operator_key == 'ops-key'
+    assert calls[0]['case_limit'] == 12
+    assert calls[0]['poll_interval'] == 2.0
 
 
-def test_cli_top_level_chat_answers_without_case(monkeypatch, capsys):
-    calls = []
-    inputs = iter(['hello', '/exit'])
-
-    def fake_input(prompt):
-        print(prompt, end='')
-        return next(inputs)
-
-    def fake_request(method, url, headers=None, json=None, timeout=None):
-        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json})
-        return FakeResponse(data={
-            'question': json['question'],
-            'answer': 'LLM says hello from ResolveOps.',
-            'source': 'llm',
-            'tools_used': [],
-            'llm': {'status': 'success'},
-        })
-
-    monkeypatch.setattr('builtins.input', fake_input)
-    monkeypatch.setattr(cli.httpx, 'request', fake_request)
-    result = cli.main([
-        '--base-url', 'http://api.local',
-        '--operator-key', 'ops-key',
-        'chat',
-    ])
-
-    assert result == 0
-    assert calls == [{
-        'method': 'POST',
-        'url': 'http://api.local/v1/chat',
-        'headers': {'X-Operator-Key': 'ops-key'},
-        'json': {'question': 'hello', 'history': []},
-    }]
-    out = capsys.readouterr().out
-    assert 'ResolveOps Chat' in out
-    assert '[You] resolveops>' in out
-    assert '(llm)' in out
-    assert 'LLM says hello from ResolveOps.' in out
-
-
-def test_cli_top_level_chat_sends_recent_history(monkeypatch, capsys):
-    calls = []
-    inputs = iter(['hello', '刚刚你说了什么', '/exit'])
-
-    def fake_input(prompt):
-        print(prompt, end='')
-        return next(inputs)
-
-    def fake_request(method, url, headers=None, json=None, timeout=None):
-        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json})
-        return FakeResponse(data={
-            'question': json['question'],
-            'answer': f"answer to {json['question']}",
-            'source': 'llm',
-            'tools_used': [],
-            'llm': {'status': 'success'},
-        })
-
-    monkeypatch.setattr('builtins.input', fake_input)
-    monkeypatch.setattr(cli.httpx, 'request', fake_request)
-
-    result = cli.main([
-        '--base-url', 'http://api.local',
-        '--operator-key', 'ops-key',
-        'chat',
-    ])
-
-    assert result == 0
-    assert calls[0]['json'] == {'question': 'hello', 'history': []}
-    assert calls[1]['json'] == {
-        'question': '刚刚你说了什么',
-        'history': [
-            {'role': 'user', 'content': 'hello'},
-            {'role': 'assistant', 'content': 'answer to hello'},
-        ],
-    }
-
-
-def test_cli_top_level_chat_lists_cases(monkeypatch, capsys):
-    calls = []
-    inputs = iter(['/cases', '/exit'])
-
-    def fake_input(prompt):
-        print(prompt, end='')
-        return next(inputs)
-
-    def fake_request(method, url, headers=None, json=None, timeout=None):
-        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json})
-        return FakeResponse(data=[
-            {'id': 'CASE-1', 'event_type': 'inventory_shortage', 'order_id': 'SO-1', 'status': 'waiting_approval'},
-        ])
-
-    monkeypatch.setattr('builtins.input', fake_input)
-    monkeypatch.setattr(cli.httpx, 'request', fake_request)
-
-    result = cli.main([
-        '--base-url', 'http://api.local',
-        '--operator-key', 'ops-key',
-        'chat',
-        '--limit', '5',
-    ])
-
-    assert result == 0
-    assert calls == [{
-        'method': 'GET',
-        'url': 'http://api.local/v1/cases?limit=5',
-        'headers': {'X-Operator-Key': 'ops-key'},
-        'json': None,
-    }]
-    assert 'CASE-1' in capsys.readouterr().out
-
-
-def test_cli_top_level_chat_creates_case_interactively(monkeypatch, capsys):
-    calls = []
-    inputs = iter(['/new', '1', 'SO-1', 'CLI created shortage', '/exit'])
-
-    def fake_input(prompt):
-        print(prompt, end='')
-        return next(inputs)
-
-    def fake_request(method, url, headers=None, json=None, timeout=None):
-        calls.append({'method': method, 'url': url, 'headers': headers, 'json': json})
-        return FakeResponse(data={'case_id': 'CASE-NEW', 'status': 'queued', 'duplicate': False})
-
-    monkeypatch.setattr('builtins.input', fake_input)
-    monkeypatch.setattr(cli.httpx, 'request', fake_request)
-
-    result = cli.main([
-        '--base-url', 'http://api.local',
-        '--operator-key', 'ops-key',
-        'chat',
-    ])
-
-    assert result == 0
-    assert calls == [{
-        'method': 'POST',
-        'url': 'http://api.local/v1/cases',
-        'headers': {'X-Operator-Key': 'ops-key'},
-        'json': {
-            'tenant_id': 'demo',
-            'event_type': 'inventory_shortage',
-            'order_id': 'SO-1',
-            'reason': 'CLI created shortage',
-        },
-    }]
-    out = capsys.readouterr().out
-    assert '[New Case]' in out
-    assert 'CASE-NEW' in out
+def test_cli_exposes_one_interactive_command():
+    parser = cli.build_parser()
+    subparsers = next(action for action in parser._actions if action.dest == 'command')
+    assert 'console' in subparsers.choices
+    assert 'chat' not in subparsers.choices
+    case_parser = subparsers.choices['case']
+    case_subparsers = next(action for action in case_parser._actions if action.dest == 'case_command')
+    assert 'chat' not in case_subparsers.choices
+    assert 'watch' not in case_subparsers.choices
 
 
 def test_cli_eval_summary_calls_eval_endpoint(monkeypatch, capsys):
@@ -703,6 +493,7 @@ def test_cli_sandbox_seed_posts_through_resolveops_api(monkeypatch, capsys):
             'actions': [
                 {'type': 'logistics_lane', 'status': 'updated'},
                 {'type': 'source_stock', 'status': 'set', 'erpnext_result': {'stock_reconciliation': 'MAT-RECO-TEST'}},
+                {'type': 'target_stock', 'status': 'set', 'erpnext_result': {'stock_reconciliation': 'MAT-RECO-TARGET'}},
             ],
             'check': {
                 'status': 'ready',
@@ -733,6 +524,7 @@ def test_cli_sandbox_seed_posts_through_resolveops_api(monkeypatch, capsys):
             'source_warehouse': '重庆仓 - ROPS',
             'target_warehouse': 'Stores - ROPS',
             'source_qty': 40.0,
+            'target_qty': 0,
             'transit_days': 1,
             'cost_per_unit': 8,
             'set_stock': True,

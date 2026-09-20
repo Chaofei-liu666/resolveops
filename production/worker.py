@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .context import CaseContextBuilder, validate_case_context_isolation
 from .erpnext import ERPNextAdapter
-from .main import emit
+from .events import emit
 from .migrations import apply_migrations
 from .models import Approval, Base, Case, Invocation, Task
 from .tools import BusinessReadTools
@@ -18,8 +18,20 @@ from .evidence import validate_plan_grounding
 from .executors import executor_for
 from .memory import record_verified_lessons
 from .policy import action_policy
-from .tool_trace import build_tool_trace
+from .tool_trace import bind_plan_evidence_refs, build_tool_trace
 engine=create_engine(settings.database_url,pool_pre_ping=True); erp=ERPNextAdapter(settings.erpnext_base_url,settings.erpnext_api_key,settings.erpnext_api_secret)
+
+def emit_live_trace(case_id: str, kind: str, message: str, data=None) -> None:
+    """Persist read-only Agent trace events without committing business state.
+
+    The investigation transaction still owns Case/Plan/Approval mutations.  A
+    short independent session makes its already-observed runtime trail visible
+    to the Workbench poller while an LLM/tool loop is in progress.
+    """
+    with Session(engine) as trace_db:
+        emit(trace_db, case_id, kind, message, data)
+        trace_db.commit()
+
 def ensure_schema():
     """Worker may start before the API container; migrations must not rely on order."""
     with engine.begin() as db:
@@ -83,14 +95,21 @@ def investigate_with_agent(db, c, task_context):
     isolation=validate_case_context_isolation(case_context)
     if not isolation['allowed']:
         c.status='manual_review'
-        emit(db,c.id,'context_isolation_failed','Case context isolation guard blocked investigation before LLM planning.',isolation)
+        emit_live_trace(c.id,'context_isolation_failed','Case context isolation guard blocked investigation before LLM planning.',isolation)
         return
     if isolation['warnings']:
-        emit(db,c.id,'context_isolation_sanitized','Scheduler task context contained foreign scope fields; they were removed before LLM planning.',isolation)
-    emit(db,c.id,'context_built','Case-scoped context was assembled for LLM investigation.',{
+        emit_live_trace(c.id,'context_isolation_sanitized','Scheduler task context contained foreign scope fields; they were removed before LLM planning.',isolation)
+    emit_live_trace(c.id,'context_built','Case-scoped context was assembled for LLM investigation.',{
         'scope':case_context.get('scope'),
         'current_state':case_context.get('current_state'),
         'memory_count':len((case_context.get('long_term_memory') or {}).get('lessons') or []),
+        'confirmed_observation_count':len(case_context.get('confirmed_observations') or []),
+        'enabled_read_tools':sorted(tool_surface.enabled_tool_names),
+        'agent_limits':{
+            'max_turns':settings.agent_max_investigation_turns,
+            'max_read_tool_calls':settings.agent_max_read_tool_calls,
+            'read_tool_parallelism':settings.agent_read_tool_parallelism,
+        },
         'removed_task_scope_paths':case_context.get('isolation',{}).get('task_context_removed_scope_paths',[]),
     })
     def observe(name, args, result, tool_result=None):
@@ -100,21 +119,33 @@ def investigate_with_agent(db, c, task_context):
             observation['tool_result']=tool_result
         observations.append(observation)
         scheduler=(tool_result or {}).get('scheduler') if isinstance(tool_result,dict) else None
-        emit(db,c.id,'tool_scheduled','Read tool call completed through the scheduler.',{
+        emit_live_trace(c.id,'tool_scheduled','Read tool call completed through the scheduler.',{
             'tool':name,
             'scheduler':scheduler or {},
             'status':(tool_result or {}).get('status') if isinstance(tool_result,dict) else None,
             'error_code':(tool_result or {}).get('error_code') if isinstance(tool_result,dict) else None,
         })
-        emit(db,c.id,'tool_observation',f'Agent called read tool: {name}.',{'tool':name,'arguments':args,'result':result,'tool_result':tool_result,'metadata':metadata})
+        emit_live_trace(c.id,'tool_observation',f'Agent called read tool: {name}.',{'tool':name,'arguments':args,'result':result,'tool_result':tool_result,'metadata':metadata})
+    def lifecycle(event):
+        # Durable, concise lifecycle trace for the Workbench.  It records
+        # control flow, not hidden reasoning or raw provider prompts.
+        emit_live_trace(c.id, event.kind, f'Agent lifecycle: {event.kind}.', event.data)
+
     agent=InvestigationAgent(tool_surface)
-    conclusion=agent.run(c.order_id, observe, case_context)
+    conclusion=agent.run(c.order_id, observe, case_context, on_lifecycle=lifecycle)
     previous_evidence=c.evidence
     c.evidence={'case_context':case_context,'observations':observations,'conclusion':conclusion,'replanning_context':task_context or None,'previous_evidence':previous_evidence if task_context else None}; proposals=conclusion.get('recommended_actions',[])
     emit(db,c.id,'agent_decision_trace','Agent produced an auditable decision summary from tool evidence.',{
+        'recommended_actions': conclusion.get('recommended_actions') or [],
         'decision_trace': conclusion.get('decision_trace') or [],
         'rejected_actions': conclusion.get('rejected_actions') or [],
         'missing_information': conclusion.get('missing_information') or [],
+        'evidence_summary': conclusion.get('evidence_summary') or [],
+        'rationale': conclusion.get('rationale') or '',
+        'llm_read_loop': conclusion.get('llm_read_loop') or [],
+        'llm_planner': conclusion.get('llm_planner') or {},
+        'llm': conclusion.get('llm') or {},
+        'llm_repair': conclusion.get('llm_repair') or {},
     })
     if conclusion.get('status')!='ready' or not proposals:
         c.status='manual_review'; emit(db,c.id,'handoff','Agent ended investigation without a safe executable proposal.',{'conclusion':conclusion}); return
@@ -123,6 +154,7 @@ def investigate_with_agent(db, c, task_context):
         c.status='manual_review'; emit(db,c.id,'handoff','Agent proposal failed Action Plan validation.',{'error':str(exc)}); return
     grounding=validate_plan_grounding(plan,observations,c.event_type)
     c.evidence['tool_trace']=build_tool_trace(observations,plan,grounding)
+    bind_plan_evidence_refs(plan,c.evidence['tool_trace'])
     if not grounding['allowed']:
         repair_attempts=[]
         for attempt in range(max(0,settings.agent_max_plan_repairs)):
@@ -133,6 +165,7 @@ def investigate_with_agent(db, c, task_context):
                 'status':repaired_conclusion.get('status'),
                 'plan_repair':repaired_conclusion.get('plan_repair') or {},
                 'llm_plan_repair':repaired_conclusion.get('llm_plan_repair') or {},
+                'llm_repair':repaired_conclusion.get('llm_repair') or {},
                 'missing_information':repaired_conclusion.get('missing_information') or [],
             }
             repair_attempts.append(repair_record)
@@ -153,26 +186,43 @@ def investigate_with_agent(db, c, task_context):
                 grounding=repaired_grounding
                 c.evidence['conclusion']=conclusion
                 c.evidence['tool_trace']=build_tool_trace(observations,plan,grounding)
-                emit(db,c.id,'plan_repair_succeeded','Agent repaired its Action Plan after deterministic grounding feedback.',{'attempt':attempt+1,'grounding':grounding,'plan':plan})
+                bind_plan_evidence_refs(plan,c.evidence['tool_trace'])
+                emit(db,c.id,'plan_repair_succeeded','Agent repaired its Action Plan after deterministic grounding feedback.',{
+                    'attempt':attempt+1,
+                    'grounding':grounding,
+                    'plan':plan,
+                    'llm_plan_repair':repaired_conclusion.get('llm_plan_repair') or {},
+                    'llm_repair':repaired_conclusion.get('llm_repair') or {},
+                })
                 break
             repair_record['grounding']=repaired_grounding
             grounding=repaired_grounding
             plan=repaired_plan
             c.evidence['tool_trace']=build_tool_trace(observations,plan,grounding)
+            bind_plan_evidence_refs(plan,c.evidence['tool_trace'])
             emit(db,c.id,'plan_repair_failed','Repaired Action Plan still failed evidence grounding.',repair_record)
         if not grounding['allowed']:
             c.plan=plan; c.status='manual_review'; emit(db,c.id,'evidence_grounding_failed','Agent plan is not sufficiently supported by read-tool evidence after bounded repair.',{'grounding':grounding,'repair_attempts':repair_attempts}); return
     plan['evidence_grounding']=grounding
     emit(db,c.id,'evidence_grounding_passed','Agent plan passed deterministic evidence grounding.',grounding)
+    policy_decisions=[]
     for action in plan['actions']:
         decision=action_policy(action,{'observations':observations}); action['policy']=decision
+        policy_decisions.append({
+            'action_id': action.get('action_id'), 'action_type': action.get('action_type'),
+            'allowed': decision.get('allowed'), 'required_roles': decision.get('required_roles') or [],
+        })
         if not decision['allowed']:
             c.plan=plan; c.status='manual_review'; emit(db,c.id,'policy_denied','Policy Engine denied an action in the recommended plan.',{'action_id':action['action_id'],**decision}); return
+    emit(db,c.id,'policy_passed','Policy Engine allowed every Action Plan item.',{'decisions':policy_decisions})
     c.plan_version+=1; c.plan=plan; c.status='waiting_approval'; approvals=[]
     for action in plan['actions']:
         a=Approval(case_id=c.id,plan_version=c.plan_version,action=action,action_hash=digest(action,c.plan_version),required_roles=action['policy']['required_roles'],expires_at=approval_expiry(settings.approval_ttl_seconds)); db.add(a); db.flush(); approvals.append({'approval_id':a.id,'action_id':action['action_id'],'action_type':action['action_type'],'expires_at':a.expires_at.isoformat() if a.expires_at else None})
     emit(db,c.id,'agent_plan_created','Agent produced a multi-action plan from observed tool evidence; policy created bound approvals.',{
+        'actions':plan.get('actions') or [],
         'approvals':approvals,
+        'rationale':conclusion.get('rationale') or '',
+        'evidence_summary':conclusion.get('evidence_summary') or [],
         'alternatives':conclusion.get('alternatives',[]),
         'decision_trace':conclusion.get('decision_trace') or [],
         'rejected_actions':conclusion.get('rejected_actions') or [],
@@ -237,7 +287,11 @@ def once():
         recover_expired_leases(db)
         task=claim(db)
         if not task:return False
-        task.status='running'; task.attempts+=1; task.started_at=datetime.now(UTC); task.last_error=None; db.commit()
+        task.status='running'; task.attempts+=1; task.started_at=datetime.now(UTC); task.last_error=None
+        emit(db, task.case_id, 'worker_task_started', 'Worker claimed a durable Case task.', {
+            'task_id': task.id, 'task_kind': task.kind, 'attempt': task.attempts,
+        })
+        db.commit()
         try:
             c=db.get(Case,task.case_id); investigate(db,c,task.payload) if task.kind=='investigate' else execute(db,c,task.payload['approval_id']); task.status='done'; db.commit()
         except Exception as e: task.status='failed'; task.last_error=type(e).__name__; c=db.get(Case,task.case_id); c.status='manual_review'; emit(db,c.id,'worker_failure','Execution stopped for human review.',{'error':type(e).__name__}); db.commit()
