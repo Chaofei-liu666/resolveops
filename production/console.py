@@ -43,8 +43,9 @@ EVENT_STYLE: dict[str, tuple[str, str]] = {
     'agent_decision_trace': ('PLAN', 'magenta'), 'agent_plan_created': ('PLAN', 'magenta'),
     'evidence_grounding_passed': ('GROUNDING', 'green'), 'evidence_grounding_failed': ('GROUNDING', 'red'),
     'approval_requested': ('APPROVAL', 'yellow'), 'approval_partial': ('APPROVAL', 'yellow'),
-    'approval_granted': ('APPROVAL', 'green'), 'approval_expired': ('APPROVAL', 'red'), 'approval_revoked': ('APPROVAL', 'red'),
+    'approval_granted': ('APPROVAL', 'green'), 'approval_expired': ('APPROVAL', 'red'), 'approval_revoked': ('APPROVAL', 'red'), 'approval_rejected': ('APPROVAL', 'yellow'),
     'execution_started': ('EXECUTOR', 'blue'), 'verification_passed': ('VERIFY', 'green'), 'verification_failed': ('VERIFY', 'red'),
+    'execution_blocked': ('EXECUTOR', 'yellow'),
     'replan_requested': ('REPLAN', 'yellow'), 'task_requeued': ('REPLAN', 'yellow'),
     'plan_repair_requested': ('REPLAN', 'yellow'), 'plan_repair_succeeded': ('REPLAN', 'green'), 'plan_repair_failed': ('REPLAN', 'red'),
     'handoff': ('STOP', 'red'), 'manual_review_required': ('STOP', 'red'), 'worker_failure': ('STOP', 'red'),
@@ -58,12 +59,13 @@ STATUS_STYLE = {
     'running': 'cyan',
     'waiting_approval': 'yellow',
     'approved': 'yellow',
+    'replanning': 'cyan',
     'resolved': 'green',
     'manual_review': 'red',
 }
 
 STATUS_TEXT = {
-    'queued': '排队中', 'running': '处理中', 'waiting_approval': '等待审批', 'approved': '已批准',
+    'queued': '排队中', 'running': '处理中', 'waiting_approval': '等待审批', 'approved': '已批准', 'replanning': '重新调查中',
     'resolved': '已解决', 'manual_review': '人工审核', 'unknown': '未知',
 }
 EVENT_TEXT = {
@@ -77,8 +79,9 @@ EVENT_TEXT = {
     'agent_plan_created': '已生成 Action Plan', 'evidence_grounding_passed': 'Action Plan 通过 Evidence Grounding',
     'evidence_grounding_failed': 'Action Plan 缺少必要 Evidence', 'approval_requested': '已创建待 Approval 的 Plan',
     'approval_partial': 'Approval 尚未满足全部角色', 'approval_granted': 'Approval 已通过',
-    'approval_expired': 'Approval 已过期', 'approval_revoked': 'Approval 已撤销',
+    'approval_expired': 'Approval 已过期', 'approval_revoked': 'Approval 已取消', 'approval_rejected': 'Approval 已驳回，开始 Replan',
     'execution_started': '开始 Governed Execution', 'verification_passed': 'Read-after-write Verify 通过', 'verification_failed': 'Read-after-write Verify 失败',
+    'execution_blocked': '旧 Action Plan 的写操作已被阻断',
     'replan_requested': '业务状态变化，已请求 Replan', 'task_requeued': '只读 Agent 任务已重新入队',
     'plan_repair_requested': 'Evidence Grounding 未通过，开始受限 Plan Repair',
     'plan_repair_succeeded': 'Plan Repair 已生成可验证的 Action Plan', 'plan_repair_failed': 'Plan Repair 未生成可执行 Plan',
@@ -508,7 +511,7 @@ class ConfirmApprovalScreen(ModalScreen[dict[str, str] | None]):
     ConfirmApprovalScreen { align: center middle; }
     #confirm-card { width: 72; height: auto; padding: 1 2; border: round $warning; background: $surface; }
     #confirm-actions { height: auto; margin-top: 1; align: right middle; }
-    #revoke-reason { margin-top: 1; }
+    #approval-reason { margin-top: 1; }
     """
 
     def __init__(self, approval: dict[str, Any], *, operation: str) -> None:
@@ -519,7 +522,9 @@ class ConfirmApprovalScreen(ModalScreen[dict[str, str] | None]):
     def compose(self) -> ComposeResult:
         action = self.approval.get('action') if isinstance(self.approval.get('action'), dict) else {}
         action_type = action.get('action_type') or 'governed_action'
-        title = '确认批准绑定的 Action Plan？' if self.operation == 'approve' else '确认撤销 Approval 并停止执行？'
+        title = '确认批准绑定的 Action Plan？' if self.operation == 'approve' else (
+            '确认驳回 Action Plan 并重新调查？' if self.operation == 'reject' else '确认取消 Approval 并停止执行？'
+        )
         yield Vertical(
             Label(title, id='confirm-title'),
             Static(
@@ -527,7 +532,9 @@ class ConfirmApprovalScreen(ModalScreen[dict[str, str] | None]):
                 f"Action：{action_type}\n"
                 f"所需角色：{', '.join(self.approval.get('required_roles') or [])}",
             ),
-            Input(placeholder='撤销原因（可选）', id='revoke-reason') if self.operation == 'revoke' else Static('服务端会再次校验你的操作角色和审批绑定关系。'),
+            Input(placeholder='驳回原因（必填，会作为下一轮 Agent Context）', id='approval-reason') if self.operation == 'reject' else (
+                Input(placeholder='取消原因（可选）', id='approval-reason') if self.operation == 'revoke' else Static('服务端会再次校验你的操作角色和审批绑定关系。')
+            ),
             Horizontal(Button('取消', id='cancel'), Button('确认', variant='warning', id='confirm'), id='confirm-actions'),
             id='confirm-card',
         )
@@ -538,7 +545,10 @@ class ConfirmApprovalScreen(ModalScreen[dict[str, str] | None]):
 
     @on(Button.Pressed, '#confirm')
     def confirm(self) -> None:
-        reason = self.query_one('#revoke-reason', Input).value.strip() if self.operation == 'revoke' else ''
+        reason = self.query_one('#approval-reason', Input).value.strip() if self.operation in {'reject', 'revoke'} else ''
+        if self.operation == 'reject' and len(reason) < 3:
+            self.notify('请填写至少 3 个字符的驳回原因；它会作为下一轮 Agent 的受限 Context。', severity='warning')
+            return
         self.dismiss({'operation': self.operation, 'reason': reason})
 
 
@@ -658,7 +668,7 @@ class ResolveOpsWorkbench(App[None]):
     #approval-card { height: auto; min-height: 8; max-height: 10; }
     #approval-summary { height: auto; min-height: 3; }
     #approval-actions { height: 3; min-height: 3; margin-top: 1; }
-    #approve-action, #revoke-action { height: 3; min-height: 3; }
+    #approve-action, #reject-replan-action { height: 3; min-height: 3; }
     #command-input { margin-top: 1; }
     .status-green { color: $success; }
     .status-yellow { color: $warning; }
@@ -722,7 +732,7 @@ class ResolveOpsWorkbench(App[None]):
                 with Vertical(id='approval-card'):
                     yield Static('当前没有待处理审批。', id='approval-summary')
                     yield Horizontal(
-                        Button('批准', id='approve-action', disabled=True), Button('撤销', id='revoke-action', disabled=True),
+                        Button('批准', id='approve-action', disabled=True), Button('驳回并 Replan', id='reject-replan-action', disabled=True),
                         id='approval-actions',
                     )
                 yield Input(placeholder='输入问题，或使用 /help 查看命令', id='command-input')
@@ -1165,11 +1175,18 @@ class ResolveOpsWorkbench(App[None]):
         data = _event_data(event)
         if kind == 'execution_started':
             return 'Executor · Governed Execution', f"Action={data.get('action_id') or data.get('action_type') or 'unknown'} · 已进入受控写操作边界", 'canvas-stage canvas-policy'
+        if kind == 'execution_blocked':
+            return 'Executor · Blocked', '旧 Approval 已失效；残留写任务已在 Executor 前被阻断。', 'canvas-stage canvas-stop'
         if kind == 'verification_passed':
             return 'Verify · PASS', f"Action={data.get('action_id') or 'unknown'} · Read-after-write verification 通过", 'canvas-stage canvas-grounding-pass'
         if kind == 'verification_failed':
             return 'Verify · FAIL', event_summary(event), 'canvas-stage canvas-grounding-fail'
+        if kind == 'approval_rejected':
+            return 'Approval Rejected', '审批意见已写入受限 Context；旧 Action Plan 已失效，等待新的调查任务。', 'canvas-stage canvas-reject'
         if kind == 'replan_requested':
+            source = data.get('source')
+            if source == 'approval_rejection':
+                return 'Replan Requested', '审批驳回原因将与旧 Plan 一起写入 Case Context，Agent 会重新读取 ERP 事实后生成新 Plan。', 'canvas-stage canvas-reject'
             return 'Replan Requested', '写前预检未通过；旧 Approval 已失效，失败事实将写回 Context 后重新调查。', 'canvas-stage canvas-reject'
         if kind == 'task_requeued':
             return 'Replan Queued', '新的调查任务已入队，下一段 Context Snapshot 将启动新的 Agent Turn。', 'canvas-stage canvas-policy'
@@ -1409,7 +1426,7 @@ class ResolveOpsWorkbench(App[None]):
         card = self.query_one('#approval-card', Vertical)
         summary = self.query_one('#approval-summary', Static)
         approve = self.query_one('#approve-action', Button)
-        revoke = self.query_one('#revoke-action', Button)
+        reject = self.query_one('#reject-replan-action', Button)
         pending = [] if not case else [item for item in case.get('approvals') or [] if item.get('status') == 'pending']
         if len(pending) != 1:
             card.display = False
@@ -1417,13 +1434,13 @@ class ResolveOpsWorkbench(App[None]):
                 summary.update('当前没有待处理审批。')
             elif pending:
                 ids = ', '.join(str(item.get('id'))[:8] for item in pending)
-                summary.update(f'存在多个待审批项：{ids}\n请使用 /approve <审批ID> 或 /revoke <审批ID>。')
+                summary.update(f'存在多个待审批项：{ids}\n请使用 /approve <审批ID> 或 /reject <审批ID>。')
             else:
                 summary.update('当前案例没有待审批项。')
             approve.disabled = True
-            revoke.disabled = True
+            reject.disabled = True
             approve.tooltip = None
-            revoke.tooltip = None
+            reject.tooltip = None
             return
         approval = pending[0]
         card.display = True
@@ -1434,12 +1451,14 @@ class ResolveOpsWorkbench(App[None]):
             f"动作={action.get('action_type') or '受控动作'} · 所需角色={', '.join(approval.get('required_roles') or [])}\n"
             f"当前身份={self.active_operator_role or '已认证 Operator'}"
         )
-        approve.label = f'批准 {short_id}'
-        revoke.label = f'撤销 {short_id}'
+        # The Approval ID is already shown in the card. Keep actions short so
+        # both remain fully clickable inside the compact Workbench sidebar.
+        approve.label = '批准'
+        reject.label = '驳回并 Replan'
         approve.disabled = False
-        revoke.disabled = False
+        reject.disabled = False
         approve.tooltip = str(approval.get('id'))
-        revoke.tooltip = str(approval.get('id'))
+        reject.tooltip = str(approval.get('id'))
 
     def _active_pending_approval(self) -> dict[str, Any] | None:
         if not self.active_case:
@@ -1572,7 +1591,7 @@ class ResolveOpsWorkbench(App[None]):
         command, _, rest = text.partition(' ')
         argument = rest.strip()
         if command == '/help':
-            self._write('帮助', '/new 新建案例 · /focus <案例ID> 进入案例 · /back 返回通用对话 · /refresh 刷新 · /events 切换 Trace 详情 · /metrics 展开当前 Case 运行指标 · /eval 评估 · /role <角色> 切换本地演示身份 · /reset-demo 重置演示库存 · /approve <审批ID> 批准 · /revoke <审批ID> 撤销 · /quit 退出', 'dim')
+            self._write('帮助', '/new 新建案例 · /focus <案例ID> 进入案例 · /back 返回通用对话 · /refresh 刷新 · /events 切换 Trace 详情 · /metrics 展开当前 Case 运行指标 · /eval 评估 · /role <角色> 切换本地演示身份 · /reset-demo 重置演示库存 · /approve <审批ID> 批准 · /reject <审批ID> 驳回并 Replan · /revoke <审批ID> 取消 · /quit 退出', 'dim')
         elif command == '/new':
             self.action_new_case()
         elif command == '/focus':
@@ -1609,11 +1628,11 @@ class ResolveOpsWorkbench(App[None]):
             self.switch_demo_role(argument)
         elif command == '/reset-demo':
             self.open_sandbox_reset()
-        elif command in {'/approve', '/revoke'}:
+        elif command in {'/approve', '/reject', '/revoke'}:
             if not argument:
-                self._open_active_approval('approve' if command == '/approve' else 'revoke')
+                self._open_active_approval('approve' if command == '/approve' else ('reject' if command == '/reject' else 'revoke'))
             else:
-                self._approval_by_id(argument, 'approve' if command == '/approve' else 'revoke')
+                self._approval_by_id(argument, 'approve' if command == '/approve' else ('reject' if command == '/reject' else 'revoke'))
         elif command == '/quit':
             self.exit()
         else:
@@ -1867,14 +1886,14 @@ class ResolveOpsWorkbench(App[None]):
     def approve_active(self) -> None:
         self._open_active_approval('approve')
 
-    @on(Button.Pressed, '#revoke-action')
-    def revoke_active(self) -> None:
-        self._open_active_approval('revoke')
+    @on(Button.Pressed, '#reject-replan-action')
+    def reject_and_replan_active(self) -> None:
+        self._open_active_approval('reject')
 
     def _open_active_approval(self, operation: str) -> None:
         approval = self._active_pending_approval()
         if approval is None:
-            self.notify('当前案例没有唯一的待审批项。请使用 /approve <审批ID>。', severity='warning')
+            self.notify('当前案例没有唯一的待审批项。请使用 /approve <审批ID> 或 /reject <审批ID>。', severity='warning')
             return
         self.push_screen(ConfirmApprovalScreen(approval, operation=operation), lambda result: self._approval_response(approval, result))
 
@@ -1893,6 +1912,8 @@ class ResolveOpsWorkbench(App[None]):
         try:
             if operation == 'approve':
                 data = self.client.request('POST', f'/v1/approvals/{approval_id}/approve')
+            elif operation == 'reject':
+                data = self.client.request('POST', f'/v1/approvals/{approval_id}/reject-replan', {'reason': reason})
             else:
                 data = self.client.request('POST', f'/v1/approvals/{approval_id}/revoke', {'reason': reason} if reason else {})
             self.call_from_thread(self._approval_changed, approval_id, operation, data)
@@ -1900,7 +1921,7 @@ class ResolveOpsWorkbench(App[None]):
             self.call_from_thread(self.notify, f'审批操作失败：{exc}', severity='error')
 
     def _approval_changed(self, approval_id: str, operation: str, data: dict[str, Any]) -> None:
-        operation_text = '批准' if operation == 'approve' else '撤销'
+        operation_text = '批准' if operation == 'approve' else ('驳回并 Replan' if operation == 'reject' else '取消')
         self._write('APPROVAL', f"已提交{operation_text} {approval_id[:8]} · 服务端状态={data.get('status')}", 'green')
         self.notify(f'审批{operation_text}请求已提交。', severity='information')
         if self.active_case_id:

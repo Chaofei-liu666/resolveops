@@ -11,7 +11,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .config import settings
@@ -41,6 +41,9 @@ class LogisticsLaneIn(BaseModel):
 
 class ApprovalRevokeIn(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
+
+class ApprovalRejectIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
 
 class CaseCreateIn(BaseModel):
     tenant_id: str = Field(default='demo', min_length=1, max_length=80)
@@ -173,7 +176,7 @@ def require_non_production_sandbox() -> None:
         raise HTTPException(403, 'sandbox commands are forbidden in production')
 def event_out(e: Event): return {'id':e.id,'kind':e.kind,'message':e.message,'data':e.data,'created_at':e.created_at.isoformat() if e.created_at else None}
 def approval_out(a: Approval):
-    return {'id':a.id,'case_id':a.case_id,'plan_version':a.plan_version,'status':a.status,'action_hash':a.action_hash,'action':a.action,'required_roles':a.required_roles,'approved_roles':a.approved_roles,'approver':a.approver,'expires_at':a.expires_at.isoformat() if a.expires_at else None,'revoked_at':a.revoked_at.isoformat() if a.revoked_at else None,'revoked_by':a.revoked_by,'revocation_reason':a.revocation_reason}
+    return {'id':a.id,'case_id':a.case_id,'plan_version':a.plan_version,'status':a.status,'action_hash':a.action,'required_roles':a.required_roles,'approved_roles':a.approved_roles,'approver':a.approver,'expires_at':a.expires_at.isoformat() if a.expires_at else None,'revoked_at':a.revoked_at.isoformat() if a.revoked_at else None,'revoked_by':a.revoked_by,'revocation_reason':a.revocation_reason,'rejected_at':a.rejected_at.isoformat() if a.rejected_at else None,'rejected_by':a.rejected_by,'rejection_reason':a.rejection_reason}
 def invocation_out(i: Invocation):
     return {'id':i.id,'case_id':i.case_id,'tool':i.tool,'status':i.status,'external_id':i.external_id,'idempotency_key':i.idempotency_key}
 def task_out(t: Task):
@@ -1290,3 +1293,84 @@ def revoke_approval(approval_id:str, payload: ApprovalRevokeIn|None=None, x_oper
         audit(db,identity,'approval_revoked','approval',a.id,data,case_id=a.case_id)
         db.commit()
         return {'status':'revoked','approval':approval_out(a)}
+
+
+@app.post('/v1/approvals/{approval_id}/reject-replan')
+def reject_approval_and_replan(approval_id: str, payload: ApprovalRejectIn, x_operator_key: str|None=Header(default=None, alias='X-Operator-Key'), x_operator: str|None=Header(default=None, alias='X-Operator'), x_operator_role: str|None=Header(default=None, alias='X-Operator-Role')):
+    """Reject a pending proposal and queue a fresh read-only investigation.
+
+    A rejection never edits or executes the old Action Plan.  It invalidates
+    the remaining approvals for that plan version, preserves the operator's
+    reason as Case-scoped context, and requires the replacement plan to pass
+    grounding, policy and a brand-new approval boundary.
+    """
+    with Session(engine) as db:
+        identity=operator_identity_from_db(db,x_operator_key)
+        approval=db.scalar(select(Approval).where(Approval.id==approval_id).with_for_update())
+        if not approval:
+            raise HTTPException(404,'approval not found')
+        case=db.get(Case,approval.case_id)
+        if not case:
+            raise HTTPException(404,'case not found')
+        if approval.status!='pending' or case.status!='waiting_approval':
+            raise HTTPException(409,'only a pending approval on a waiting Case can be rejected for replanning')
+        required=set(approval.required_roles or ['warehouse_manager'])
+        if identity.role!='ops_admin' and identity.role not in required:
+            audit(db,identity,'approval_reject_replan_rejected','approval',approval.id,{'reason':'role_not_allowed','required_roles':sorted(required),'status':approval.status},case_id=approval.case_id)
+            db.commit()
+            raise HTTPException(403,'operator role cannot reject this approval')
+        prior_replans=db.scalar(select(func.count()).select_from(Event).where(Event.case_id==case.id,Event.kind=='replan_requested')) or 0
+        if prior_replans >= settings.agent_max_replans:
+            case.status='manual_review'
+            emit(db,case.id,'manual_review_required','Approval was rejected, but the bounded Replan budget is exhausted. Human review is required.',{'approval_id':approval.id,'reason':payload.reason,'max_replans':settings.agent_max_replans})
+            audit(db,identity,'approval_reject_replan_blocked','approval',approval.id,{'reason':payload.reason,'max_replans':settings.agent_max_replans},case_id=case.id)
+            db.commit()
+            raise HTTPException(409,'replan budget exhausted')
+
+        active_approvals=db.scalars(select(Approval).where(
+            Approval.case_id==case.id,
+            Approval.plan_version==case.plan_version,
+            Approval.status.in_(['pending','approved']),
+        ).with_for_update()).all()
+        invalidated_ids=[]
+        now=utc_now()
+        for item in active_approvals:
+            if item.id==approval.id:
+                item.status='rejected'
+                item.rejected_at=now
+                item.rejected_by=identity.subject
+                item.rejection_reason=payload.reason
+            else:
+                item.status='invalidated'
+                invalidated_ids.append(item.id)
+        # A waiting Case has no legitimate write in flight. Mark any stale
+        # queued executions terminal rather than letting them race the new
+        # investigation; running writes are intentionally rejected above by
+        # the waiting-state guard.
+        queued_executes=db.scalars(select(Task).where(Task.case_id==case.id,Task.kind=='execute',Task.status=='queued').with_for_update()).all()
+        for task in queued_executes:
+            task.status='cancelled'
+            task.last_error='cancelled because the bound Action Plan was rejected for replanning'
+
+        old_plan=case.plan if isinstance(case.plan,dict) else {}
+        case.status='replanning'
+        task=Task(case_id=case.id,kind='investigate',payload={
+            'reason':f'Approval rejected by {identity.role}: {payload.reason}',
+            'previous_plan':old_plan,
+            'rejected_approval_id':approval.id,
+        })
+        db.add(task)
+        data={
+            'approval_id':approval.id,
+            'reason':payload.reason,
+            'rejected_by':identity.subject,
+            'role':identity.role,
+            'plan_version':case.plan_version,
+            'invalidated_approval_ids':invalidated_ids,
+            'old_plan':old_plan,
+        }
+        emit(db,case.id,'approval_rejected','Operator rejected the bound Action Plan and requested a fresh Agent investigation.',data)
+        emit(db,case.id,'replan_requested','Approval rejection invalidated the old Plan; a fresh read-only Agent investigation was queued.',data | {'source':'approval_rejection','task_kind':'investigate'})
+        audit(db,identity,'approval_rejected_replan','approval',approval.id,data,case_id=case.id)
+        db.commit()
+        return {'status':'replan_queued','approval':approval_out(approval),'case_id':case.id,'task_kind':'investigate'}

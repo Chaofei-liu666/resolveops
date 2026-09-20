@@ -369,7 +369,7 @@ def test_approval_controls_keep_a_clickable_button_height():
     css = ResolveOpsWorkbench.CSS
     assert '#approval-card { height: auto; min-height: 8;' in css
     assert '#approval-actions { height: 3; min-height: 3;' in css
-    assert '#approve-action, #revoke-action { height: 3; min-height: 3; }' in css
+    assert '#approve-action, #reject-replan-action { height: 3; min-height: 3; }' in css
 
 
 def test_workbench_title_prioritizes_agent_and_business_scenario():

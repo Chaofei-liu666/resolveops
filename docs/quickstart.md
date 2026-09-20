@@ -245,7 +245,8 @@ Inside the Workbench:
 /role <role>             switch a seeded local demo identity
 /reset-demo              reset source/target stock for the next demo run
 /approve [approval-id]   approve after a confirmation dialog
-/revoke [approval-id]    revoke after a confirmation dialog
+/reject [approval-id]    reject with a reason and queue a fresh Agent investigation
+/revoke [approval-id]    cancel after a confirmation dialog
 /quit                    leave the Workbench
 ```
 

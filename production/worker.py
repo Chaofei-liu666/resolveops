@@ -237,6 +237,11 @@ def execute(db,c,approval_id):
         c.status='manual_review'
         emit(db,c.id,'approval_revoked','Approval was revoked before execution; automation stopped.',{'approval_id':a.id,'revoked_by':a.revoked_by,'revoked_at':a.revoked_at.isoformat() if a.revoked_at else None,'reason':a.revocation_reason})
         return
+    if a and a.status in {'rejected','invalidated'}:
+        # A rejection/replan may race a stale queued execute task.  Never let
+        # the old task overwrite the new Case state or reach the Executor.
+        emit(db,c.id,'execution_blocked','Stale execute task was blocked because its bound Approval is no longer active.',{'approval_id':a.id,'approval_status':a.status,'plan_version':a.plan_version})
+        return
     if a and approval_is_expired(a):
         a.status='expired'
         c.status='manual_review'

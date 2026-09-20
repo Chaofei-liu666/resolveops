@@ -1003,6 +1003,92 @@ def test_revoked_approval_blocks_executor_before_write_invocation():
     assert [event.kind for event in events] == ['approval_revoked']
 
 
+def test_rejected_approval_blocks_stale_executor_without_overwriting_replan_state():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    action = normalize_proposal({
+        'action_type': 'create_price_review_ticket',
+        'input': {'sku': 'SKU-A12', 'order_rate': 5000, 'reference_rate': 4500, 'difference': 500, 'reason': 'contract mismatch'},
+        'risk': 'medium',
+    }, 'Price mismatch must be reviewed before changing the sales order.')
+    with Session(engine) as db:
+        case = Case(id='case-rejected', tenant_id='demo', event_type='price_mismatch', order_id='SO-1', status='replanning', plan_version=1, plan={'actions': [action]})
+        approval = Approval(case_id=case.id, plan_version=1, action_hash=digest(action, 1), action=action, status='rejected', required_roles=['sales_manager'])
+        db.add_all([case, approval]); db.commit()
+
+        execute(db, case, approval.id)
+        db.commit()
+        refreshed = db.get(Case, case.id)
+        invocations = db.scalars(select(Invocation).where(Invocation.case_id == case.id)).all()
+        events = db.scalars(select(Event).where(Event.case_id == case.id)).all()
+
+    assert refreshed.status == 'replanning'
+    assert invocations == []
+    assert [event.kind for event in events] == ['execution_blocked']
+
+
+def test_approval_rejection_invalidates_old_plan_and_queues_fresh_investigation(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+    action = {'action_id': 'action-1', 'action_type': 'transfer_stock', 'input': {'sku': 'SKU-A12'}}
+    other_action = {'action_id': 'action-2', 'action_type': 'create_purchase_request', 'input': {'sku': 'SKU-A12'}}
+    with Session(engine) as db:
+        db.add(Operator(
+            tenant_id='demo', subject='warehouse-manager', role='warehouse_manager',
+            api_key_hash=operator_key_hash('warehouse-key'), status='active',
+        ))
+        db.add(Case(
+            id='case-reject-replan', tenant_id='demo', event_type='inventory_shortage', order_id='SO-1',
+            status='waiting_approval', plan_version=3, plan={'actions': [action, other_action]},
+        ))
+        db.add_all([
+            Approval(id='approval-reject', case_id='case-reject-replan', plan_version=3, action_hash='hash-1', action=action, status='pending', required_roles=['warehouse_manager']),
+            Approval(id='approval-other', case_id='case-reject-replan', plan_version=3, action_hash='hash-2', action=other_action, status='pending', required_roles=['warehouse_manager']),
+        ])
+        db.commit()
+
+    result = main_module.reject_approval_and_replan(
+        'approval-reject', main_module.ApprovalRejectIn(reason='客户要求优先核实替代仓时效'), x_operator_key='warehouse-key',
+    )
+
+    assert result['status'] == 'replan_queued'
+    with Session(engine) as db:
+        case = db.get(Case, 'case-reject-replan')
+        rejected = db.get(Approval, 'approval-reject')
+        invalidated = db.get(Approval, 'approval-other')
+        task = db.scalar(select(Task).where(Task.case_id == case.id, Task.kind == 'investigate'))
+        events = db.scalars(select(Event).where(Event.case_id == case.id).order_by(Event.created_at)).all()
+
+    assert case.status == 'replanning'
+    assert rejected.status == 'rejected'
+    assert rejected.rejected_by == 'warehouse-manager'
+    assert rejected.rejection_reason == '客户要求优先核实替代仓时效'
+    assert invalidated.status == 'invalidated'
+    assert task.status == 'queued'
+    assert task.payload['reason'].startswith('Approval rejected by warehouse_manager:')
+    assert task.payload['previous_plan']['actions'][0]['action_id'] == 'action-1'
+    assert [event.kind for event in events] == ['approval_rejected', 'replan_requested']
+
+
+def test_approval_rejection_requires_pending_approval_and_reason(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+    with Session(engine) as db:
+        db.add(Operator(tenant_id='demo', subject='warehouse-manager', role='warehouse_manager', api_key_hash=operator_key_hash('warehouse-key'), status='active'))
+        db.add(Case(id='case-not-pending', tenant_id='demo', event_type='inventory_shortage', order_id='SO-1', status='approved', plan_version=1, plan={'actions': []}))
+        db.add(Approval(id='approval-not-pending', case_id='case-not-pending', plan_version=1, action_hash='hash', action={}, status='approved', required_roles=['warehouse_manager']))
+        db.commit()
+
+    with pytest.raises(HTTPException, match='only a pending approval'):
+        main_module.reject_approval_and_replan(
+            'approval-not-pending', main_module.ApprovalRejectIn(reason='需要重新确认库存'), x_operator_key='warehouse-key',
+        )
+    with pytest.raises(Exception):
+        main_module.ApprovalRejectIn(reason='否')
+
+
 def test_case_context_sanitizes_foreign_scheduler_payload_scope_before_llm():
     engine = create_engine('sqlite:///:memory:')
     Base.metadata.create_all(engine)

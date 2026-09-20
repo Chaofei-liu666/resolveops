@@ -375,7 +375,8 @@ Workbench commands:
 /events                  expand or collapse active Case event detail
 /eval                    append evaluation summary to the trace
 /approve [approval-id]   confirm a pending approval
-/revoke [approval-id]    revoke a pending approval with confirmation
+/reject [approval-id]    reject a pending Approval and queue a fresh Agent investigation
+/revoke [approval-id]    cancel an Approval and stop the Case
 /quit                    leave the Workbench
 ```
 
@@ -399,11 +400,12 @@ python resolveops.py case ask <case-id> "If the source warehouse has no stock no
 
 `case ask` may call read tools to refresh evidence, but it never creates approvals or executes writes.
 
-Approve or revoke an action:
+Approve, reject for replanning, or cancel an action:
 
 ```powershell
 python resolveops.py approval approve <approval-id>
 python resolveops.py approval revoke <approval-id> --reason "operator cancelled unsafe action"
+python resolveops.py approval reject <approval-id> --reason "客户要求重新核实替代仓时效"
 ```
 
 Evaluate Agent execution:

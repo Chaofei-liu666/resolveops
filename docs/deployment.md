@@ -227,7 +227,17 @@ ENABLE_FAULT_INJECTION=false
 docker compose stop worker
 ```
 
-API 可以继续提供 Case 查询和审批撤销。
+API 可以继续提供 Case 查询、审批驳回重规划和审批取消。
+
+### 驳回并 Replan
+
+对仍处于 `waiting_approval` 的 Case，审批角色可填写业务原因并请求重新调查：
+
+```text
+POST /v1/approvals/{approval_id}/reject-replan
+```
+
+旧 Plan 的活动审批会失效；系统只会重新执行读取 ERP 事实的 Agent 调查。替代 Plan 必须重新通过 Evidence Grounding、Policy 和新的 Approval，绝不复用旧审批。
 
 ### 撤销审批
 

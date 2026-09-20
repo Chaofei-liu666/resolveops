@@ -813,6 +813,12 @@ def cmd_approval_revoke(args: argparse.Namespace, client: ApiClient) -> int:
     return 0
 
 
+def cmd_approval_reject(args: argparse.Namespace, client: ApiClient) -> int:
+    data = client.request('POST', f'/v1/approvals/{args.approval_id}/reject-replan', {'reason': args.reason})
+    print_json(data) if args.json else print(f"approval {args.approval_id}: {data.get('status')}")
+    return 0
+
+
 def cmd_eval_summary(args: argparse.Namespace, client: ApiClient) -> int:
     query = {'limit': args.limit}
     if getattr(args, 'suite', None):
@@ -954,7 +960,11 @@ def build_parser() -> argparse.ArgumentParser:
     approval_approve = approval_sub.add_parser('approve', help='Approve an approval request')
     approval_approve.add_argument('approval_id')
     approval_approve.set_defaults(handler=cmd_approval_approve)
-    approval_revoke = approval_sub.add_parser('revoke', help='Revoke an approval request')
+    approval_reject = approval_sub.add_parser('reject', help='Reject a pending approval and queue a fresh Agent investigation')
+    approval_reject.add_argument('approval_id')
+    approval_reject.add_argument('--reason', required=True)
+    approval_reject.set_defaults(handler=cmd_approval_reject)
+    approval_revoke = approval_sub.add_parser('revoke', help='Cancel an approval request and stop the Case')
     approval_revoke.add_argument('approval_id')
     approval_revoke.add_argument('--reason')
     approval_revoke.set_defaults(handler=cmd_approval_revoke)
