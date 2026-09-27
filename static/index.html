@@ -1,57 +1,61 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ResolveOps Console</title>
+  <title>ResolveOps Agent · 企业 ERP 订单异常处理</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-  <div class="shell">
-    <aside class="sidebar">
-      <div class="brand">
-        <div class="mark">R</div>
-        <div>
-          <h1>ResolveOps</h1>
-          <p>Enterprise exception agent</p>
-        </div>
-      </div>
-      <label class="key-label" for="operator-key">Operator API key</label>
-      <input id="operator-key" type="password" autocomplete="off" placeholder="X-Operator-Key">
-      <label class="key-label" for="operator-name">Operator</label>
-      <input id="operator-name" type="text" autocomplete="off" placeholder="operator name">
-      <label class="key-label" for="operator-role">Role</label>
-      <select id="operator-role">
-        <option value="operator">operator</option>
-        <option value="warehouse_manager">warehouse_manager</option>
-        <option value="sales_manager">sales_manager</option>
-        <option value="procurement_manager">procurement_manager</option>
-        <option value="config_admin">config_admin</option>
-        <option value="ops_admin">ops_admin</option>
-      </select>
-      <div class="toolbar">
-        <button id="save-key">Save</button>
-        <button id="refresh" class="ghost">Refresh</button>
-      </div>
-      <div class="section-title">Cases</div>
-      <div id="case-list" class="case-list"></div>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand"><span class="brand-mark">R</span><div><strong>ResolveOps Agent</strong><small>企业 ERP 异常处理</small></div></div>
+      <nav class="nav" aria-label="工作台导航">
+        <button class="nav-item is-active" data-view="dashboard"><span>▦</span>工作台</button>
+        <button class="nav-item" data-view="cases"><span>▣</span>Case 工作台 <em id="case-count">—</em></button>
+        <button class="nav-item" data-view="approvals"><span>✓</span>待审批 <em id="approval-count">—</em></button>
+        <button class="nav-item" data-view="traces"><span>⌘</span>执行轨迹</button>
+        <button class="nav-item" data-view="settings"><span>⚙</span>系统配置</button>
+      </nav>
+      <div class="sidebar-bottom"><button class="identity" id="identity-button"><span id="identity-dot" class="dot muted"></span><span id="identity-label">连接本地服务</span></button><p>连接模型、ERP 与本地服务</p></div>
     </aside>
 
-    <main class="main">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">CASE CONTROL CENTER</p>
-          <h2 id="page-title">Select a case</h2>
-        </div>
-        <div id="status-chip" class="status muted">idle</div>
-      </header>
+    <main class="main-area">
+      <header class="topbar"><div><p class="eyebrow" id="page-eyebrow">运营总览</p><h1 id="page-title">订单异常工作台</h1></div><div class="topbar-actions"><span id="api-status" class="status-pill muted">未连接</span><button class="icon-button" id="refresh-button" title="刷新">↻</button></div></header>
+      <div class="content-wrap">
+        <section class="view is-visible" data-panel="dashboard">
+          <div class="section-head"><div><h2>当前运营状态</h2><p>聚合订单异常、审批与运行服务，优先处理需要人工确认的事项。</p></div></div>
+          <div class="metric-grid" id="dashboard-metrics"></div>
+          <div class="dashboard-grid"><section class="surface"><div class="surface-head"><div><p class="eyebrow">优先处理</p><h3>最近 Case</h3></div><button class="text-button" data-go="cases">查看全部</button></div><div id="dashboard-cases" class="data-list"></div></section><section class="surface"><div class="surface-head"><div><p class="eyebrow">人工确认</p><h3>待审批</h3></div><button class="text-button" data-go="approvals">审批中心</button></div><div id="dashboard-approvals" class="data-list"></div></section></div>
+        </section>
 
-      <section id="detail" class="detail empty">
-        Select a Case from the left panel.
-      </section>
+        <section class="view" data-panel="cases" hidden>
+          <div class="section-head"><div><p class="eyebrow">CASE WORKSPACE</p><h2>Case 工作台</h2><p>选择一个业务 Case，查看 Agent 已确认事实、计划与审批状态。</p></div><div class="header-actions"><button class="button secondary" data-open-create-case>新建 Case</button><button class="button secondary" data-go="traces">查看执行轨迹</button></div></div>
+          <div class="case-workspace"><aside class="case-rail"><div class="rail-head"><strong>Case 队列</strong><span id="case-rail-count"></span></div><div id="case-list" class="case-list"></div></aside><section id="case-detail" class="case-detail empty">选择左侧 Case 查看详情。</section></div>
+        </section>
+
+        <section class="view" data-panel="approvals" hidden><div class="section-head"><div><p class="eyebrow">HUMAN-IN-THE-LOOP</p><h2>待审批</h2><p>审批始终绑定具体 Action 与 Plan Version；批准后才会进入 Executor。</p></div></div><div id="approval-list" class="approval-grid"></div></section>
+
+        <section class="view" data-panel="traces" hidden><div class="section-head"><div><p class="eyebrow">TRACE / EVENTS</p><h2>执行轨迹</h2><p>展示真实 Agent 生命周期。默认摘要可读，技术 payload 按需展开。</p></div><select id="trace-case-select" aria-label="选择 Case"></select></div><div id="trace-detail" class="trace-view empty">选择一个 Case 查看执行轨迹。</div></section>
+
+        <section class="view" data-panel="settings" hidden>
+          <div class="section-head"><div><p class="eyebrow">LOCAL CONFIGURATION</p><h2>系统配置</h2><p>连接模型、ERP 系统与本地运行服务。密钥仅可写入，保存后不会再次显示。</p></div><button class="button secondary" id="settings-refresh">刷新状态</button></div>
+          <div id="settings-auth-notice" class="notice warning">此页显示的是服务端连接配置。请先验证具备 <code>config_admin</code> 或 <code>ops_admin</code> 角色的本地管理员 Key。<button class="button secondary" type="button" data-open-identity>设置本地管理员身份</button></div>
+          <div id="settings-result" class="notice" hidden></div>
+          <div id="service-status-grid" class="service-grid"></div>
+          <form id="connection-form" class="settings-grid" autocomplete="off">
+            <section class="surface config-card"><div class="surface-head"><div><p class="eyebrow">MODEL PROVIDER</p><h3>LLM 连接</h3></div><span id="llm-state" class="status-pill muted">待检查</span></div><label>服务地址<input name="llm_base_url" placeholder="https://api.example.com/v1"></label><label>API Key<input name="llm_api_key" type="password" placeholder="留空则保留已保存的 Key"></label><label>模型名称<input name="llm_model" placeholder="例如 gpt-4o-mini"></label><label>请求超时（秒）<input name="llm_timeout_seconds" type="number" min="1" max="300"></label><div class="form-actions"><button type="button" class="button secondary" data-test="llm">测试连接</button></div></section>
+            <section class="surface config-card"><div class="surface-head"><div><p class="eyebrow">BUSINESS ADAPTER</p><h3>ERPNext 连接</h3></div><span id="erp-state" class="status-pill muted">待检查</span></div><label>基础地址（Base URL）<input name="erpnext_base_url" placeholder="http://127.0.0.1:8080"></label><label>API Key<input name="erpnext_api_key" type="password" placeholder="留空则保留已保存的 Key"></label><label>API Secret<input name="erpnext_api_secret" type="password" placeholder="留空则保留已保存的 Secret"></label><p class="field-note">仅执行 ERPNext 身份认证与只读连通性检查，不会创建或修改 ERP 记录。</p><div class="form-actions"><button type="button" class="button secondary" data-test="erpnext">只读连通性检查</button></div></section>
+            <section class="surface config-card"><div class="surface-head"><div><p class="eyebrow">LOCAL RUNTIME</p><h3>数据库与服务</h3></div><span id="database-state" class="status-pill muted">待检查</span></div><label>数据库连接地址<input name="database_url" type="password" placeholder="sqlite:///./data/resolveops.db"></label><p class="field-note">桌面端与本地开发默认使用 SQLite。服务端部署可填写 PostgreSQL URL；更改地址后需重启 API 与 Worker。</p><div id="database-summary" class="mini-summary"></div><div class="form-actions"><button type="button" class="button secondary" data-test="database">测试连接</button></div></section>
+            <div class="settings-save-row"><div><strong>保存全部连接配置</strong><span>统一保存 LLM、ERPNext 与本地服务的当前填写内容；留空的密钥会保留原值。</span></div><button class="button" type="submit">保存全部配置</button></div>
+          </form>
+          <div class="notice warning"><strong>安全提示</strong>：此页不提供生产密钥、Webhook Secret、故障注入或安全预算的编辑入口。生产环境仍应由部署系统与密钥管理服务配置。</div>
+        </section>
+      </div>
     </main>
   </div>
-
+  <dialog id="identity-dialog"><form method="dialog" class="identity-form"><h2>本地演示身份</h2><p>角色由服务器根据 API Key 验证，而非由页面下拉框决定；这能防止伪造审批权限。</p><div id="identity-current" class="mini-summary">当前浏览器尚未验证身份。</div><label>本次要演示的角色<select id="role-guide"><option value="ops_admin">ops_admin · 创建 Case / 查看配置</option><option value="warehouse_manager">warehouse_manager · 仓库审批</option><option value="sales_manager">sales_manager · 销售审批</option><option value="procurement_manager">procurement_manager · 采购审批</option><option value="finance_manager">finance_manager · 财务审批</option></select></label><p id="role-guide-note" class="field-note">桌面演示版会使用本机已配置的演示身份，并由服务器重新验证角色。</p><label>Operator API Key（仅自定义环境需要）<input id="operator-key" type="password" autocomplete="off" placeholder="通常无需填写；仅自定义环境需要"></label><menu><button class="text-button" type="button" id="clear-key">退出当前身份</button><span class="menu-spacer"></span><button class="button secondary" value="cancel">取消</button><button class="button" type="button" id="switch-identity">切换身份</button></menu></form></dialog>
+  <dialog id="create-case-dialog"><form id="create-case-form" class="identity-form"><h2>新建演示 Case</h2><p>创建后会进入受限 Agent Loop：先读取业务事实，再提出需审批的写操作方案。</p><label>异常类型<select name="event_type"><option value="inventory_shortage">inventory_shortage · 库存短缺</option><option value="delivery_delay">delivery_delay · 交付延期</option><option value="price_mismatch">price_mismatch · 价格不一致</option></select></label><label>订单号<input name="order_id" required value="SAL-ORD-2026-00002" placeholder="例如 SAL-ORD-2026-00002"></label><label>业务原因<input name="reason" required value="请评估订单履约风险，并给出受控处理方案。" maxlength="500"></label><p class="field-note">使用演示订单时，建议只创建一个新的 Case；同一订单可以用于多次独立运行。</p><menu><button class="button secondary" type="button" id="cancel-create-case">取消</button><button class="button" type="submit" id="submit-create-case">创建并开始调查</button></menu></form></dialog>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>ResolveOps Desktop</title>
+  <style>
+    :root { color-scheme: light; font-family: "Microsoft YaHei UI", system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; color: #112e56; background: radial-gradient(circle at top left, #e4efff, transparent 42%), #f6f8fc; }
+    main { width: min(760px, calc(100vw - 48px)); padding: 42px; border: 1px solid #d6e2f3; border-radius: 18px; background: rgba(255,255,255,.96); box-shadow: 0 24px 70px rgba(36,78,137,.14); }
+    .eyebrow { margin: 0 0 8px; color: #2873d4; font-weight: 800; font-size: 12px; letter-spacing: .14em; }
+    h1 { margin: 0; font-size: 30px; } p { color: #526b8f; line-height: 1.7; }
+    #state { margin: 24px 0 12px; color: #185ea9; font-weight: 700; }
+    pre { min-height: 166px; max-height: 275px; overflow: auto; margin: 0; padding: 16px; border-radius: 10px; color: #cfe2ff; background: #102039; font: 13px/1.55 "Cascadia Mono", Consolas, monospace; white-space: pre-wrap; }
+    button { display: none; margin-top: 16px; border: 0; border-radius: 8px; padding: 10px 16px; color: white; background: #246ddd; font: 600 14px inherit; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">RESOLVEOPS DESKTOP</p>
+    <h1>企业 ERP 订单异常处理</h1>
+    <p>正在初始化本地 Agent Runtime。首次运行会创建独立 SQLite 数据库和后台 Worker，无需 Docker。</p>
+    <div id="state">正在启动…</div>
+    <pre id="logs"></pre>
+    <button id="retry">重新检查</button>
+  </main>
+  <script>
+    const state = document.querySelector('#state'); const logs = document.querySelector('#logs'); const retry = document.querySelector('#retry');
+    const append = (line) => { logs.textContent += `${line}\n`; logs.scrollTop = logs.scrollHeight; };
+    window.resolveOpsDesktop.logs().then((lines) => lines.forEach(append));
+    window.resolveOpsDesktop.onLog(append);
+    window.resolveOpsDesktop.onFailed((message) => { state.textContent = `启动未完成：${message}`; state.style.color = '#b42343'; retry.style.display = 'inline-block'; });
+    retry.addEventListener('click', () => { retry.style.display = 'none'; state.textContent = '正在重新检查…'; state.style.color = '#185ea9'; window.resolveOpsDesktop.retry(); });
+  </script>
+</body>
+</html>

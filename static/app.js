@@ -1,419 +1,282 @@
-const state = {
-  selected: null,
-  cases: [],
-  detail: null,
-  audit: [],
-  auditError: null,
-  evalSummary: null,
-  evalError: null,
-  eventFilter: "important",
-};
-
+const state = { activeView: 'dashboard', cases: [], selectedCaseId: null, selectedDetail: null, runtime: null, identity: null, tracePoller: null, tracePollBusy: false };
 const $ = (selector) => document.querySelector(selector);
-const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  "\"": "&quot;",
-  "'": "&#39;",
-}[c]));
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+const key = () => localStorage.getItem('resolveops.operatorKey') || '';
+const setKey = (value) => localStorage.setItem('resolveops.operatorKey', value);
+const clearKey = () => localStorage.removeItem('resolveops.operatorKey');
+const statusLabel = (value) => ({ queued: '排队中', running: '处理中', waiting_approval: '等待审批', resolved: '已解决', manual_review: '人工处理', replanning: '正在 Replan', approved: '已批准', pending: '待审批', rejected: '已驳回', expired: '已过期' }[value] || value || '未知');
+const statusTone = (value) => ['resolved', 'approved', 'success', 'ready'].includes(value) ? 'ok' : ['waiting_approval', 'pending', 'queued', 'replanning'].includes(value) ? 'warn' : ['manual_review', 'failed', 'rejected', 'expired'].includes(value) ? 'bad' : 'muted';
+const dateText = (value) => value ? new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
 const pretty = (value) => JSON.stringify(value ?? {}, null, 2);
-const key = () => localStorage.getItem("resolveops.operatorKey") || "";
-const operator = () => localStorage.getItem("resolveops.operator") || "console-operator";
-const role = () => localStorage.getItem("resolveops.operatorRole") || "operator";
-
-function headers(extra = {}) {
-  return {
-    "X-Operator-Key": key(),
-    "X-Operator": operator(),
-    "X-Operator-Role": role(),
-    ...extra,
-  };
-}
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { ...headers(options.headers || {}) },
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ detail: response.statusText }));
-    throw new Error(body.detail || response.statusText);
-  }
-  return response.json();
+  const response = await fetch(path, { ...options, headers: { 'X-Operator-Key': key(), ...(options.headers || {}) } });
+  if (!response.ok) { const body = await response.json().catch(() => ({ detail: response.statusText })); throw new Error(body.detail || response.statusText); }
+  return response.status === 204 ? null : response.json();
 }
 
-function statusClass(status) {
-  return `status ${escapeHtml(status || "muted")}`;
+function setApiStatus(label, tone = 'muted') {
+  const node = $('#api-status'); node.className = `status-pill ${tone}`; node.textContent = label;
+  $('#identity-label').textContent = state.identity ? `${state.identity.subject} · ${state.identity.role}` : '连接本地服务';
+  $('#identity-dot').className = `dot ${tone}`;
 }
+
+function identityText() {
+  return state.identity ? `${state.identity.subject} · ${state.identity.role} · tenant=${state.identity.tenant_id}` : '当前浏览器尚未验证身份。';
+}
+
+function openIdentityDialog() {
+  const guide = $('#role-guide');
+  if (state.identity && [...guide.options].some((option) => option.value === state.identity.role)) guide.value = state.identity.role;
+  $('#operator-key').value = '';
+  $('#identity-current').textContent = identityText();
+  $('#identity-dialog').showModal();
+}
+
+async function useOperatorKey(value, requestedRole) {
+  const previousKey = key();
+  if (!value) throw new Error('未找到可用的 Operator API Key。');
+  setKey(value);
+  const identity = await refreshData();
+  if (!identity) {
+    if (previousKey) { setKey(previousKey); await refreshData(); } else clearKey();
+    throw new Error('服务器未接受此 Key。请检查本机演示身份配置。');
+  }
+  if (requestedRole && identity.role !== requestedRole) {
+    setKey(previousKey);
+    await refreshData();
+    throw new Error(`服务器验证出的角色是 ${identity.role}，与所选角色不一致。`);
+  }
+  $('#identity-current').textContent = identityText();
+  return identity;
+}
+
+async function switchIdentity() {
+  const button = $('#switch-identity'); const role = $('#role-guide').value;
+  button.disabled = true; const original = button.textContent; button.textContent = '验证中…';
+  try {
+    const manualKey = $('#operator-key').value.trim();
+    if (manualKey) await useOperatorKey(manualKey);
+    else {
+      if (!window.resolveOpsDesktop?.demoRoleKey) throw new Error('自动切换仅在新版 ResolveOps Desktop 安装版可用；请手动输入 Key。');
+      await useOperatorKey(await window.resolveOpsDesktop.demoRoleKey(role), role);
+    }
+    $('#identity-dialog').close();
+  } catch (error) { $('#identity-current').textContent = `切换失败：${error.message}`; }
+  finally { button.disabled = false; button.textContent = original; }
+}
+
+function activate(view) {
+  state.activeView = view;
+  document.querySelectorAll('[data-panel]').forEach((panel) => { const visible = panel.dataset.panel === view; panel.hidden = !visible; panel.classList.toggle('is-visible', visible); });
+  document.querySelectorAll('[data-view]').forEach((button) => button.classList.toggle('is-active', button.dataset.view === view));
+  const names = { dashboard: ['运营总览', '订单异常工作台'], cases: ['CASE WORKSPACE', 'Case 工作台'], approvals: ['HUMAN-IN-THE-LOOP', '待审批'], traces: ['TRACE / EVENTS', '执行轨迹'], settings: ['LOCAL CONFIGURATION', '系统配置'] };
+  $('#page-eyebrow').textContent = names[view][0]; $('#page-title').textContent = names[view][1];
+  if (view === 'settings') loadSettings();
+  if (view === 'traces') { renderTrace(); syncTracePolling(); }
+  else stopTracePolling();
+}
+
+function pendingApprovals() { return state.cases.filter((item) => (item.approval_statuses || []).includes('pending')); }
+
+function renderDashboard() {
+  const waiting = state.cases.filter((item) => item.status === 'waiting_approval').length;
+  const running = state.cases.filter((item) => ['queued', 'running', 'replanning'].includes(item.status)).length;
+  const resolved = state.cases.filter((item) => item.status === 'resolved').length;
+  const metrics = [['待处理 Case', running, '需要 Agent 继续处理'], ['待审批', waiting, '等待人工确认'], ['已解决', resolved, '当前列表中的完成 Case'], ['服务状态', state.runtime?.status === 'ready' ? '正常' : '待检查', state.runtime?.status === 'ready' ? '数据库与迁移可用' : '连接管理员后刷新']];
+  $('#dashboard-metrics').innerHTML = metrics.map(([label, value, detail], index) => `<article class="metric-card metric-${index}"><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(detail)}</small></article>`).join('');
+  $('#dashboard-cases').innerHTML = state.cases.slice(0, 6).map(caseRow).join('') || empty('暂无可见 Case', '创建或接收 ERP 事件后会显示在这里。');
+  $('#dashboard-approvals').innerHTML = pendingApprovals().slice(0, 4).map((item) => `<button class="approval-row" data-open-case="${esc(item.id)}"><span><strong>${esc(item.order_id)}</strong><small>${esc((item.actions || []).join(' · ') || item.event_type)}</small></span><b class="status-pill warn">待审批</b></button>`).join('') || empty('没有待审批事项', '通过审批的 Action 才会进入 Executor。');
+  document.querySelectorAll('[data-open-case]').forEach((button) => button.addEventListener('click', () => selectCase(button.dataset.openCase, true)));
+}
+
+function caseRow(item) {
+  return `<button class="case-row ${item.id === state.selectedCaseId ? 'selected' : ''}" data-open-case="${esc(item.id)}"><span class="row-main"><strong>${esc(item.order_id)}</strong><small>${esc(item.event_type)} · ${esc((item.actions || []).join(' · ') || '等待计划')}</small></span><span class="row-tail"><em class="status-pill ${statusTone(item.status)}">${esc(statusLabel(item.status))}</em><small>${esc(dateText(item.updated_at))}</small></span></button>`;
+}
+
+function empty(title, detail) { return `<div class="empty-inline"><strong>${esc(title)}</strong><span>${esc(detail)}</span></div>`; }
 
 function renderCaseList() {
-  $("#case-list").innerHTML = state.cases.map((item) => `
-    <div class="case-item ${item.id === state.selected ? "active" : ""}" data-case="${escapeHtml(item.id)}">
-      <strong>${escapeHtml(item.order_id)}</strong>
-      <small>${escapeHtml(item.id)}</small>
-      <small>${escapeHtml(item.actions?.join(" + ") || "no plan yet")}</small>
-      <span class="${statusClass(item.status)}">${escapeHtml(item.status)}</span>
-    </div>
-  `).join("");
-
-  document.querySelectorAll("[data-case]").forEach((node) => {
-    node.addEventListener("click", () => selectCase(node.dataset.case));
-  });
+  $('#case-count').textContent = state.cases.length || '0'; $('#case-rail-count').textContent = `${state.cases.length} 条`;
+  $('#case-list').innerHTML = state.cases.map(caseRow).join('') || empty('暂无 Case', '等待 ERP 事件。');
+  document.querySelectorAll('[data-open-case]').forEach((button) => button.addEventListener('click', () => selectCase(button.dataset.openCase, true)));
 }
 
-function percent(value) {
-  return `${Math.round((Number(value || 0)) * 100)}%`;
+function actionCards(actions) {
+  if (!actions.length) return empty('暂无 Action Plan', 'Agent 仍在读取业务事实或已安全停止。');
+  return actions.map((action) => `<article class="action-card"><div class="card-row"><strong>${esc(action.action_type)}</strong><span class="mono">${esc(action.action_id || 'Action ID 待记录')}</span></div><p>${esc(action.rationale || '受控 Action，等待 Grounding、Policy 与 Approval。')}</p><div class="evidence-refs">Evidence：${esc((action.evidence_refs || []).join(' · ') || '尚未绑定')}</div></article>`).join('');
 }
 
-function evalSummaryHtml() {
-  if (state.evalError) return `<section class="card"><h3>Evaluation summary</h3><p class="muted">${escapeHtml(state.evalError)}</p></section>`;
-  if (!state.evalSummary) return "";
-  const item = state.evalSummary;
-  return `
-    <section class="card">
-      <div class="card-title-row">
-        <h3>Evaluation summary</h3>
-        <span class="badge">latest ${escapeHtml(item.total_cases)} cases</span>
-      </div>
-      <div class="metric-grid">
-        <div class="metric"><strong>${escapeHtml(percent(item.case_resolution_rate))}</strong><span>Resolution rate</span></div>
-        <div class="metric"><strong>${escapeHtml(percent(item.verification_pass_rate))}</strong><span>Verification pass rate</span></div>
-        <div class="metric"><strong>${escapeHtml(item.replanned_cases)}</strong><span>Replanned cases</span></div>
-        <div class="metric"><strong>${escapeHtml(item.manual_handoff_cases)}</strong><span>Manual handoffs</span></div>
-        <div class="metric"><strong>${escapeHtml(item.evidence_grounding_failures)}</strong><span>Grounding failures</span></div>
-        <div class="metric"><strong>${escapeHtml(item.policy_denials)}</strong><span>Policy denials</span></div>
-        <div class="metric"><strong>${escapeHtml(item.task_failures)}</strong><span>Task failures</span></div>
-      </div>
-    </section>
-  `;
+function renderCaseDetail() {
+  const detail = state.selectedDetail; if (!detail) return;
+  const conclusion = detail.evidence?.conclusion || {}; const actions = Array.isArray(detail.plan?.actions) ? detail.plan.actions : [];
+  const observations = detail.tool_trace?.observations || detail.evidence?.observations || [];
+  const decision = detail.agent_decision || {};
+  $('#case-detail').className = 'case-detail';
+  $('#case-detail').innerHTML = `<header class="case-heading"><div><p class="eyebrow">${esc(detail.event_type)}</p><h2>${esc(detail.order_id)} <span class="status-pill ${statusTone(detail.status)}">${esc(statusLabel(detail.status))}</span></h2><p>Case ID · <span class="mono">${esc(detail.id)}</span> · Plan v${esc(detail.plan_version)}</p></div><button class="button secondary" data-go="traces">查看执行轨迹</button></header>
+    <div class="case-summary"><section><h3>Agent 决策</h3><p>${esc(conclusion.rationale || '尚未形成可执行结论。')}</p><div class="fact-chips">${(decision.evidence_summary || []).slice(0, 4).map((fact) => `<span>${esc(fact)}</span>`).join('') || '<span>等待确认业务事实</span>'}</div></section><section><h3>已确认 Observation</h3><strong>${observations.length}</strong><p>每条 Observation 都可在执行轨迹中回溯到对应 Tool 与 Evidence。</p></section></div>
+    <section class="case-section"><div class="surface-head"><div><p class="eyebrow">ACTION PROPOSAL</p><h3>推荐处理方案</h3></div></div>${actionCards(actions)}</section>
+    <section class="case-section"><div class="surface-head"><div><p class="eyebrow">AUDITABLE DECISION</p><h3>决策依据</h3></div></div><ul class="audit-list">${(decision.decision_trace || []).map((item) => `<li>${esc(item)}</li>`).join('') || '<li>尚无可展示的审计决策依据。</li>'}</ul></section>
+    <section class="case-section"><div class="surface-head"><div><p class="eyebrow">HUMAN-IN-THE-LOOP</p><h3>审批状态</h3></div></div>${approvalCards(detail.approvals || [])}</section>`;
+  document.querySelectorAll('[data-go]').forEach((button) => button.addEventListener('click', () => activate(button.dataset.go)));
+  bindApprovalActions();
 }
 
-function observation(tool) {
-  return (state.detail?.evidence?.observations || []).filter((item) => item.tool === tool);
+function approvalCards(approvals) {
+  if (!approvals.length) return empty('暂无审批', '当前 Case 尚未进入人工审批环节。');
+  return approvals.map((approval) => `<article class="approval-card"><div class="card-row"><strong>${esc(approval.action?.action_type || 'Action')}</strong><span class="status-pill ${statusTone(approval.status)}">${esc(statusLabel(approval.status))}</span></div><dl><dt>Plan</dt><dd>v${esc(approval.plan_version)}</dd><dt>需要角色</dt><dd>${esc((approval.required_roles || []).join(' · ') || '—')}</dd><dt>已批准</dt><dd>${esc((approval.approved_roles || []).join(' · ') || '—')}</dd></dl>${approval.status === 'pending' ? `<div class="approval-actions"><button class="button" data-approve="${esc(approval.id)}">批准</button><button class="button secondary" data-reject="${esc(approval.id)}">驳回并 Replan</button></div>` : ''}</article>`).join('');
 }
 
-function evidenceHtml() {
-  const order = observation("get_order")[0]?.result;
-  const targetStock = observation("get_inventory").find((x) => x.arguments?.warehouse === order?.items?.[0]?.warehouse)?.result;
-  const sourceStocks = observation("get_inventory").filter((x) => x.arguments?.warehouse !== order?.items?.[0]?.warehouse);
-  const customer = observation("get_customer_profile")[0]?.result;
-  const item = observation("get_item_supply_profile")[0]?.result;
-  const lanes = observation("get_transfer_options")[0]?.result?.lanes || [];
-  const inbound = observation("get_inbound_purchase")[0]?.result?.purchase_items || [];
-
-  return `
-    <div class="kv">
-      <div>Order</div><div>${escapeHtml(order?.name || state.detail?.order_id)}</div>
-      <div>Item / qty</div><div>${escapeHtml(order?.items?.[0]?.item_code)} / ${escapeHtml(order?.items?.[0]?.qty)}</div>
-      <div>Delivery date</div><div>${escapeHtml(order?.delivery_date || order?.items?.[0]?.delivery_date)}</div>
-      <div>Target stock</div><div>${escapeHtml(targetStock?.warehouse)} actual ${escapeHtml(targetStock?.actual_qty)} reserved ${escapeHtml(targetStock?.reserved_qty)}</div>
-      <div>Source stock</div><div>${sourceStocks.map((x) => `${x.result?.warehouse}: actual ${x.result?.actual_qty}`).map(escapeHtml).join("<br>") || "none"}</div>
-      <div>Customer split</div><div>${escapeHtml(customer?.allows_partial_delivery)}</div>
-      <div>Lead time</div><div>${escapeHtml(item?.lead_time_days)} days</div>
-      <div>Transfer lanes</div><div>${lanes.map((x) => `${x.source} -> ${x.target}: ${x.transit_days} days, ${x.cost_per_unit} ${x.currency}/unit`).map(escapeHtml).join("<br>") || "none"}</div>
-      <div>Inbound PO</div><div>${inbound.length ? inbound.map((x) => escapeHtml(`${x.purchase_order}: ${x.remaining_qty}`)).join("<br>") : "none"}</div>
-    </div>
-  `;
+function bindApprovalActions() {
+  document.querySelectorAll('[data-approve]').forEach((button) => button.addEventListener('click', () => approve(button.dataset.approve, button)));
+  document.querySelectorAll('[data-reject]').forEach((button) => button.addEventListener('click', () => rejectAndReplan(button.dataset.reject, button)));
 }
 
-function planHtml() {
-  const plan = state.detail?.plan;
-  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
-  if (!actions.length) return `<p class="muted">No active plan.</p>`;
-  return actions.map((action) => `
-    <div class="action">
-      <div class="row">
-        <strong>${escapeHtml(action.action_type)}</strong>
-        <span class="badge">${escapeHtml(action.policy?.reason || action.risk?.level)}</span>
-      </div>
-      <div class="code">${escapeHtml(pretty(action.input))}</div>
-      <p class="muted">${escapeHtml(action.rationale || "")}</p>
-    </div>
-  `).join("");
+async function approve(approvalId, button) {
+  button.disabled = true;
+  try { await api(`/v1/approvals/${encodeURIComponent(approvalId)}/approve`, { method: 'POST' }); await refreshData(); await selectCase(state.selectedCaseId, false); }
+  catch (error) { window.alert(`审批未完成：${error.message}`); }
+  finally { button.disabled = false; }
 }
 
-function approvalHtml() {
-  const approvals = state.detail?.approvals || [];
-  if (!approvals.length) return `<p class="muted">No approvals yet.</p>`;
-  return approvals.map((approval) => {
-    const remaining = (approval.required_roles || []).filter((role) => !(approval.approved_roles || []).includes(role));
-    const buttons = remaining.map((role) => `
-      <button data-approve="${escapeHtml(approval.id)}" data-role="${escapeHtml(role)}">Approve as ${escapeHtml(role)}</button>
-    `).join("");
-    return `
-      <div class="approval">
-        <div class="row">
-          <strong>${escapeHtml(approval.action?.action_type)}</strong>
-          <span class="badge ${escapeHtml(approval.status)}">${escapeHtml(approval.status)}</span>
-        </div>
-        <div class="kv">
-          <div>Plan version</div><div>v${escapeHtml(approval.plan_version)}</div>
-          <div>Required</div><div>${escapeHtml((approval.required_roles || []).join(", "))}</div>
-          <div>Approved</div><div>${escapeHtml((approval.approved_roles || []).join(", ") || "none")}</div>
-          <div>Action hash</div><div>${escapeHtml((approval.action_hash || "").slice(0, 18))}</div>
-        </div>
-        <div class="approve-buttons">${approval.status === "pending" ? buttons : ""}</div>
-      </div>
-    `;
-  }).join("");
+async function rejectAndReplan(approvalId, button) {
+  const reason = window.prompt('请输入驳回原因；系统将保留旧计划并发起新的受限只读调查。');
+  if (!reason?.trim()) return;
+  button.disabled = true;
+  try { await api(`/v1/approvals/${encodeURIComponent(approvalId)}/reject-replan`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ reason: reason.trim() }) }); await refreshData(); await selectCase(state.selectedCaseId, false); }
+  catch (error) { window.alert(`Replan 未启动：${error.message}`); }
+  finally { button.disabled = false; }
 }
 
-function invocationHtml() {
-  const invocations = state.detail?.invocations || [];
-  if (!invocations.length) return `<p class="muted">No ERP write invocation.</p>`;
-  return invocations.map((item) => `
-    <div class="invocation">
-      <div class="row">
-        <strong>${escapeHtml(item.tool)}</strong>
-        <span class="badge ${escapeHtml(item.status)}">${escapeHtml(item.status)}</span>
-      </div>
-      <div class="kv">
-        <div>External document</div><div>${escapeHtml(item.external_id || "pending")}</div>
-        <div>Idempotency key</div><div>${escapeHtml(item.idempotency_key)}</div>
-      </div>
-    </div>
-  `).join("");
+function renderApprovals() {
+  const approvalCases = pendingApprovals();
+  $('#approval-count').textContent = approvalCases.length || '0';
+  $('#approval-list').innerHTML = approvalCases.map((item) => `<button class="approval-card action-link" data-open-case="${esc(item.id)}"><div class="card-row"><strong>${esc(item.order_id)}</strong><span class="status-pill warn">待审批</span></div><p>${esc((item.actions || []).join(' · ') || item.event_type)}</p><small>打开 Case 查看 Action、Evidence 与批准操作</small></button>`).join('') || empty('没有待审批事项', '新的 Action Plan 进入审批后会显示在这里。');
+  document.querySelectorAll('[data-open-case]').forEach((button) => button.addEventListener('click', () => selectCase(button.dataset.openCase, true)));
 }
 
-const IMPORTANT_EVENTS = new Set([
-  "case_created",
-  "agent_plan_created",
-  "evidence_grounding_failed",
-  "approval_partial",
-  "approval_granted",
-  "replan_requested",
-  "verification_passed",
-  "verification_failed",
-  "manual_review_required",
-  "handoff",
-  "worker_failure",
-  "task_requeued",
-]);
+function traceStage(event) { return ({ context_built: 'Context Snapshot', agent_start: 'Agent Loop', turn_start: 'LLM Turn', tool_call: 'Tool Call', tool_observation: 'Observation', agent_decision_trace: 'Action Proposal', evidence_grounding_passed: 'Evidence Grounding', policy_passed: 'Policy Check', approval_requested: 'Human Approval', execution_started: 'Executor', verification_passed: 'Verify', replan_requested: 'Replan', handoff: 'Stop / Handoff' }[event.kind] || event.kind); }
+function isLiveCase(detail) { return ['queued', 'running', 'replanning'].includes(detail?.status); }
 
-function planEvolutionHtml() {
-  const approvals = state.detail?.approvals || [];
-  const versions = [...new Set(approvals.map((item) => item.plan_version))].sort((a, b) => a - b);
-  if (!versions.length) return `<p class="muted">No plan version has been created yet.</p>`;
-
-  return `
-    <div class="plan-flow">
-      ${versions.map((version) => {
-        const versionApprovals = approvals.filter((item) => item.plan_version === version);
-        const invalidated = versionApprovals.some((item) => item.status === "invalidated");
-        const consumed = versionApprovals.length > 0 && versionApprovals.every((item) => item.status === "consumed");
-        const active = version === state.detail.plan_version;
-        const status = invalidated ? "invalidated" : consumed ? "consumed" : active ? "active" : "superseded";
-        return `
-          <div class="plan-version ${status}">
-            <div class="row">
-              <strong>Plan v${escapeHtml(version)}</strong>
-              <span class="badge ${escapeHtml(status)}">${escapeHtml(status)}</span>
-            </div>
-            ${versionApprovals.map((approval) => `
-              <div class="mini-action">
-                <div>${escapeHtml(approval.action?.action_type)}</div>
-                <span>${escapeHtml(approval.action?.input ? pretty(approval.action.input) : "{}")}</span>
-                <em>${escapeHtml(approval.status)}</em>
-              </div>
-            `).join("")}
-          </div>
-        `;
-      }).join("")}
-    </div>
-  `;
+function stopTracePolling() {
+  if (state.tracePoller) window.clearInterval(state.tracePoller);
+  state.tracePoller = null;
 }
 
-function toolCallHtml() {
-  const observations = state.detail?.evidence?.observations || [];
-  if (!observations.length) return `<p class="muted">No tool calls recorded.</p>`;
-  return observations.map((item, index) => {
-    const hasError = Boolean(item.result?.error);
-    const metadata = item.metadata || {};
-    return `
-      <div class="tool-call">
-        <div class="row">
-          <strong>${index + 1}. ${escapeHtml(item.tool)}</strong>
-          <span class="badge ${hasError ? "failed" : "succeeded"}">${hasError ? "error" : "ok"}</span>
-        </div>
-        <div class="kv compact">
-          <div>Permission</div><div>${escapeHtml(metadata.permission || "-")}</div>
-          <div>Side effect</div><div>${escapeHtml(metadata.side_effect || "-")}</div>
-          <div>Risk</div><div>${escapeHtml(metadata.risk_level || "-")}</div>
-          <div>Source</div><div>${escapeHtml(metadata.source_system || "-")}</div>
-        </div>
-        <div class="code">${escapeHtml(pretty(item.arguments))}</div>
-        <details>
-          <summary>Result</summary>
-          <div class="code">${escapeHtml(pretty(item.result))}</div>
-        </details>
-      </div>
-    `;
-  }).join("");
-}
-
-function eventFilterHtml() {
-  return `
-    <div class="segmented">
-      <button class="${state.eventFilter === "important" ? "active" : ""}" data-event-filter="important">Important</button>
-      <button class="${state.eventFilter === "tools" ? "active" : ""}" data-event-filter="tools">Tool calls</button>
-      <button class="${state.eventFilter === "all" ? "active" : ""}" data-event-filter="all">All</button>
-    </div>
-  `;
-}
-
-function eventHtml() {
-  const events = state.detail?.events || [];
-  const filtered = events.filter((event) => {
-    if (state.eventFilter === "all") return true;
-    if (state.eventFilter === "tools") return event.kind === "tool_observation";
-    return IMPORTANT_EVENTS.has(event.kind);
-  });
-  if (!filtered.length) return `<p class="muted">No events in this filter.</p>`;
-  return filtered.slice().reverse().map((event) => `
-    <div class="event">
-      <time>${escapeHtml(event.created_at ? new Date(event.created_at).toLocaleString() : "")}</time>
-      <strong>${escapeHtml(event.kind)}</strong>
-      <p>${escapeHtml(event.message)}</p>
-      ${Object.keys(event.data || {}).length ? `<details><summary>Event data</summary><div class="code">${escapeHtml(pretty(event.data))}</div></details>` : ""}
-    </div>
-  `).join("");
-}
-
-function auditHtml() {
-  if (state.auditError) return `<p class="muted">${escapeHtml(state.auditError)}</p>`;
-  if (!state.audit.length) return `<p class="muted">No audit records visible for current role.</p>`;
-  return state.audit.map((item) => `
-    <div class="audit-row">
-      <div class="row">
-        <strong>${escapeHtml(item.action)}</strong>
-        <span class="badge">${escapeHtml(item.role)}</span>
-      </div>
-      <div class="kv">
-        <div>Actor</div><div>${escapeHtml(item.actor)}</div>
-        <div>Resource</div><div>${escapeHtml(item.resource_type)} / ${escapeHtml(item.resource_id)}</div>
-        <div>Case</div><div>${escapeHtml(item.case_id || "-")}</div>
-        <div>Time</div><div>${escapeHtml(item.created_at ? new Date(item.created_at).toLocaleString() : "")}</div>
-      </div>
-      ${Object.keys(item.data || {}).length ? `<details><summary>Audit data</summary><div class="code">${escapeHtml(pretty(item.data))}</div></details>` : ""}
-    </div>
-  `).join("");
-}
-
-function renderDetail() {
-  if (!state.detail) return;
-  $("#page-title").textContent = `${state.detail.order_id} · ${state.detail.id}`;
-  $("#status-chip").className = statusClass(state.detail.status);
-  $("#status-chip").textContent = state.detail.status;
-  $("#detail").className = "detail";
-  $("#detail").innerHTML = `
-    ${evalSummaryHtml()}
-    <div class="grid">
-      <section class="card">
-        <h3>Case</h3>
-        <div class="kv">
-          <div>Tenant</div><div>${escapeHtml(state.detail.tenant_id)}</div>
-          <div>Source event</div><div>${escapeHtml(state.detail.source_event_id)}</div>
-          <div>Plan version</div><div>v${escapeHtml(state.detail.plan_version)}</div>
-          <div>Updated</div><div>${escapeHtml(state.detail.updated_at ? new Date(state.detail.updated_at).toLocaleString() : "")}</div>
-        </div>
-      </section>
-      <section class="card">
-        <h3>Agent conclusion</h3>
-        <p class="muted">${escapeHtml(state.detail.evidence?.conclusion?.rationale || "No conclusion yet.")}</p>
-        <div class="code">${escapeHtml(pretty(state.detail.evidence?.conclusion?.missing_information || []))}</div>
-      </section>
-    </div>
-    <div class="grid">
-      <section class="card"><h3>Evidence</h3>${evidenceHtml()}</section>
-      <section class="card"><h3>Action plan</h3>${planHtml()}</section>
-    </div>
-    <div class="grid">
-      <section class="card"><h3>Plan evolution</h3>${planEvolutionHtml()}</section>
-      <section class="card"><h3>Tool calls</h3>${toolCallHtml()}</section>
-    </div>
-    <div class="grid">
-      <section class="card"><h3>Approvals</h3>${approvalHtml()}</section>
-      <section class="card"><h3>ERP write verification</h3>${invocationHtml()}</section>
-    </div>
-    <section class="card"><h3>Audit trail</h3>${auditHtml()}</section>
-    <section class="card"><div class="card-title-row"><h3>Event timeline</h3>${eventFilterHtml()}</div>${eventHtml()}</section>
-  `;
-
-  document.querySelectorAll("[data-approve]").forEach((node) => {
-    node.addEventListener("click", () => approve(node.dataset.approve, node.dataset.role));
-  });
-  document.querySelectorAll("[data-event-filter]").forEach((node) => {
-    node.addEventListener("click", () => {
-      state.eventFilter = node.dataset.eventFilter;
-      renderDetail();
-    });
-  });
-}
-
-async function loadCases() {
-  state.cases = await api("/v1/cases?limit=50");
+async function refreshLiveTrace() {
+  if (state.tracePollBusy || state.activeView !== 'traces' || !state.selectedCaseId || !key()) return;
+  state.tracePollBusy = true;
   try {
-    state.evalSummary = await api("/v1/evals/summary?limit=50");
-    state.evalError = null;
-  } catch (error) {
-    state.evalSummary = null;
-    state.evalError = `Evaluation summary requires ops_admin/config_admin role: ${error.message}`;
-  }
-  if (!state.selected && state.cases[0]) state.selected = state.cases[0].id;
-  renderCaseList();
+    const detail = await api(`/v1/cases/${encodeURIComponent(state.selectedCaseId)}`);
+    const previous = state.selectedDetail;
+    const changed = !previous || detail.status !== previous.status || detail.plan_version !== previous.plan_version || (detail.events || []).length !== (previous.events || []).length;
+    state.selectedDetail = detail;
+    state.cases = state.cases.map((item) => item.id === detail.id ? { ...item, status: detail.status, plan_version: detail.plan_version } : item);
+    if (changed) { renderTrace(); renderCaseList(); }
+    syncTracePolling();
+  } catch (_) {
+    // A manual refresh remains available if the local API is restarting.
+  } finally { state.tracePollBusy = false; }
 }
 
-async function loadDetail() {
-  if (!state.selected) return;
-  state.detail = await api(`/v1/cases/${state.selected}`);
+function syncTracePolling() {
+  const shouldPoll = state.activeView === 'traces' && isLiveCase(state.selectedDetail);
+  if (!shouldPoll) { stopTracePolling(); return; }
+  if (!state.tracePoller) state.tracePoller = window.setInterval(refreshLiveTrace, 900);
+}
+
+function renderTrace() {
+  const select = $('#trace-case-select'); select.innerHTML = `<option value="">选择一个 Case</option>${state.cases.map((item) => `<option value="${esc(item.id)}">${esc(item.order_id)} · ${esc(statusLabel(item.status))}</option>`).join('')}`; select.value = state.selectedCaseId || '';
+  select.onchange = () => selectCase(select.value, false).then(() => renderTrace());
+  const detail = state.selectedDetail; if (!detail) return;
+  $('#trace-detail').className = 'trace-view';
+  const live = isLiveCase(detail);
+  $('#trace-detail').innerHTML = `<div class="trace-header"><div><strong>${esc(detail.order_id)}</strong><span class="status-pill ${statusTone(detail.status)}">${esc(statusLabel(detail.status))}</span>${live ? '<span class="status-pill ok">实时更新</span>' : ''}</div><span class="mono">${esc(detail.id)}</span></div><div class="timeline">${(detail.events || []).map((event) => `<article class="timeline-item"><span class="timeline-dot"></span><div><div class="card-row"><strong>${esc(traceStage(event))}</strong><time>${esc(dateText(event.created_at))}</time></div><p>${esc(event.message || '')}</p>${Object.keys(event.data || {}).length ? `<details><summary>技术详情</summary><pre>${esc(pretty(event.data))}</pre></details>` : ''}</div></article>`).join('') || empty('暂无生命周期事件', '历史 Case 可能没有记录新的运行轨迹。')}</div>`;
+}
+
+async function selectCase(id, switchToCases) {
+  if (!id) return; state.selectedCaseId = id; renderCaseList();
+  try { state.selectedDetail = await api(`/v1/cases/${encodeURIComponent(id)}`); renderCaseDetail(); renderTrace(); if (switchToCases) activate('cases'); else syncTracePolling(); }
+  catch (error) { $('#case-detail').className = 'case-detail empty'; $('#case-detail').textContent = error.message; }
+}
+
+function formValues() {
+  const form = $('#connection-form'); const data = Object.fromEntries(new FormData(form).entries());
+  Object.entries(data).forEach(([name, value]) => { if (value === '') delete data[name]; if (name === 'llm_timeout_seconds' && value !== '') data[name] = Number(value); });
+  return data;
+}
+function showSettingsResult(message, tone = 'ok') { const node = $('#settings-result'); node.hidden = false; node.className = `notice ${tone}`; node.textContent = message; }
+function configState(configured) { return configured ? ['已配置', 'ok'] : ['待配置', 'warn']; }
+function serviceCard(label, status, detail, tone) { return `<article class="service-card"><span class="dot ${tone}"></span><div><strong>${esc(label)}</strong><b>${esc(status)}</b><small>${esc(detail)}</small></div></article>`; }
+
+async function loadSettings() {
+  const notice = $('#settings-auth-notice');
+  if (!key() || !state.identity) { notice.hidden = false; notice.textContent = '当前浏览器未验证管理员身份。左下角可输入本地 Key；页面中的“已配置”仅表示服务端已有连接凭据。'; $('#service-status-grid').innerHTML = ''; return; }
   try {
-    state.audit = await api(`/v1/audit?case_id=${encodeURIComponent(state.selected)}&limit=20`);
-    state.auditError = null;
-  } catch (error) {
-    state.audit = [];
-    state.auditError = `Audit requires ops_admin/config_admin role: ${error.message}`;
+    const payload = await api('/v1/settings/connections'); const connections = payload.connections; state.runtime = payload.status; notice.hidden = true;
+    const form = $('#connection-form'); form.llm_base_url.value = connections.llm.base_url; form.llm_model.value = connections.llm.model; form.llm_timeout_seconds.value = connections.llm.timeout_seconds || 60; form.erpnext_base_url.value = connections.erpnext.base_url;
+    const [llmLabel, llmTone] = configState(connections.llm.api_key_configured && connections.llm.base_url && connections.llm.model);
+    const [erpLabel, erpTone] = configState(connections.erpnext.api_key_configured && connections.erpnext.api_secret_configured && connections.erpnext.base_url);
+    const databaseTone = payload.status.checks?.database?.ok ? 'ok' : 'bad';
+    $('#llm-state').className = `status-pill ${llmTone}`; $('#llm-state').textContent = llmLabel; $('#erp-state').className = `status-pill ${erpTone}`; $('#erp-state').textContent = erpLabel; $('#database-state').className = `status-pill ${databaseTone}`; $('#database-state').textContent = payload.status.checks?.database?.ok ? '正常' : '异常';
+    $('#database-summary').textContent = connections.database.configured ? `${connections.database.dialect || '数据库'} · ${connections.database.host || '本地'} · ${connections.database.database || '默认库'}` : '尚未配置数据库连接。';
+    $('#service-status-grid').innerHTML = [serviceCard('数据库', payload.status.checks?.database?.ok ? '正常' : '异常', '当前运行数据库', databaseTone), serviceCard('LLM', llmLabel, '服务端已有模型连接凭据', llmTone), serviceCard('ERPNext', erpLabel, '服务端已有 ERP 连接凭据', erpTone)].join('');
+  } catch (error) { notice.hidden = false; notice.textContent = `无法读取配置：${error.message}`; $('#service-status-grid').innerHTML = ''; }
+}
+
+async function testConnection(target, button) {
+  button.disabled = true; const original = button.textContent; button.textContent = '检查中…';
+  try { const result = await api('/v1/settings/connections/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ target, ...formValues() }) }); showSettingsResult(result.message, 'ok'); }
+  catch (error) { showSettingsResult(error.message, 'bad'); }
+  finally { button.disabled = false; button.textContent = original; }
+}
+
+async function saveConnections(event) {
+  event.preventDefault(); const submit = event.submitter || $('#connection-form button[type="submit"]'); submit.disabled = true;
+  try { const result = await api('/v1/settings/connections', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(formValues()) }); showSettingsResult(result.message, result.restart_required ? 'warning' : 'ok'); $('#connection-form').querySelectorAll('input[type="password"]').forEach((input) => input.value = ''); await loadSettings(); }
+  catch (error) { showSettingsResult(error.message, 'bad'); }
+  finally { submit.disabled = false; }
+}
+
+function openCreateCaseDialog() {
+  if (!key() || !state.identity) {
+    $('#identity-current').textContent = '创建 Case 前需要先验证本地操作员身份。';
+    $('#identity-dialog').showModal();
+    return;
   }
-  renderDetail();
+  $('#create-case-dialog').showModal();
 }
 
-async function selectCase(id) {
-  state.selected = id;
-  renderCaseList();
-  await loadDetail();
-}
-
-async function approve(approvalId, role) {
-  const operator = `console-${role}`;
-  await api(`/v1/approvals/${approvalId}/approve`, {
-    method: "POST",
-    headers: {
-      "X-Operator": operator,
-      "X-Operator-Role": role,
-    },
-  });
-  await refresh();
-}
-
-async function refresh() {
+async function createCase(event) {
+  event.preventDefault();
+  const form = $('#create-case-form'); const submit = $('#submit-create-case');
+  const payload = Object.fromEntries(new FormData(form).entries());
+  submit.disabled = true; submit.textContent = '创建中…';
   try {
-    await loadCases();
-    await loadDetail();
-  } catch (error) {
-    $("#detail").className = "detail empty";
-    $("#detail").textContent = error.message;
-  }
+    const result = await api('/v1/cases', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    $('#create-case-dialog').close(); await refreshData(); await selectCase(result.case_id, true);
+  } catch (error) { window.alert(`Case 未创建：${error.message}`); }
+  finally { submit.disabled = false; submit.textContent = '创建并开始调查'; }
 }
 
-$("#operator-key").value = key();
-$("#operator-name").value = operator();
-$("#operator-role").value = role();
-$("#save-key").addEventListener("click", () => {
-  localStorage.setItem("resolveops.operatorKey", $("#operator-key").value.trim());
-  localStorage.setItem("resolveops.operator", $("#operator-name").value.trim() || "console-operator");
-  localStorage.setItem("resolveops.operatorRole", $("#operator-role").value);
-  refresh();
-});
-$("#refresh").addEventListener("click", refresh);
+async function refreshData() {
+  if (!key()) { state.identity = null; setApiStatus('未认证', 'muted'); renderDashboard(); renderCaseList(); renderApprovals(); return null; }
+  try {
+    state.identity = await api('/v1/operator/me');
+    state.cases = await api('/v1/cases?limit=50'); $('#case-count').textContent = state.cases.length;
+    try { state.runtime = await api('/v1/runtime/status'); } catch (_) { state.runtime = null; }
+    setApiStatus(`已认证 · ${state.identity.role}`, 'ok'); renderDashboard(); renderCaseList(); renderApprovals(); if (state.selectedCaseId) await selectCase(state.selectedCaseId, false); return state.identity;
+  } catch (error) { state.identity = null; setApiStatus('认证失败', 'bad'); $('#dashboard-cases').innerHTML = empty('无法读取 Case', error.message); return null; }
+}
 
-refresh();
+document.querySelectorAll('[data-view]').forEach((button) => button.addEventListener('click', () => activate(button.dataset.view)));
+document.querySelectorAll('[data-go]').forEach((button) => button.addEventListener('click', () => activate(button.dataset.go)));
+document.querySelectorAll('[data-open-create-case]').forEach((button) => button.addEventListener('click', openCreateCaseDialog));
+document.querySelectorAll('[data-open-identity]').forEach((button) => button.addEventListener('click', openIdentityDialog));
+$('#refresh-button').addEventListener('click', refreshData); $('#settings-refresh').addEventListener('click', loadSettings);
+$('#connection-form').addEventListener('submit', saveConnections); document.querySelectorAll('[data-test]').forEach((button) => button.addEventListener('click', () => testConnection(button.dataset.test, button)));
+$('#identity-button').addEventListener('click', openIdentityDialog);
+$('#switch-identity').addEventListener('click', switchIdentity);
+$('#clear-key').addEventListener('click', () => { clearKey(); state.identity = null; $('#operator-key').value = ''; $('#identity-current').textContent = '已退出当前身份。'; setApiStatus('未认证', 'muted'); renderDashboard(); renderCaseList(); renderApprovals(); });
+$('#create-case-form').addEventListener('submit', createCase); $('#cancel-create-case').addEventListener('click', () => $('#create-case-dialog').close());
+if (key()) refreshData(); else { renderDashboard(); renderCaseList(); renderApprovals(); }

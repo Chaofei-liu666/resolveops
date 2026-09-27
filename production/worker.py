@@ -2,9 +2,10 @@
 from __future__ import annotations
 import hashlib, json, time
 from datetime import UTC, datetime, timedelta
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
-from .config import settings
+from .config import reload_runtime_connections, settings
+from .database import create_database_engine
 from .context import CaseContextBuilder, validate_case_context_isolation
 from .erpnext import ERPNextAdapter
 from .events import emit
@@ -19,7 +20,18 @@ from .executors import executor_for
 from .memory import record_verified_lessons
 from .policy import action_policy
 from .tool_trace import bind_plan_evidence_refs, build_tool_trace
-engine=create_engine(settings.database_url,pool_pre_ping=True); erp=ERPNextAdapter(settings.erpnext_base_url,settings.erpnext_api_key,settings.erpnext_api_secret)
+engine=create_database_engine(settings.database_url); erp=ERPNextAdapter(settings.erpnext_base_url,settings.erpnext_api_key,settings.erpnext_api_secret)
+
+
+def refresh_worker_connections() -> None:
+    """Pick up local Workbench LLM/ERP edits before the next durable task.
+
+    Database endpoints deliberately remain process-start configuration: live
+    swapping an engine could split one Case across two stores.
+    """
+    global erp
+    if reload_runtime_connections():
+        erp = ERPNextAdapter(settings.erpnext_base_url, settings.erpnext_api_key, settings.erpnext_api_secret)
 
 def emit_live_trace(case_id: str, kind: str, message: str, data=None) -> None:
     """Persist read-only Agent trace events without committing business state.
@@ -35,12 +47,15 @@ def emit_live_trace(case_id: str, kind: str, message: str, data=None) -> None:
 def ensure_schema():
     """Worker may start before the API container; migrations must not rely on order."""
     with engine.begin() as db:
-        db.execute(text("SELECT pg_advisory_lock(hashtext('resolveops_schema_bootstrap'))"))
+        if db.dialect.name == 'postgresql':
+            db.execute(text("SELECT pg_advisory_lock(hashtext('resolveops_schema_bootstrap'))"))
         try:
             Base.metadata.create_all(db)
-            apply_migrations(db)
+            if db.dialect.name == 'postgresql':
+                apply_migrations(db)
         finally:
-            db.execute(text("SELECT pg_advisory_unlock(hashtext('resolveops_schema_bootstrap'))"))
+            if db.dialect.name == 'postgresql':
+                db.execute(text("SELECT pg_advisory_unlock(hashtext('resolveops_schema_bootstrap'))"))
 def digest(action, version): return hashlib.sha256(json.dumps({'action':action,'version':version},sort_keys=True).encode()).hexdigest()
 def claim(db):
     return db.scalars(select(Task).where(Task.status=='queued').with_for_update(skip_locked=True).limit(1)).first()
@@ -57,7 +72,7 @@ def recover_expired_leases(db):
     stale=db.scalars(select(Task).where(Task.status=='running', Task.started_at < cutoff).with_for_update(skip_locked=True)).all()
     for task in stale:
         case=db.get(Case,task.case_id)
-        if task.kind=='investigate':
+        if task.kind == 'investigate':
             task.status='queued'; task.started_at=None; task.last_error='worker lease expired; safe read-only task requeued'
             emit(db,case.id,'task_requeued','Investigation Worker stopped; read-only task was safely requeued.',{'task_id':task.id})
         else:
@@ -65,6 +80,7 @@ def recover_expired_leases(db):
             case.status='manual_review'
             emit(db,case.id,'manual_review_required','Worker stopped during a possible ERP write. No automatic retry is allowed; verify ERPNext by idempotency key first.',{'task_id':task.id})
     if stale: db.commit()
+
 def investigate(db, c, task_context=None):
     if settings.llm_base_url and settings.llm_api_key and settings.llm_model:
         return investigate_with_agent(db, c, task_context or {})
@@ -288,6 +304,7 @@ def execute(db,c,approval_id):
                 emit(db,c.id,'lessons_recorded','Verified Case Lessons were recorded as planning hints for future Cases.',{'lesson_ids':[lesson.id for lesson in lessons]})
     else: c.status='manual_review'; emit(db,c.id,'verification_failed','Write result cannot be verified; automation stopped.',event_data)
 def once():
+    refresh_worker_connections()
     with Session(engine) as db:
         recover_expired_leases(db)
         task=claim(db)
@@ -298,8 +315,18 @@ def once():
         })
         db.commit()
         try:
-            c=db.get(Case,task.case_id); investigate(db,c,task.payload) if task.kind=='investigate' else execute(db,c,task.payload['approval_id']); task.status='done'; db.commit()
-        except Exception as e: task.status='failed'; task.last_error=type(e).__name__; c=db.get(Case,task.case_id); c.status='manual_review'; emit(db,c.id,'worker_failure','Execution stopped for human review.',{'error':type(e).__name__}); db.commit()
+            c=db.get(Case,task.case_id)
+            if task.kind == 'investigate':
+                investigate(db, c, task.payload)
+            elif task.kind == 'execute':
+                execute(db, c, task.payload['approval_id'])
+            else:
+                raise RuntimeError(f'unknown task kind: {task.kind}')
+            task.status='done'; db.commit()
+        except Exception as e:
+            task.status='failed'; task.last_error=type(e).__name__; c=db.get(Case,task.case_id)
+            c.status='manual_review'; emit(db,c.id,'worker_failure','Execution stopped for human review.',{'error':type(e).__name__})
+            db.commit()
     return True
 if __name__=='__main__':
     ensure_schema()

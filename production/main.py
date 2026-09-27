@@ -11,10 +11,12 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import func, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from .config import settings
+from .config import connection_value, save_runtime_connections, secret_configured, settings
+from .database import create_database_engine, is_sqlite_url
 from .approval_state import approval_is_expired, utc_now
 from .migrations import apply_migrations
 from .models import AuditLog, Base, Approval, Case, Event, Invocation, LogisticsLane, Operator, Task
@@ -60,6 +62,22 @@ class OperatorChatIn(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
     history: list[dict[str, str]] = Field(default_factory=list)
 
+
+class ConnectionSettingsIn(BaseModel):
+    """Partial local connection profile. Empty inputs never erase a secret."""
+    llm_base_url: str | None = Field(default=None, max_length=500)
+    llm_api_key: str | None = Field(default=None, max_length=1000)
+    llm_model: str | None = Field(default=None, max_length=200)
+    llm_timeout_seconds: float | None = Field(default=None, ge=1, le=300)
+    erpnext_base_url: str | None = Field(default=None, max_length=500)
+    erpnext_api_key: str | None = Field(default=None, max_length=1000)
+    erpnext_api_secret: str | None = Field(default=None, max_length=1000)
+    database_url: str | None = Field(default=None, max_length=1000)
+
+
+class ConnectionTestIn(ConnectionSettingsIn):
+    target: Literal['llm', 'erpnext', 'database']
+
 class FaultInjectionRunIn(BaseModel):
     fault_type: Literal['inventory_changed_before_execution']
     case_id: str | None = Field(default=None, max_length=120)
@@ -93,18 +111,24 @@ class OperatorIdentity:
     role: str
     tenant_id: str = 'demo'
 
-engine=create_engine(settings.database_url, pool_pre_ping=True)
+engine=create_database_engine(settings.database_url)
 STATIC_DIR=Path(__file__).resolve().parent.parent/'static'
 
 def bootstrap_schema():
     with engine.begin() as db:
-        db.execute(text("SELECT pg_advisory_lock(hashtext('resolveops_schema_bootstrap'))"))
+        if db.dialect.name == 'postgresql':
+            db.execute(text("SELECT pg_advisory_lock(hashtext('resolveops_schema_bootstrap'))"))
         try:
             Base.metadata.create_all(db)
-            apply_migrations(db)
+            # SQLite desktop databases are always new local stores created
+            # from the current models. PostgreSQL keeps the versioned SQL
+            # migration chain needed by long-lived deployment databases.
+            if db.dialect.name == 'postgresql':
+                apply_migrations(db)
             seed_default_operator(db)
         finally:
-            db.execute(text("SELECT pg_advisory_unlock(hashtext('resolveops_schema_bootstrap'))"))
+            if db.dialect.name == 'postgresql':
+                db.execute(text("SELECT pg_advisory_unlock(hashtext('resolveops_schema_bootstrap'))"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -696,12 +720,141 @@ def readiness():
     if status['status']!='ready':
         raise HTTPException(503,{'status':status['status'],'checks':status['checks']})
     return {'status':'ready'}
+
+
+@app.get('/v1/operator/me')
+def current_operator(x_operator_key: str | None = Header(default=None)):
+    """Return the server-validated local operator identity for the Workbench."""
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        return {
+            'subject': identity.subject,
+            'role': identity.role,
+            'tenant_id': identity.tenant_id,
+        }
+
+
 @app.get('/v1/runtime/status')
 def runtime_status(x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
     with Session(engine) as db:
         identity=operator_identity_from_db(db,x_operator_key)
         require_role(identity,'ops_admin','config_admin')
         return build_runtime_status(db)
+
+
+def _database_connection_summary(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {'configured': False, 'dialect': None, 'host': None, 'database': None}
+    try:
+        url = make_url(value)
+        return {
+            'configured': True,
+            'dialect': url.get_backend_name(),
+            'host': url.host,
+            'database': url.database,
+        }
+    except Exception:
+        return {'configured': True, 'dialect': 'unknown', 'host': None, 'database': None}
+
+
+def _connection_settings_out() -> dict[str, Any]:
+    """Configuration shape for the Workbench.  Secret values never leave API."""
+    return {
+        'llm': {
+            'base_url': connection_value('llm_base_url') or '',
+            'model': connection_value('llm_model') or '',
+            'timeout_seconds': connection_value('llm_timeout_seconds'),
+            'api_key_configured': secret_configured('llm_api_key'),
+        },
+        'erpnext': {
+            'base_url': connection_value('erpnext_base_url') or '',
+            'api_key_configured': secret_configured('erpnext_api_key'),
+            'api_secret_configured': secret_configured('erpnext_api_secret'),
+        },
+        'database': {
+            **_database_connection_summary(connection_value('database_url')),
+            'restart_required_for_changes': True,
+        },
+    }
+
+
+@app.get('/v1/settings/connections')
+def connection_settings(x_operator_key: str | None = Header(default=None)):
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        require_role(identity, 'ops_admin', 'config_admin')
+        return {'connections': _connection_settings_out(), 'status': build_runtime_status(db)}
+
+
+@app.put('/v1/settings/connections')
+def update_connection_settings(payload: ConnectionSettingsIn, x_operator_key: str | None = Header(default=None)):
+    updates = payload.model_dump(exclude_none=True)
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        require_role(identity, 'ops_admin', 'config_admin')
+        updated, restart_required = save_runtime_connections(updates)
+        audit(db, identity, 'connection_settings_updated', 'runtime_configuration', 'local', {
+            'updated_fields': sorted(updated),
+            'restart_required': restart_required,
+        })
+        db.commit()
+        return {
+            'updated_fields': sorted(updated),
+            'restart_required': restart_required,
+            'message': '数据库连接已保存，需重启 API 与 Worker 后生效。' if restart_required else 'LLM 与 ERP 连接配置已保存。Worker 会在下一项任务前刷新连接。',
+            'connections': _connection_settings_out(),
+        }
+
+
+@app.post('/v1/settings/connections/test')
+def test_connection_settings(payload: ConnectionTestIn, x_operator_key: str | None = Header(default=None)):
+    values = payload.model_dump(exclude_none=True)
+    target = values.pop('target')
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        require_role(identity, 'ops_admin', 'config_admin')
+    # Draft fields are used only for this read-only connectivity check.  They
+    # are never persisted by the test endpoint.
+    def current(name: str) -> Any:
+        value = values.get(name)
+        return value if value is not None and (not isinstance(value, str) or value.strip()) else connection_value(name)
+    try:
+        if target == 'llm':
+            base_url, api_key = current('llm_base_url'), current('llm_api_key')
+            if not base_url or not api_key:
+                raise ValueError('请先填写 LLM 服务地址和 API Key。')
+            response = httpx.get(str(base_url).rstrip('/') + '/models', headers={'Authorization': f'Bearer {api_key}'}, timeout=10)
+            response.raise_for_status()
+            return {'ok': True, 'target': target, 'message': 'LLM 服务连通，认证请求已通过。'}
+        if target == 'erpnext':
+            base_url, api_key, api_secret = current('erpnext_base_url'), current('erpnext_api_key'), current('erpnext_api_secret')
+            if not base_url or not api_key or not api_secret:
+                raise ValueError('请先填写 ERPNext 地址、API Key 与 API Secret。')
+            response = httpx.get(
+                str(base_url).rstrip('/') + '/api/method/frappe.auth.get_logged_user',
+                headers={'Authorization': f'token {api_key}:{api_secret}'}, timeout=10,
+            )
+            response.raise_for_status()
+            return {'ok': True, 'target': target, 'message': 'ERPNext 服务连通，集成账号认证已通过。'}
+        database_url = current('database_url')
+        if not database_url:
+            raise ValueError('请先填写数据库连接地址。')
+        test_engine = create_database_engine(str(database_url))
+        try:
+            with test_engine.connect() as connection:
+                connection.execute(text('SELECT 1'))
+        finally:
+            test_engine.dispose()
+        return {'ok': True, 'target': target, 'message': '数据库连通，SELECT 1 校验通过。'}
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(502, f'{target} 认证或服务响应失败：HTTP {exc.response.status_code}') from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(502, f'{target} 无法连接。请检查地址、网络和证书。') from exc
+    except Exception as exc:
+        raise HTTPException(502, f'{target} 连通性检查失败：{type(exc).__name__}') from exc
+
 
 def sandbox_check_payload(db: Session, seed: SandboxSeedIn | None = None) -> dict:
     payload = seed or SandboxSeedIn()
@@ -854,6 +1007,8 @@ def sandbox_seed(payload: SandboxSeedIn, x_operator_key:str|None=Header(default=
 def console():
     if not STATIC_DIR.exists(): raise HTTPException(404,'console static files not found')
     return FileResponse(STATIC_DIR/'index.html')
+
+
 @app.post('/v1/webhooks/erpnext')
 async def erp_webhook(request: Request, x_resolveops_signature: str=Header(...)):
     body=await request.body(); expected='sha256='+hmac.new(settings.webhook_secret.encode(),body,hashlib.sha256).hexdigest()

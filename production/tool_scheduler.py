@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
-from .tool_result import ToolResult
+from .tool_result import ToolResult, annotate_tool_result
 
 
 @dataclass(frozen=True)
@@ -78,7 +78,10 @@ class ReadToolScheduler:
                     try:
                         result = future.result()
                     except Exception as exc:
-                        result = ToolResult.failure('tool_scheduler_failed', error_type=type(exc).__name__, retryable=True)
+                        result = annotate_tool_result(
+                            ToolResult.failure('tool_scheduler_failed', error_type=type(exc).__name__, retryable=True),
+                            pipeline_stage='tool_execution',
+                        )
                     executions[signature] = result
                     seen[signature] = result
                     sources[signature] = 'executed'
@@ -108,18 +111,11 @@ class ReadToolScheduler:
         except Exception:
             raise
         latency_ms=int((monotonic()-started)*1000)
-        metadata=dict(tool_result.metadata or {})
-        metadata['latency_ms']=latency_ms
-        return ToolResult(
-            status=tool_result.status,
-            data=tool_result.data,
-            error_code=tool_result.error_code,
-            error_type=tool_result.error_type,
-            retryable=tool_result.retryable,
-            side_effect_committed=tool_result.side_effect_committed,
-            verification_required=tool_result.verification_required,
-            source_system=tool_result.source_system,
-            source_version=tool_result.source_version,
-            evidence_usable=tool_result.evidence_usable,
-            metadata=metadata,
+        # This is the Tool runtime's post-execution boundary: preserve the
+        # adapter's facts/error while adding only execution telemetry.
+        return annotate_tool_result(
+            tool_result,
+            pipeline_stage=(tool_result.metadata or {}).get('pipeline_stage') or 'result_normalization',
+            latency_ms=latency_ms,
+            result_normalized=True,
         )

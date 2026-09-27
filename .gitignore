@@ -9,6 +9,7 @@
 *.sqlite3
 data/
 logs/
+.resolveops-runtime/
 
 # Python cache and test artifacts
 __pycache__/
@@ -33,4 +34,16 @@ Thumbs.db
 # Docker / local generated files
 *.pid
 *.log
-
+desktop/bin/
+desktop/obj/
+desktop/publish/
+desktop/publish-fix/
+desktop/release/
+desktop/electron/node_modules/
+desktop/electron/dist/
+desktop/runtime/.build/
+desktop/runtime/win/
+desktop/runtime/.venv/
+.dotnet-home/
+.nuget-packages/
+.nuget-http-cache/

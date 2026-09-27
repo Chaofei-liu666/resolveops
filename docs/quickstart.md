@@ -1,365 +1,72 @@
-# Quickstart
+# 从源码启动
 
-This guide explains how to run ResolveOps after cloning the repository.
+本文目标：启动工作台，确认 API 和 Worker 都可用，然后创建一个 Case。
 
-There are two paths:
+## 1. 准备环境
 
-```text
-Path A: run ResolveOps only
-Path B: run ResolveOps with an ERPNext sandbox
-```
-
-Path A is enough to inspect the API, use the CLI, and run tests. Path B is required for a real end-to-end business Case because ResolveOps reads and writes business documents through ERPNext.
-
-## Prerequisites
-
-Required:
-
-- Docker Desktop or Docker Engine;
-- Python 3.12+ if running the CLI/tests outside containers;
-- Git.
-
-Required for full sandbox runs:
-
-- an existing ERPNext sandbox;
-- ERPNext API key and secret;
-- test Customer, Item, Warehouse, Sales Order and stock data;
-- an LLM API compatible with the OpenAI chat-completions format.
-
-ResolveOps does not bundle ERPNext in its own Docker Compose file. ERPNext remains a separate sandbox system.
-
-## Path A: run ResolveOps only
-
-Clone and enter the repository:
-
-```bash
-git clone https://github.com/Chaofei-liu666/resolveops.git
-cd resolveops
-```
-
-Copy environment template:
-
-```bash
-cp .env.example .env
-```
-
-PowerShell:
+需要 Python 3.12+ 和 Git。复制配置并安装依赖：
 
 ```powershell
 Copy-Item .env.example .env
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements-dev.txt
 ```
 
-For local inspection, keep:
+`.env` 默认将数据写入 `data/resolveops.db`。文件由 `.gitignore` 排除。
 
-```text
-APP_ENV=local
-POSTGRES_PASSWORD=resolveops
-DATABASE_URL=postgresql+psycopg://resolveops:resolveops@postgres:5432/resolveops
-WEBHOOK_SECRET=local-webhook-secret
-OPERATOR_API_KEY=local-ops-key
-```
-
-If you change `POSTGRES_PASSWORD`, update the password in `DATABASE_URL` as well.
-
-Start services:
-
-```bash
-docker compose up -d --build
-```
-
-Health check:
-
-```bash
-curl http://localhost:8090/healthz
-```
-
-PowerShell:
+## 2. 启动
 
 ```powershell
-Invoke-RestMethod http://localhost:8090/healthz
+python scripts/dev.py
 ```
 
-Open:
-
-```text
-Swagger: http://localhost:8090/docs
-Agent Workbench: python resolveops.py console
-```
-
-Initialize local CLI config:
-
-```bash
-python resolveops.py init
-python resolveops.py config set api_url http://localhost:8090
-python resolveops.py config set operator_key local-ops-key
-python resolveops.py config show
-```
-
-PowerShell:
+运行时输出工作台和 API 地址。打开 <http://127.0.0.1:8090/>，并执行：
 
 ```powershell
-python resolveops.py init
-python resolveops.py config set api_url http://localhost:8090
-python resolveops.py config set operator_key local-ops-key
-python resolveops.py config show
+Invoke-RestMethod http://127.0.0.1:8090/healthz
 ```
 
-`config show` masks the operator key. You can still override values per command with `--base-url` and `--operator-key`, or with `RESOLVEOPS_API_URL` / `RESOLVEOPS_OPERATOR_KEY`.
+预期响应：
 
-On Windows, you can also double-click `resolveops.cmd` in the project directory. It initializes the local CLI config if needed, installs the Textual Workbench dependency on first use, starts the local services, and then opens the ResolveOps Agent Workbench. If authentication fails, edit:
+```json
+{"status":"ok"}
+```
+
+`scripts/dev.py` 同时启动 API 和 Worker；按 `Ctrl+C` 后两者退出。
+
+## 3. 连接 ERPNext 与 LLM
+
+完整案例需要 ERPNext 沙箱。填写工作台“系统配置”，或更新 `.env`：
 
 ```text
-C:\Users\<you>\.resolveops\config.json
-```
-
-Use the CLI:
-
-```bash
-python resolveops.py status
-python resolveops.py doctor
-python -m pip install -r requirements-cli.txt
-python resolveops.py console
-python resolveops.py eval summary --limit 20
-```
-
-`console` is the only interactive interface. Its left pane lists Cases; its right pane keeps the current General or Case conversation, Agent trace, and approval controls together. General chat has no ERP tools. Select a Case or use `/focus <case-id>` before asking Case-specific questions; `/back` returns to General without closing the Workbench. General and Case answer text streams over SSE; background Case investigation renders durable lifecycle/business events instead of persisting model token deltas.
-
-Run tests:
-
-```bash
-python -m pytest -q
-docker compose --profile test run --rm test
-```
-
-## Path B: run with ERPNext sandbox
-
-Prepare or reuse an ERPNext sandbox.
-
-Configure `.env`:
-
-```text
-APP_ENV=local
-ERPNEXT_BASE_URL=http://<erpnext-host>:8000
+ERPNEXT_BASE_URL=http://127.0.0.1:8080
 ERPNEXT_API_KEY=<api-key>
 ERPNEXT_API_SECRET=<api-secret>
-OPERATOR_API_KEY=<ops-admin-key>
-WEBHOOK_SECRET=<webhook-secret>
-LLM_BASE_URL=<chat-completions-compatible-base-url>
-LLM_API_KEY=<llm-api-key>
-LLM_MODEL=<model>
+LLM_BASE_URL=<provider-base-url>
+LLM_API_KEY=<api-key>
+LLM_MODEL=<model-name>
 ```
 
-The ERPNext integration user should be able to read:
+保存后，LLM 与 ERPNext 卡片会显示连接状态。ERPNext 集成账号至少需要读取订单、库存、仓库、采购和客户资料的权限。
 
-- Sales Order;
-- Customer;
-- Item;
-- Item Price;
-- Warehouse/Bin;
-- Purchase Order.
+## 4. 创建 Case
 
-For sandbox write tests, it also needs permission to create the draft/test documents used by ResolveOps, such as Stock Entry, Material Request, Price Review records or Supplier Follow-up records depending on the scenario.
-
-If ERPNext runs on the host machine, use:
-
-```text
-ERPNEXT_BASE_URL=http://host.docker.internal:8000
-```
-
-If ERPNext runs in another Docker Compose network, attach ResolveOps to that external network with the optional override file:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.erpnext.yml up -d --build
-```
-
-The default external network name is `frappe_docker_frappe_network`. Override it when needed:
-
-```bash
-ERPNEXT_DOCKER_NETWORK=<your-network> docker compose -f docker-compose.yml -f docker-compose.erpnext.yml up -d --build
-```
-
-PowerShell:
+在“Case 工作台”新建 `inventory_shortage`，输入 ERPNext 中存在的订单号。也可使用 CLI：
 
 ```powershell
-$env:ERPNEXT_DOCKER_NETWORK="<your-network>"
-docker compose -f docker-compose.yml -f docker-compose.erpnext.yml up -d --build
+python resolveops.py init
+python resolveops.py config set api_url http://127.0.0.1:8090
+python resolveops.py config set operator_key local-ops-key
+python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-00002 --reason "local demo"
 ```
 
-The base `docker-compose.yml` does not require ERPNext's Docker network. This keeps the project startable on a clean machine before ERPNext is connected.
+预期状态依次为 `queued`、`running`，随后进入 `waiting_approval`、`resolved` 或 `manual_review`。在“执行轨迹”查看每一个事件。
 
-Restart:
-
-```bash
-docker compose up -d --build
-```
-
-Check readiness:
-
-```bash
-curl http://localhost:8090/readyz
-```
-
-Run a full local diagnostic:
-
-```bash
-python resolveops.py doctor
-```
-
-`doctor` checks the CLI config, ResolveOps API, runtime status and the ERPNext sandbox resources used by the demo Case.
-
-Check the ERPNext sandbox data without writing anything:
-
-```bash
-python resolveops.py sandbox check
-```
-
-Restore the sandbox route and demo stock through ResolveOps APIs:
-
-```bash
-python resolveops.py sandbox seed
-```
-
-This command updates ResolveOps logistics-lane config and, when `ENABLE_FAULT_INJECTION=true`, resets the source warehouse stock to `40` and target warehouse stock to `0` in ERPNext through Stock Reconciliation. Run it before each repeated inventory-shortage demo. It still goes through:
-
-```text
-CLI -> ResolveOps API -> ERPNextAdapter -> ERPNext REST API
-```
-
-It does not call ERPNext directly from the CLI and is forbidden when `APP_ENV=production`.
-
-Open the ResolveOps Agent Workbench:
-
-```bash
-python resolveops.py console
-```
-
-Inside the Workbench:
-
-```text
-/new                     create a new Case
-/focus <case-id>         select one Case explicitly
-/back                    return to General chat
-/refresh                 refresh Cases and active Case events
-/events                  expand/collapse detailed event data
-/eval                    show evaluation summary
-/role <role>             switch a seeded local demo identity
-/reset-demo              reset source/target stock for the next demo run
-/approve [approval-id]   approve after a confirmation dialog
-/reject [approval-id]    reject with a reason and queue a fresh Agent investigation
-/revoke [approval-id]    cancel after a confirmation dialog
-/quit                    leave the Workbench
-```
-
-For scripts and diagnostics, the non-interactive CLI remains available:
-
-```bash
-python resolveops.py case create --type inventory_shortage --order SAL-ORD-2026-00002 --reason "sandbox run"
-python resolveops.py case list
-python resolveops.py case show <case-id>
-python resolveops.py case ask <case-id> "Why not create a purchase request?"
-```
-
-Ask a Case-scoped read-only Agent question:
-
-```bash
-python resolveops.py case ask <case-id> "Why not create a purchase request?"
-```
-
-The Agent may call read tools to answer, but this command never creates approvals or executes writes.
-
-Approve pending actions:
-
-```bash
-python resolveops.py approval approve <approval-id>
-```
-
-Then inspect the Case and the corresponding ERPNext business document.
-
-Evaluate recent Agent runs:
-
-```bash
-python resolveops.py eval summary --limit 20
-python resolveops.py eval summary --limit 20 --cases
-python resolveops.py eval case <case-id>
-python resolveops.py eval case <case-id> --events
-```
-
-## Fault injection from CLI
-
-Fault injection is optional and should only be used in local/test/staging.
-
-In `.env`:
-
-```text
-ENABLE_FAULT_INJECTION=true
-ERPNEXT_COMPANY=<company-name>
-ERPNEXT_STOCK_DIFFERENCE_ACCOUNT=<difference-account>
-ERPNEXT_DEFAULT_VALUATION_RATE=100
-```
-
-Restart:
-
-```bash
-docker compose up -d --build
-```
-
-List available faults:
-
-```bash
-python resolveops.py fi list
-```
-
-Change ERPNext sandbox stock through ResolveOps:
-
-```bash
-python resolveops.py fi run inventory_changed_before_execution \
-  --case <case-id> \
-  --item SKU-A12 \
-  --warehouse "重庆仓 - ROPS" \
-  --new-qty 0 \
-  --reason "simulate stock consumed before approval execution"
-```
-
-This does not open the ERPNext UI. The chain is:
-
-```text
-CLI -> ResolveOps API -> ERPNextAdapter -> ERPNext REST API -> Stock Reconciliation
-```
-
-The CLI must not call ERPNext directly with raw ERP credentials. Otherwise it bypasses ResolveOps audit, role checks and production safety gates.
-
-## Common problems
-
-### `/readyz` is degraded
-
-Use:
-
-```bash
-python resolveops.py status --json
-```
-
-Check ERPNext credentials, LLM credentials, operator key, migrations, and queued/failed tasks.
-
-### CLI returns 401
-
-Set:
-
-```bash
-export RESOLVEOPS_OPERATOR_KEY=<OPERATOR_API_KEY from .env>
-```
-
-PowerShell:
+## 5. 验证修改
 
 ```powershell
-$env:RESOLVEOPS_OPERATOR_KEY="<OPERATOR_API_KEY from .env>"
+.\scripts\test.ps1
 ```
 
-### Fault injection returns 403
-
-Check:
-
-```text
-APP_ENV must not be production
-ENABLE_FAULT_INJECTION must be true
-operator role must be ops_admin or config_admin
-```
+测试使用独立 SQLite 数据库。修改 Agent 或工具后，重启 `python scripts/dev.py` 再创建一个新 Case 验证行为。

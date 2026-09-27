@@ -1,3 +1,4 @@
 $ErrorActionPreference = "Stop"
 
-docker compose --profile test run --rm test
+$env:DATABASE_URL = "sqlite:///./data/resolveops-test.db"
+python -m pytest -q

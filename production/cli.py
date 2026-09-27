@@ -558,9 +558,9 @@ def cmd_doctor(args: argparse.Namespace, client: ApiClient) -> int:
 
     print()
     if not ok_health:
-        print(paint('[Next]', 'blue') + ' Start local services: resolveops.cmd or docker compose up -d --build')
+        print(paint('[Next]', 'blue') + ' Start local services: python scripts/dev.py')
     elif not ok_runtime:
-        print(paint('[Next]', 'blue') + ' Check .env and container logs: docker compose logs api worker')
+        print(paint('[Next]', 'blue') + ' Check .env and the API / Worker output from scripts/dev.py')
     elif not ok_sandbox or sandbox_status != 'ready':
         print(paint('[Next]', 'blue') + ' Prepare sandbox data: python resolveops.py sandbox seed')
     else:

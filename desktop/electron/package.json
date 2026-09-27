@@ -1,0 +1,54 @@
+{
+  "name": "resolveops-desktop",
+  "version": "0.1.0",
+  "description": "ResolveOps Agent desktop application",
+  "main": "main.cjs",
+  "author": "ResolveOps",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "runtime:win": "node ../runtime/build-runtime.cjs",
+    "dist:win": "npm run runtime:win && electron-builder --win nsis --x64"
+  },
+  "devDependencies": {
+    "electron": "^44.4.5",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.resolveops.desktop",
+    "productName": "ResolveOps Desktop",
+    "asar": true,
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../runtime/.env.example",
+        "to": "runtime/.env.example"
+      },
+      {
+        "from": "../runtime/win",
+        "to": "runtime/win"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}

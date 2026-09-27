@@ -37,6 +37,7 @@ EVENT_STYLE: dict[str, tuple[str, str]] = {
     'worker_task_started': ('WORKER', 'blue'),
     'agent_start': ('AGENT', 'magenta'), 'turn_start': ('TURN', 'dim'),
     'tool_call': ('TOOL', 'cyan'), 'tool_result': ('OBSERVATION', 'cyan'),
+    'tool_validation_failed': ('GUARDRAILS', 'yellow'), 'tool_guardrail_blocked': ('GUARDRAILS', 'yellow'), 'tool_argument_parse_failed': ('GUARDRAILS', 'yellow'),
     'turn_end': ('TURN', 'dim'), 'agent_end': ('STOP', 'yellow'),
     'tool_scheduled': ('TOOL', 'cyan'), 'tool_observation': ('OBSERVATION', 'cyan'),
     'case_question_tool_called': ('TOOL', 'cyan'), 'case_question_tool_observation': ('OBSERVATION', 'cyan'),
@@ -73,6 +74,7 @@ EVENT_TEXT = {
     'context_built': '已构建当前 Case Context',
     'agent_start': 'Agent 开始调查', 'turn_start': '开始一轮 Tool 决策', 'tool_call': '调用只读 Tool',
     'tool_result': '已获得 Tool Observation', 'turn_end': '本轮 Agent 调查结束', 'agent_end': 'Agent 调查结束',
+    'tool_validation_failed': 'Tool Schema Validation 未通过', 'tool_guardrail_blocked': 'Tool Guardrails 已阻断调用', 'tool_argument_parse_failed': 'Tool 参数解析失败',
     'tool_scheduled': '调用只读 Tool', 'tool_observation': '获得 Tool Observation',
     'case_question_tool_called': '调用只读 Tool', 'case_question_tool_observation': '获得 Tool Observation',
     'agent_decision_trace': '已生成可审计决策摘要',
@@ -431,6 +433,7 @@ def build_turn_batches(case: dict[str, Any]) -> list[dict[str, Any]]:
                 'call': call.get('event') or {},
                 'observation': event,
                 'result': data.get('result') if isinstance(data.get('result'), dict) else {},
+                'tool_result': data.get('tool_result') if isinstance(data.get('tool_result'), dict) else {},
             })
     for tool, queued in pending.items():
         for call in queued:
@@ -446,6 +449,7 @@ def build_turn_batches(case: dict[str, Any]) -> list[dict[str, Any]]:
                 'call': call.get('event') or {},
                 'observation': {},
                 'result': {},
+                'tool_result': {},
             })
     all_turns = sorted(declared_turns | set(batches))
     return [
@@ -1027,6 +1031,8 @@ class ResolveOpsWorkbench(App[None]):
     def _tool_card(self, item: dict[str, Any], evidence_id: str | None) -> Static:
         tool = str(item.get('tool') or 'unknown_tool')
         result = item.get('result') if isinstance(item.get('result'), dict) else {}
+        tool_result = item.get('tool_result') if isinstance(item.get('tool_result'), dict) else {}
+        metadata = tool_result.get('metadata') if isinstance(tool_result.get('metadata'), dict) else {}
         observation_index = item.get('observation_index')
         status = 'failed' if result.get('error') else 'success' if observation_index else 'pending'
         observation = f'Observation {int(observation_index):02d}' if observation_index else 'Observation pending'
@@ -1037,6 +1043,14 @@ class ResolveOpsWorkbench(App[None]):
             TOOL_GOALS.get(tool, '获取当前决策所需业务事实'),
             observation_facts(tool, result) if observation_index else '尚未返回 Observation',
         ]
+        stage = str(metadata.get('pipeline_stage') or '')
+        if stage == 'schema_validation':
+            lines.append('Tool Guardrails · Schema Validation BLOCKED')
+        elif stage in {'tool_guardrails', 'tool_surface'}:
+            reason = metadata.get('guardrail_reason') or tool_result.get('error_code') or 'not_allowed'
+            lines.append(f'Tool Guardrails · BLOCKED · {reason}')
+        elif stage == 'argument_parse':
+            lines.append('Tool Guardrails · Argument Parse BLOCKED')
         classes = 'tool-card tool-card-failed' if status == 'failed' else 'tool-card'
         return Static('\n'.join(lines), classes=classes)
 

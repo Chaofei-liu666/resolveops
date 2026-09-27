@@ -7,17 +7,18 @@ system adapter such as ERPNextAdapter.
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
-from sqlalchemy import create_engine, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from .config import settings
+from .database import create_database_engine
 from .erpnext import ERPNextAdapter
 from .models import LogisticsLane
 from .policy import allow_read_tool
-from .tool_result import ToolResult
+from .tool_result import ToolResult, annotate_tool_result
 from .agent_core.contracts import ToolSchema
 from .case_profiles import case_profile
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+engine = create_database_engine(settings.database_url)
 
 ToolExecutor = Callable[[dict[str, Any], str], dict[str, Any]]
 
@@ -276,22 +277,31 @@ class BusinessReadTools:
     def execute_result(self, name: str, arguments: dict[str, Any], order_id: str) -> ToolResult:
         try:
             if name not in self.enabled_tool_names:
-                return ToolResult.failure('tool_not_enabled_for_case_type', source_system=self.metadata(name).get('source_system'))
+                return annotate_tool_result(
+                    ToolResult.failure('tool_not_enabled_for_case_type', source_system=self.metadata(name).get('source_system')),
+                    pipeline_stage='tool_surface',
+                )
             validation_failure = self.registry.validate_arguments(name, arguments)
             if validation_failure:
-                return validation_failure
+                return annotate_tool_result(validation_failure, pipeline_stage='schema_validation')
             order = self.adapter.sales_order(order_id) if name == 'get_inventory' else None
             allowed, reason = allow_read_tool(name, arguments, order)
             if not allowed:
-                return ToolResult.failure(reason, source_system=self.metadata(name).get('source_system'))
+                return annotate_tool_result(
+                    ToolResult.failure(reason, source_system=self.metadata(name).get('source_system')),
+                    pipeline_stage='tool_guardrails', guardrail_reason=reason,
+                )
             return self.registry.execute_result(name, arguments, order_id)
         except Exception as exc:
-            return ToolResult.failure(
-                'tool_execution_failed',
-                error_type=type(exc).__name__,
-                retryable=True,
-                source_system=self.metadata(name).get('source_system'),
-                side_effect_committed=False,
+            return annotate_tool_result(
+                ToolResult.failure(
+                    'tool_execution_failed',
+                    error_type=type(exc).__name__,
+                    retryable=True,
+                    source_system=self.metadata(name).get('source_system'),
+                    side_effect_committed=False,
+                ),
+                pipeline_stage='tool_execution',
             )
 
     def _specs(self) -> list[ToolSpec]:

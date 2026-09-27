@@ -6,7 +6,7 @@ auditing, and error handling can reason about tool outcomes consistently.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 ToolStatus = Literal['success', 'failed', 'partial', 'unknown']
@@ -92,3 +92,16 @@ class ToolResult:
             'retryable': self.retryable,
             'side_effect_committed': self.side_effect_committed,
         }
+
+
+def annotate_tool_result(result: ToolResult, *, pipeline_stage: str, **metadata_updates: Any) -> ToolResult:
+    """Add deterministic Tool-runtime audit metadata without changing facts.
+
+    The returned envelope remains the single result contract seen by the LLM,
+    scheduler and trace store.  ``pipeline_stage`` identifies where a Tool
+    call was blocked or finalized; it never changes business data.
+    """
+    metadata = dict(result.metadata or {})
+    metadata['pipeline_stage'] = pipeline_stage
+    metadata.update({key: value for key, value in metadata_updates.items() if value is not None})
+    return replace(result, metadata=metadata)

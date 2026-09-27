@@ -61,6 +61,23 @@ def test_read_tool_cannot_escape_warehouse_scope():
     assert reason == 'warehouse_out_of_scope'
 
 
+def test_read_tool_guardrails_record_schema_and_scope_block_stages():
+    class FakeAdapter:
+        def sales_order(self, _order_id):
+            return {'items': [{'warehouse': 'Stores - ROPS'}]}
+
+    tools = BusinessReadTools(FakeAdapter())
+    invalid = tools.execute_result('get_inventory', {'item_code': 'SKU-A12'}, 'SO-1')
+    blocked = tools.execute_result('get_inventory', {'item_code': 'SKU-A12', 'warehouse': '海外仓'}, 'SO-1')
+
+    assert invalid.error_code == 'invalid_tool_arguments'
+    assert invalid.metadata['pipeline_stage'] == 'schema_validation'
+    assert invalid.metadata['schema_errors'] == ['arguments.warehouse is required']
+    assert blocked.error_code == 'warehouse_out_of_scope'
+    assert blocked.metadata['pipeline_stage'] == 'tool_guardrails'
+    assert blocked.metadata['guardrail_reason'] == 'warehouse_out_of_scope'
+
+
 def test_high_amount_requires_two_roles():
     plan = {'action_type': 'transfer_stock'}
     evidence = {'observations': [{'tool': 'get_order', 'result': {'grand_total': 150000}}, {'tool': 'get_customer_profile', 'result': {}}]}
@@ -734,6 +751,8 @@ def test_read_tool_scheduler_deduplicates_batch_calls_and_reuses_cache():
     assert first[0].result.data == first[1].result.data
     assert second[0].source == 'cache'
     assert tool_signature('get_order', {}) in seen
+    assert first[0].result.metadata['result_normalized'] is True
+    assert isinstance(first[0].result.metadata['latency_ms'], int)
 
 
 def test_read_tool_scheduler_converts_runtime_exceptions_to_tool_result():

@@ -1,2 +1,2 @@
-# Local terminal Workbench only. The API and Worker Docker images do not import it.
+# Optional local terminal Workbench dependency. The desktop application does not import it.
 textual>=0.58
