@@ -1,62 +1,59 @@
-# Security Policy
+# 安全说明
 
-ResolveOps is a sandbox-ready Agent project, not a certified production ERP automation product.
+ResolveOps 面向本地开发、技术评审和 ERPNext 沙箱演示。连接真实生产 ERP 前，应完成权限、密钥与运维能力建设。
 
-## Supported usage
+## 适用范围
 
-Current supported usage:
+当前适用于：
 
-- local development;
-- technical project review;
-- ERPNext sandbox testing;
-- controlled staging experiments.
+- 本地开发；
+- 技术项目评审；
+- ERPNext 沙箱测试；
+- 受控的预发布环境演练。
 
-Do not grant this project unrestricted access to a real production ERP environment without additional enterprise controls.
+真实生产环境的写入权限应按角色和业务范围收敛，不应授予无限制访问。
 
-## Secrets
+## 密钥与数据
 
-Never commit:
+以下内容不得提交到仓库、粘贴到 Issue 或包含在截图中：
 
-- `.env`;
-- ERPNext API key or secret;
-- LLM API key;
-- operator key;
-- database dump;
-- private key;
-- production customer or order data.
+- `.env`；
+- ERPNext API Key、API Secret；
+- LLM API Key；
+- 操作人 API Key；
+- 数据库导出文件；
+- 私钥、证书；
+- 生产环境的客户数据、订单数据。
 
-Use `.env.example` as a template only.
+请以 `.env.example` 作为配置模板。
 
-## Fault injection
+## 故障注入
 
-Fault injection can intentionally change ERPNext sandbox data. It must remain disabled in production:
+故障注入会有意改变 ERPNext 沙箱数据，生产环境必须关闭：
 
 ```text
 ENABLE_FAULT_INJECTION=false
 ```
 
-The API also rejects fault injection when:
+当环境设置为生产时，API 也会拒绝故障注入请求：
 
 ```text
 APP_ENV=production
 ```
 
-## Reporting security issues
+## 报告安全问题
 
-If this repository is published publicly, please report security issues through a private GitHub security advisory if enabled, or by contacting the repository owner directly.
+若仓库已公开，请优先通过 GitHub 私密安全通报功能（如已启用）或直接联系仓库维护者报告问题。
 
-Do not open public issues containing secrets, customer data, exploit details, or live credentials.
+请勿在公开 Issue 中提交密钥、客户数据、可复现的攻击细节或仍有效的访问凭据。
 
-## Production hardening checklist
+## 接入生产前检查
 
-Before real production write access, add:
-
-- enterprise IAM / SSO;
-- secret manager;
-- audit log retention policy;
-- production monitoring and alerting;
-- backup and restore verification;
-- ERP permission scoping;
-- load and concurrency tests;
-- incident runbook;
-- manual rollback procedure.
+- 接入企业 IAM 或 SSO；
+- 使用密钥管理服务保存凭据；
+- 明确审计日志留存策略；
+- 配置监控与告警；
+- 验证备份与恢复；
+- 收敛 ERP 角色和接口权限；
+- 完成负载与并发测试；
+- 准备事件处理手册与人工回滚流程。
