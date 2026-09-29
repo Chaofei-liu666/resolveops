@@ -70,7 +70,7 @@ function activate(view) {
   state.activeView = view;
   document.querySelectorAll('[data-panel]').forEach((panel) => { const visible = panel.dataset.panel === view; panel.hidden = !visible; panel.classList.toggle('is-visible', visible); });
   document.querySelectorAll('[data-view]').forEach((button) => button.classList.toggle('is-active', button.dataset.view === view));
-  const names = { dashboard: ['运营总览', '订单异常工作台'], cases: ['CASE WORKSPACE', 'Case 工作台'], approvals: ['HUMAN-IN-THE-LOOP', '待审批'], traces: ['TRACE / EVENTS', '执行轨迹'], settings: ['LOCAL CONFIGURATION', '系统配置'] };
+  const names = { chat: ['RESOLVEOPS ASSISTANT', '主对话'], dashboard: ['运营总览', '订单异常工作台'], cases: ['CASE WORKSPACE', 'Case 工作台'], approvals: ['HUMAN-IN-THE-LOOP', '待审批'], traces: ['TRACE / EVENTS', '执行轨迹'], settings: ['LOCAL CONFIGURATION', '系统配置'] };
   $('#page-eyebrow').textContent = names[view][0]; $('#page-title').textContent = names[view][1];
   if (view === 'settings') loadSettings();
   if (view === 'traces') { renderTrace(); syncTracePolling(); }
@@ -194,18 +194,45 @@ function renderTrace() {
   $('#trace-detail').innerHTML = `<div class="trace-header"><div><strong>${esc(detail.order_id)}</strong><span class="status-pill ${statusTone(detail.status)}">${esc(statusLabel(detail.status))}</span>${live ? '<span class="status-pill ok">实时更新</span>' : ''}</div><span class="mono">${esc(detail.id)}</span></div><div class="timeline">${(detail.events || []).map((event) => `<article class="timeline-item"><span class="timeline-dot"></span><div><div class="card-row"><strong>${esc(traceStage(event))}</strong><time>${esc(dateText(event.created_at))}</time></div><p>${esc(event.message || '')}</p>${Object.keys(event.data || {}).length ? `<details><summary>技术详情</summary><pre>${esc(pretty(event.data))}</pre></details>` : ''}</div></article>`).join('') || empty('暂无生命周期事件', '历史 Case 可能没有记录新的运行轨迹。')}</div>`;
 }
 
+function inlineMarkdown(value) {
+  return esc(value)
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+}
+
+function renderMarkdown(value) {
+  const lines = String(value ?? '').replace(/\r/g, '').split('\n');
+  const html = []; let listType = null; let codeLines = null;
+  const closeList = () => { if (listType) { html.push(`</${listType}>`); listType = null; } };
+  const closeCode = () => { if (codeLines !== null) { html.push(`<pre><code>${esc(codeLines.join('\n'))}</code></pre>`); codeLines = null; } };
+  for (const line of lines) {
+    if (line.trim().startsWith('```')) { if (codeLines === null) { closeList(); codeLines = []; } else closeCode(); continue; }
+    if (codeLines !== null) { codeLines.push(line); continue; }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    const bullet = line.match(/^[-*]\s+(.+)$/);
+    const ordered = line.match(/^\d+\.\s+(.+)$/);
+    if (heading) { closeList(); html.push(`<h${heading[1].length}>${inlineMarkdown(heading[2])}</h${heading[1].length}>`); }
+    else if (bullet || ordered) { const nextType = bullet ? 'ul' : 'ol'; if (listType !== nextType) { closeList(); html.push(`<${nextType}>`); listType = nextType; } html.push(`<li>${inlineMarkdown((bullet || ordered)[1])}</li>`); }
+    else if (!line.trim()) closeList();
+    else { closeList(); html.push(`<p>${inlineMarkdown(line)}</p>`); }
+  }
+  closeList(); closeCode();
+  return html.join('') || '<p></p>';
+}
+
 function analyticsDetails(payload) {
   const rows = Array.isArray(payload.rows) ? payload.rows : [];
   const columns = [...new Set(rows.flatMap((row) => Object.keys(row || {})))];
   const table = rows.length && columns.length ? `<div class="analytics-table-wrap"><table class="analytics-table"><thead><tr>${columns.map((column) => `<th>${esc(column)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td>${esc(row[column] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : '<p class="field-note">查询没有返回记录。</p>';
-  return `<section><p class="eyebrow">READ-ONLY ANALYTICS</p><p class="analytics-answer">${esc(payload.answer || '未生成摘要。')}</p><p class="field-note">返回 ${esc(payload.row_count || 0)} 行${payload.truncated ? '，仅展示前 100 行' : ''}。</p></section><details><summary>查看已执行的只读 SQL</summary><pre>${esc(payload.sql || '')}</pre></details>${table}`;
+  return `<section><p class="eyebrow">READ-ONLY ANALYTICS</p><div class="analytics-answer">${renderMarkdown(payload.answer || '未生成摘要。')}</div><p class="field-note">返回 ${esc(payload.row_count || 0)} 行${payload.truncated ? '，仅展示前 100 行' : ''}。</p></section><details><summary>查看已执行的只读 SQL</summary><pre>${esc(payload.sql || '')}</pre></details>${table}`;
 }
 
 function appendChatMessage(role, content, payload = null) {
   const messages = $('#chat-messages');
   const item = document.createElement('article'); item.className = `chat-message ${role}`;
   if (payload?.route === 'analytics') item.innerHTML = analyticsDetails(payload);
-  else item.textContent = content;
+  else item.innerHTML = renderMarkdown(content);
   messages.appendChild(item); messages.scrollTop = messages.scrollHeight;
 }
 

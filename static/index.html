@@ -11,6 +11,7 @@
     <aside class="sidebar" aria-label="主导航">
       <div class="brand"><span class="brand-mark">R</span><div><strong>ResolveOps Agent</strong><small>企业 ERP 异常处理</small></div></div>
       <nav class="nav" aria-label="工作台导航">
+        <button class="nav-item" data-view="chat"><span>◉</span>主对话</button>
         <button class="nav-item is-active" data-view="dashboard"><span>▦</span>工作台</button>
         <button class="nav-item" data-view="cases"><span>▣</span>Case 工作台 <em id="case-count">—</em></button>
         <button class="nav-item" data-view="approvals"><span>✓</span>待审批 <em id="approval-count">—</em></button>
@@ -23,9 +24,13 @@
     <main class="main-area">
       <header class="topbar"><div><p class="eyebrow" id="page-eyebrow">运营总览</p><h1 id="page-title">订单异常工作台</h1></div><div class="topbar-actions"><span id="api-status" class="status-pill muted">未连接</span><button class="icon-button" id="refresh-button" title="刷新">↻</button></div></header>
       <div class="content-wrap">
+        <section class="view" data-panel="chat" hidden>
+          <div class="section-head"><div><p class="eyebrow">RESOLVEOPS ASSISTANT</p><h2>主对话</h2><p>可以直接询问项目设计、Agent 运行机制和运营数据；密码、密钥等敏感信息不会显示。</p></div><span class="status-pill muted">自动识别运营分析问题</span></div>
+          <section class="surface workbench-chat"><div id="chat-messages" class="chat-messages"><div class="chat-message assistant">可以问我 ResolveOps 的实现，例如“Agent 如何并发调用工具？”；也可以直接问“近 7 天哪些 Case 因审批过期转人工处理？”。</div></div><form id="chat-form" class="chat-form"><textarea id="chat-question" required maxlength="1000" placeholder="输入问题…"></textarea><button class="button" type="submit" id="chat-submit">发送</button></form></section>
+        </section>
+
         <section class="view is-visible" data-panel="dashboard">
           <div class="section-head"><div><h2>当前运营状态</h2><p>聚合订单异常、审批与运行服务，优先处理需要人工确认的事项。</p></div></div>
-          <section class="surface workbench-chat"><div class="surface-head"><div><p class="eyebrow">RESOLVEOPS ASSISTANT</p><h3>主对话</h3></div><span class="status-pill muted">自动识别运营分析问题</span></div><div id="chat-messages" class="chat-messages"><div class="chat-message assistant">可以问我工作台和 Agent 的设计，也可以直接问“近 7 天哪些 Case 因审批过期转人工处理？”之类的运营数据问题。</div></div><form id="chat-form" class="chat-form"><textarea id="chat-question" required maxlength="1000" placeholder="输入问题…"></textarea><button class="button" type="submit" id="chat-submit">发送</button></form></section>
           <div class="metric-grid" id="dashboard-metrics"></div>
           <div class="dashboard-grid"><section class="surface"><div class="surface-head"><div><p class="eyebrow">优先处理</p><h3>最近 Case</h3></div><button class="text-button" data-go="cases">查看全部</button></div><div id="dashboard-cases" class="data-list"></div></section><section class="surface"><div class="surface-head"><div><p class="eyebrow">人工确认</p><h3>待审批</h3></div><button class="text-button" data-go="approvals">审批中心</button></div><div id="dashboard-approvals" class="data-list"></div></section></div>
         </section>
