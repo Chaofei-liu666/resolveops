@@ -73,6 +73,7 @@ function activate(view) {
   const names = { chat: ['RESOLVEOPS ASSISTANT', '主对话'], dashboard: ['运营总览', '订单异常工作台'], cases: ['CASE WORKSPACE', 'Case 工作台'], approvals: ['HUMAN-IN-THE-LOOP', '待审批'], traces: ['TRACE / EVENTS', '执行轨迹'], settings: ['LOCAL CONFIGURATION', '系统配置'] };
   $('#page-eyebrow').textContent = names[view][0]; $('#page-title').textContent = names[view][1];
   if (view === 'settings') loadSettings();
+  if (view === 'chat') renderChatContext();
   if (view === 'traces') { renderTrace(); syncTracePolling(); }
   else stopTracePolling();
 }
@@ -236,6 +237,21 @@ function appendChatMessage(role, content, payload = null) {
   messages.appendChild(item); messages.scrollTop = messages.scrollHeight;
 }
 
+function renderChatContext() {
+  $('#chat-case-context').textContent = String(state.cases.length);
+  $('#chat-approval-context').textContent = String(pendingApprovals().length);
+  $('#chat-file-context').textContent = state.localFileReadEnabled ? '本地文件工具已开启：仅执行读取。' : '本地文件工具未开启';
+}
+
+function startNewChat() {
+  state.chatHistory = []; state.chatAttachments = [];
+  $('#chat-messages').innerHTML = '';
+  appendChatMessage('assistant', '新会话已开始。你可以问项目设计、Case 运营数据，或让我分析文件和本地资料。');
+  $('#chat-title').textContent = '当前任务'; $('#chat-subtitle').textContent = '新会话等待首次提问';
+  $('#conversation-list').innerHTML = '<button class="conversation-item is-active" type="button"><strong>当前任务</strong><span>可询问项目、Case 与本地资料</span><small>刚刚</small></button>';
+  renderChatAttachments(); renderChatContext(); $('#chat-question').focus();
+}
+
 function fileSize(size) { return size >= 1024 * 1024 ? `${(size / (1024 * 1024)).toFixed(1)} MB` : `${Math.ceil(size / 1024)} KB`; }
 
 function renderChatAttachments() {
@@ -274,6 +290,7 @@ async function loadLocalFileAccess() {
     const payload = await api('/v1/local-files/access'); state.localFileReadEnabled = Boolean(payload.enabled);
     button.disabled = false; button.textContent = state.localFileReadEnabled ? '关闭本地文件工具' : '开启本地文件工具';
     status.textContent = state.localFileReadEnabled ? '已开启：Agent 可自行检索本机可读文件，且仅执行读取。' : '关闭：仅可分析手动上传的附件。';
+    renderChatContext();
   } catch (_) {
     button.disabled = true; status.textContent = '仅本地管理员可管理本地文件工具。';
   }
@@ -300,6 +317,7 @@ async function runChat(event) {
   const button = $('#chat-submit'); const original = button.textContent;
   const displayQuestion = files.length ? `${question}\n\n附件：${files.map((file) => file.name).join('、')}` : question;
   appendChatMessage('user', displayQuestion); $('#chat-question').value = ''; state.chatAttachments = []; renderChatAttachments();
+  $('#chat-title').textContent = question.length > 26 ? `${question.slice(0, 26)}…` : question; $('#chat-subtitle').textContent = '正在处理你的问题';
   button.disabled = true; button.textContent = '处理中…';
   try {
     const payload = await api(files.length ? '/v1/chat/attachments' : '/v1/chat', {
@@ -308,8 +326,10 @@ async function runChat(event) {
     state.chatHistory.push({ role: 'user', content: question }, { role: 'assistant', content: payload.answer || '' });
     state.chatHistory = state.chatHistory.slice(-12);
     appendChatMessage('assistant', payload.answer || '未获得回答。', payload);
+    $('#chat-subtitle').textContent = payload.route === 'analytics' ? '已完成只读运营分析' : '已完成回答';
   } catch (error) {
     appendChatMessage('assistant', `未完成：${error.message}`);
+    $('#chat-subtitle').textContent = '本次回答未完成';
   } finally { button.disabled = false; button.textContent = original; }
 }
 
@@ -384,7 +404,7 @@ async function refreshData() {
     state.identity = await api('/v1/operator/me');
     state.cases = await api('/v1/cases?limit=50'); $('#case-count').textContent = state.cases.length;
     try { state.runtime = await api('/v1/runtime/status'); } catch (_) { state.runtime = null; }
-    setApiStatus(`已认证 · ${state.identity.role}`, 'ok'); renderDashboard(); renderCaseList(); renderApprovals(); await loadLocalFileAccess(); if (state.selectedCaseId) await selectCase(state.selectedCaseId, false); return state.identity;
+    setApiStatus(`已认证 · ${state.identity.role}`, 'ok'); renderDashboard(); renderCaseList(); renderApprovals(); await loadLocalFileAccess(); renderChatContext(); if (state.selectedCaseId) await selectCase(state.selectedCaseId, false); return state.identity;
   } catch (error) { state.identity = null; setApiStatus('认证失败', 'bad'); $('#dashboard-cases').innerHTML = empty('无法读取 Case', error.message); return null; }
 }
 
@@ -400,4 +420,5 @@ $('#clear-key').addEventListener('click', () => { clearKey(); state.identity = n
 $('#create-case-form').addEventListener('submit', createCase); $('#cancel-create-case').addEventListener('click', () => $('#create-case-dialog').close());
 $('#chat-form').addEventListener('submit', runChat);
 $('#chat-files').addEventListener('change', chooseChatFiles); $('#local-file-access').addEventListener('click', toggleLocalFileAccess);
+$('#new-chat').addEventListener('click', startNewChat); $('#clear-chat').addEventListener('click', startNewChat);
 if (key()) refreshData(); else { renderDashboard(); renderCaseList(); renderApprovals(); }

@@ -25,8 +25,23 @@
       <header class="topbar"><div><p class="eyebrow" id="page-eyebrow">运营总览</p><h1 id="page-title">订单异常工作台</h1></div><div class="topbar-actions"><span id="api-status" class="status-pill muted">未连接</span><button class="icon-button" id="refresh-button" title="刷新">↻</button></div></header>
       <div class="content-wrap">
         <section class="view" data-panel="chat" hidden>
-          <div class="section-head"><div><p class="eyebrow">RESOLVEOPS ASSISTANT</p><h2>主对话</h2><p>可以直接询问项目设计、Agent 运行机制和运营数据；密码、密钥等敏感信息不会显示。</p></div><span class="status-pill muted">自动识别运营分析问题</span></div>
-          <section class="surface workbench-chat"><div id="chat-messages" class="chat-messages"><div class="chat-message assistant">可以问我 ResolveOps 的实现，例如“Agent 如何并发调用工具？”；也可以直接问“近 7 天哪些 Case 因审批过期转人工处理？”。</div></div><form id="chat-form" class="chat-form"><div id="chat-attachment-list" class="chat-attachment-list" hidden></div><div class="chat-tools"><label class="button secondary attachment-picker" for="chat-files">📎 添加文件或图片<input id="chat-files" type="file" multiple accept=".txt,.md,.csv,.tsv,.json,.log,.xml,.html,.htm,.yaml,.yml,.ini,.cfg,.py,.js,.ts,.sql,.rst,.pdf,.docx,.xlsx,.png,.jpg,.jpeg,.webp"></label><button class="button secondary" type="button" id="local-file-access">开启本地文件工具</button><span id="local-file-status" class="field-note">关闭：仅可分析手动上传的附件。</span></div><textarea id="chat-question" maxlength="1000" placeholder="输入问题，或选择文件后说明要做什么…"></textarea><button class="button" type="submit" id="chat-submit">发送</button></form><p class="field-note">本地文件工具开启后，Agent 可自行检索本机可读文档并选择相关文件；全程只读，不会修改文件。附件只用于本轮回答，不保存到数据库。</p></section>
+          <section class="chat-workspace">
+            <aside class="conversation-rail">
+              <header class="conversation-rail-head"><div><p class="eyebrow">会话</p><h2>主对话</h2></div><button class="icon-button" type="button" id="new-chat" title="新建会话">＋</button></header>
+              <div id="conversation-list" class="conversation-list"><button class="conversation-item is-active" type="button"><strong>当前任务</strong><span>可询问项目、Case 与本地资料</span><small>刚刚</small></button></div>
+              <footer class="conversation-rail-foot"><span>本轮对话仅保存在当前页面</span><button class="button secondary" type="button" id="clear-chat">清空当前会话</button></footer>
+            </aside>
+            <section class="conversation-main">
+              <header class="conversation-main-head"><div><strong id="chat-title">当前任务</strong><span id="chat-subtitle">新会话等待首次提问</span></div><span class="status-pill muted">自动识别运营分析问题</span></header>
+              <div id="chat-messages" class="chat-messages"><div class="chat-message assistant">可以问我 ResolveOps 的实现，例如“Agent 如何并发调用工具？”；也可以直接问“近 7 天哪些 Case 因审批过期转人工处理？”。</div></div>
+              <form id="chat-form" class="chat-form"><div id="chat-attachment-list" class="chat-attachment-list" hidden></div><div class="chat-tools"><label class="button secondary attachment-picker" for="chat-files">📎 添加文件或图片<input id="chat-files" type="file" multiple accept=".txt,.md,.csv,.tsv,.json,.log,.xml,.html,.htm,.yaml,.yml,.ini,.cfg,.py,.js,.ts,.sql,.rst,.pdf,.docx,.xlsx,.png,.jpg,.jpeg,.webp"></label><button class="button secondary" type="button" id="local-file-access">开启本地文件工具</button><span id="local-file-status" class="field-note">关闭：仅可分析手动上传的附件。</span></div><textarea id="chat-question" maxlength="1000" placeholder="询问 Agent、Case、执行轨迹或本地资料…"></textarea><div class="chat-submit-row"><span class="field-note">附件仅用于本轮回答，不保存到数据库。</span><button class="button" type="submit" id="chat-submit">发送</button></div></form>
+            </section>
+            <aside class="conversation-context">
+              <section><p class="eyebrow">快捷入口</p><button class="context-link" type="button" data-go="cases"><strong>全部 Case</strong><span>查看调查、计划和当前状态</span></button><button class="context-link" type="button" data-go="approvals"><strong>待审批</strong><span>处理人工确认事项</span></button><button class="context-link" type="button" data-go="traces"><strong>执行轨迹</strong><span>回看 Agent 的运行过程</span></button></section>
+              <section class="context-summary"><p class="eyebrow">当前上下文</p><div><span>可见 Case</span><strong id="chat-case-context">0</strong></div><div><span>待审批</span><strong id="chat-approval-context">0</strong></div><p id="chat-file-context" class="field-note">本地文件工具未开启</p></section>
+              <section class="context-notice"><span class="dot ok"></span><div><strong>受控执行已启用</strong><p>写入 ERP 前仍需经过既有审批与验证。</p></div></section>
+            </aside>
+          </section>
         </section>
 
         <section class="view is-visible" data-panel="dashboard">
