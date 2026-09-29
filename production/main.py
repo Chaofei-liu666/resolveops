@@ -27,7 +27,7 @@ from .case_ask import CaseQuestionAgent
 from .context import CaseContextBuilder, validate_case_context_isolation
 from .evidence import validate_plan_grounding
 from .operator_chat import OperatorChatAgent
-from .analytics import AnalyticsAgent, AnalyticsQueryError
+from .analytics import AnalyticsAgent, AnalyticsQueryError, is_analytics_question
 from .tools import BusinessReadTools
 from .events import emit
 
@@ -1142,7 +1142,27 @@ def ask_case(case_id:str, payload: CaseAskIn, x_operator_key:str|None=Header(def
 def operator_chat(payload: OperatorChatIn, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
     with Session(engine) as db:
         identity=operator_identity_from_db(db,x_operator_key)
+        if is_analytics_question(payload.question):
+            try:
+                result = AnalyticsAgent().run(question=payload.question, db=db, tenant_id=identity.tenant_id)
+            except AnalyticsQueryError as exc:
+                audit(db, identity, 'analytics_query_rejected', 'operator_chat', identity.subject, {
+                    'question': payload.question, 'reason': str(exc), 'route': 'analytics',
+                })
+                db.commit()
+                raise HTTPException(422, str(exc)) from exc
+            audit(db, identity, 'analytics_query_executed', 'operator_chat', identity.subject, {
+                'question': payload.question, 'sql': result.sql, 'row_count': result.row_count,
+                'truncated': result.truncated, 'llm': result.llm, 'route': 'analytics',
+            })
+            db.commit()
+            return {
+                'question': payload.question, 'answer': result.answer, 'route': 'analytics',
+                'source': 'analytics', 'sql': result.sql, 'rows': result.rows,
+                'row_count': result.row_count, 'truncated': result.truncated, 'llm': result.llm,
+            }
         answer=OperatorChatAgent().answer(payload.question, history=payload.history)
+        answer['route'] = 'chat'
         audit(db,identity,'operator_chat_answered','operator_chat',identity.subject,{
             'question':payload.question,
             'history_items':len(payload.history or []),

@@ -26,7 +26,7 @@ API 创建 Case 和 investigate Task
 | LLMGateway | 适配 Chat Completions，返回统一的消息、工具调用和用量数据。 |
 | Evidence / Policy | 校验方案证据和审批要求。 |
 | Executor / Verifier | 处理 ERP 写入、幂等键和写后回读。 |
-| AnalyticsAgent | 将运营问题转换为当前租户上的只读 SQL，并基于结果生成摘要。 |
+| Intent Router / AnalyticsAgent | 在主对话中识别运营分析意图；将这类问题转换为当前租户上的只读 SQL，并基于结果生成摘要。 |
 
 ## 数据与一致性
 
@@ -37,9 +37,9 @@ API 创建 Case 和 investigate Task
 - Invocation 使用幂等键。重复执行会返回已有外部单据，而不是重复创建。
 - SQLite 使用 WAL 和 busy timeout；PostgreSQL 启动时执行版本化 migration。
 
-## 运营分析
+## 主对话中的运营分析
 
-“运营分析”与 Agent 调查、审批、执行分离。它面向 Case、Approval、Event、Task 和 Invocation 的历史记录，支持跨表统计与 CTE，不参与 ERP 写入。
+主对话先做轻量意图识别：普通项目问答进入无工具对话；同时包含运行数据对象与统计、查询、排序等分析意图的问题进入运营分析。后者与 Agent 调查、审批、执行分离，面向 Case、Approval、Event、Task 和 Invocation 的历史记录，支持跨表统计与 CTE，不参与 ERP 写入。
 
 后端先为当前操作员注入租户范围的分析语义层，再校验模型生成的 SQL：只允许 `SELECT`，只能引用 `analytics_cases`、`analytics_approvals`、`analytics_events`、`analytics_tasks`、`analytics_invocations` 及用户 CTE。查询结果限制为 100 行，问题、SQL 和行数写入 AuditLog。
 

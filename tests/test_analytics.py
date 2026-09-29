@@ -2,7 +2,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from production.agent_core import LLMResult
-from production.analytics import AnalyticsAgent, AnalyticsQueryError, validate_analytics_sql
+from production.analytics import AnalyticsAgent, AnalyticsQueryError, is_analytics_question, validate_analytics_sql
 from production.models import Base, Case
 
 
@@ -35,6 +35,11 @@ def test_analytics_sql_rejects_raw_tables_and_writes():
         except AnalyticsQueryError:
             continue
         raise AssertionError(f'expected statement to be rejected: {statement}')
+
+
+def test_intent_router_keeps_explanation_out_of_analytics_but_routes_data_questions():
+    assert not is_analytics_question('审批在 ResolveOps 中如何工作？')
+    assert is_analytics_question('近 7 天哪些审批过期了？')
 
 
 def test_analytics_agent_scopes_rows_to_operator_tenant():

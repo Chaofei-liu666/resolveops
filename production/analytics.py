@@ -90,6 +90,19 @@ class AnalyticsQueryError(ValueError):
     """A generated statement does not meet the analytics query contract."""
 
 
+def is_analytics_question(question: str) -> bool:
+    """Route operational data questions out of the general Workbench chat.
+
+    The rule deliberately requires both an operational subject and an analysis
+    cue.  A question such as "审批如何工作" remains normal chat; "哪些审批
+    已过期" becomes analytics.
+    """
+    normalized = question.lower()
+    subject = re.search(r'case|审批|任务|执行轨迹|事件|工具调用|调用记录|replan|运行记录|审计', normalized)
+    analysis = re.search(r'统计|多少|哪些|最近|近\s*\d|平均|数量|趋势|分组|排序|列表|最多|最少|top|查询|汇总', normalized)
+    return bool(subject and analysis)
+
+
 @dataclass(frozen=True)
 class AnalyticsResult:
     answer: str
