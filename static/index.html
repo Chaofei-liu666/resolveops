@@ -15,6 +15,7 @@
         <button class="nav-item" data-view="cases"><span>▣</span>Case 工作台 <em id="case-count">—</em></button>
         <button class="nav-item" data-view="approvals"><span>✓</span>待审批 <em id="approval-count">—</em></button>
         <button class="nav-item" data-view="traces"><span>⌘</span>执行轨迹</button>
+        <button class="nav-item" data-view="analytics"><span>◌</span>运营分析</button>
         <button class="nav-item" data-view="settings"><span>⚙</span>系统配置</button>
       </nav>
       <div class="sidebar-bottom"><button class="identity" id="identity-button"><span id="identity-dot" class="dot muted"></span><span id="identity-label">连接本地服务</span></button><p>连接模型、ERP 与本地服务</p></div>
@@ -37,6 +38,11 @@
         <section class="view" data-panel="approvals" hidden><div class="section-head"><div><p class="eyebrow">HUMAN-IN-THE-LOOP</p><h2>待审批</h2><p>审批始终绑定具体 Action 与 Plan Version；批准后才会进入 Executor。</p></div></div><div id="approval-list" class="approval-grid"></div></section>
 
         <section class="view" data-panel="traces" hidden><div class="section-head"><div><p class="eyebrow">TRACE / EVENTS</p><h2>执行轨迹</h2><p>展示真实 Agent 生命周期。默认摘要可读，技术 payload 按需展开。</p></div><select id="trace-case-select" aria-label="选择 Case"></select></div><div id="trace-detail" class="trace-view empty">选择一个 Case 查看执行轨迹。</div></section>
+
+        <section class="view" data-panel="analytics" hidden>
+          <div class="section-head"><div><p class="eyebrow">READ-ONLY ANALYTICS</p><h2>运营分析</h2><p>用自然语言分析当前租户的 Case、审批、任务和执行记录。查询仅能读取分析语义层，不会修改业务状态或 ERP 数据。</p></div></div>
+          <section class="surface analytics-surface"><form id="analytics-form"><label for="analytics-question">分析问题</label><textarea id="analytics-question" required maxlength="1000" placeholder="例如：近 7 天哪些订单因审批过期进入人工处理？按异常类型统计数量。"></textarea><div class="analytics-actions"><span>支持跨 Case 关联、统计、排序和 CTE；每次最多返回 100 行。</span><button class="button" type="submit" id="analytics-submit">开始分析</button></div></form><div id="analytics-result" class="analytics-result empty">输入问题后，系统会生成并校验只读 SQL，再将结果整理为自然语言。</div></section>
+        </section>
 
         <section class="view" data-panel="settings" hidden>
           <div class="section-head"><div><p class="eyebrow">LOCAL CONFIGURATION</p><h2>系统配置</h2><p>连接模型、ERP 系统与本地运行服务。密钥仅可写入，保存后不会再次显示。</p></div><button class="button secondary" id="settings-refresh">刷新状态</button></div>

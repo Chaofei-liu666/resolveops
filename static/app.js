@@ -70,7 +70,7 @@ function activate(view) {
   state.activeView = view;
   document.querySelectorAll('[data-panel]').forEach((panel) => { const visible = panel.dataset.panel === view; panel.hidden = !visible; panel.classList.toggle('is-visible', visible); });
   document.querySelectorAll('[data-view]').forEach((button) => button.classList.toggle('is-active', button.dataset.view === view));
-  const names = { dashboard: ['运营总览', '订单异常工作台'], cases: ['CASE WORKSPACE', 'Case 工作台'], approvals: ['HUMAN-IN-THE-LOOP', '待审批'], traces: ['TRACE / EVENTS', '执行轨迹'], settings: ['LOCAL CONFIGURATION', '系统配置'] };
+  const names = { dashboard: ['运营总览', '订单异常工作台'], cases: ['CASE WORKSPACE', 'Case 工作台'], approvals: ['HUMAN-IN-THE-LOOP', '待审批'], traces: ['TRACE / EVENTS', '执行轨迹'], analytics: ['READ-ONLY ANALYTICS', '运营分析'], settings: ['LOCAL CONFIGURATION', '系统配置'] };
   $('#page-eyebrow').textContent = names[view][0]; $('#page-title').textContent = names[view][1];
   if (view === 'settings') loadSettings();
   if (view === 'traces') { renderTrace(); syncTracePolling(); }
@@ -194,6 +194,37 @@ function renderTrace() {
   $('#trace-detail').innerHTML = `<div class="trace-header"><div><strong>${esc(detail.order_id)}</strong><span class="status-pill ${statusTone(detail.status)}">${esc(statusLabel(detail.status))}</span>${live ? '<span class="status-pill ok">实时更新</span>' : ''}</div><span class="mono">${esc(detail.id)}</span></div><div class="timeline">${(detail.events || []).map((event) => `<article class="timeline-item"><span class="timeline-dot"></span><div><div class="card-row"><strong>${esc(traceStage(event))}</strong><time>${esc(dateText(event.created_at))}</time></div><p>${esc(event.message || '')}</p>${Object.keys(event.data || {}).length ? `<details><summary>技术详情</summary><pre>${esc(pretty(event.data))}</pre></details>` : ''}</div></article>`).join('') || empty('暂无生命周期事件', '历史 Case 可能没有记录新的运行轨迹。')}</div>`;
 }
 
+function renderAnalyticsResult(payload) {
+  const rows = Array.isArray(payload.rows) ? payload.rows : [];
+  const columns = [...new Set(rows.flatMap((row) => Object.keys(row || {})))];
+  const table = rows.length && columns.length ? `<div class="analytics-table-wrap"><table class="analytics-table"><thead><tr>${columns.map((column) => `<th>${esc(column)}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td>${esc(row[column] ?? '—')}</td>`).join('')}</tr>`).join('')}</tbody></table></div>` : '<p class="field-note">查询没有返回记录。</p>';
+  $('#analytics-result').className = 'analytics-result';
+  $('#analytics-result').innerHTML = `<section><p class="eyebrow">ANALYSIS ANSWER</p><p class="analytics-answer">${esc(payload.answer || '未生成摘要。')}</p><p class="field-note">返回 ${esc(payload.row_count || 0)} 行${payload.truncated ? '，仅展示前 100 行' : ''}。</p></section><details><summary>查看已执行的只读 SQL</summary><pre>${esc(payload.sql || '')}</pre></details>${table}`;
+}
+
+async function runAnalytics(event) {
+  event.preventDefault();
+  if (!key() || !state.identity) {
+    $('#analytics-result').className = 'analytics-result empty';
+    $('#analytics-result').textContent = '开始分析前，请先在左下角验证本地操作员身份。';
+    return;
+  }
+  const question = $('#analytics-question').value.trim();
+  if (!question) return;
+  const button = $('#analytics-submit'); const original = button.textContent;
+  button.disabled = true; button.textContent = '分析中…';
+  $('#analytics-result').className = 'analytics-result empty';
+  $('#analytics-result').textContent = '正在生成、校验并执行只读分析查询…';
+  try {
+    renderAnalyticsResult(await api('/v1/analytics/query', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }),
+    }));
+  } catch (error) {
+    $('#analytics-result').className = 'analytics-result empty';
+    $('#analytics-result').textContent = `分析未完成：${error.message}`;
+  } finally { button.disabled = false; button.textContent = original; }
+}
+
 async function selectCase(id, switchToCases) {
   if (!id) return; state.selectedCaseId = id; renderCaseList();
   try { state.selectedDetail = await api(`/v1/cases/${encodeURIComponent(id)}`); renderCaseDetail(); renderTrace(); if (switchToCases) activate('cases'); else syncTracePolling(); }
@@ -279,4 +310,5 @@ $('#identity-button').addEventListener('click', openIdentityDialog);
 $('#switch-identity').addEventListener('click', switchIdentity);
 $('#clear-key').addEventListener('click', () => { clearKey(); state.identity = null; $('#operator-key').value = ''; $('#identity-current').textContent = '已退出当前身份。'; setApiStatus('未认证', 'muted'); renderDashboard(); renderCaseList(); renderApprovals(); });
 $('#create-case-form').addEventListener('submit', createCase); $('#cancel-create-case').addEventListener('click', () => $('#create-case-dialog').close());
+$('#analytics-form').addEventListener('submit', runAnalytics);
 if (key()) refreshData(); else { renderDashboard(); renderCaseList(); renderApprovals(); }

@@ -27,6 +27,7 @@ from .case_ask import CaseQuestionAgent
 from .context import CaseContextBuilder, validate_case_context_isolation
 from .evidence import validate_plan_grounding
 from .operator_chat import OperatorChatAgent
+from .analytics import AnalyticsAgent, AnalyticsQueryError
 from .tools import BusinessReadTools
 from .events import emit
 
@@ -61,6 +62,9 @@ class CaseAskIn(BaseModel):
 class OperatorChatIn(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
     history: list[dict[str, str]] = Field(default_factory=list)
+
+class AnalyticsQueryIn(BaseModel):
+    question: str = Field(min_length=3, max_length=1000)
 
 
 class ConnectionSettingsIn(BaseModel):
@@ -1169,6 +1173,36 @@ def operator_chat_stream(payload: OperatorChatIn, x_operator_key:str|None=Header
                 })
                 db.commit()
     return sse_response(events())
+
+@app.post('/v1/analytics/query')
+def analytics_query(payload: AnalyticsQueryIn, x_operator_key: str | None = Header(default=None)):
+    """Natural-language, read-only analysis of tenant-scoped runtime records."""
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        try:
+            result = AnalyticsAgent().run(question=payload.question, db=db, tenant_id=identity.tenant_id)
+        except AnalyticsQueryError as exc:
+            audit(db, identity, 'analytics_query_rejected', 'analytics_query', identity.subject, {
+                'question': payload.question, 'reason': str(exc),
+            })
+            db.commit()
+            raise HTTPException(422, str(exc)) from exc
+        audit(db, identity, 'analytics_query_executed', 'analytics_query', identity.subject, {
+            'question': payload.question,
+            'sql': result.sql,
+            'row_count': result.row_count,
+            'truncated': result.truncated,
+            'llm': result.llm,
+        })
+        db.commit()
+        return {
+            'answer': result.answer,
+            'sql': result.sql,
+            'rows': result.rows,
+            'row_count': result.row_count,
+            'truncated': result.truncated,
+            'llm': result.llm,
+        }
 
 @app.post('/v1/cases/{case_id}/ask/stream')
 def ask_case_stream(case_id:str, payload: CaseAskIn, x_operator_key:str|None=Header(default=None)):
