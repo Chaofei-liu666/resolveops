@@ -15,7 +15,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from .config import connection_value, save_runtime_connections, secret_configured, settings
+from .config import connection_value, save_local_file_read_enabled, save_runtime_connections, secret_configured, settings
 from .database import create_database_engine, is_sqlite_url
 from .approval_state import approval_is_expired, utc_now
 from .migrations import apply_migrations
@@ -28,6 +28,8 @@ from .context import CaseContextBuilder, validate_case_context_isolation
 from .evidence import validate_plan_grounding
 from .operator_chat import OperatorChatAgent
 from .analytics import AnalyticsAgent, AnalyticsQueryError, is_analytics_question
+from .chat_attachments import AttachmentError, ChatAttachment, decode_attachments
+from .local_file_tool import LocalFileReadTool, is_local_file_question
 from .tools import BusinessReadTools
 from .events import emit
 
@@ -62,6 +64,17 @@ class CaseAskIn(BaseModel):
 class OperatorChatIn(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
     history: list[dict[str, str]] = Field(default_factory=list)
+
+class ChatAttachmentIn(BaseModel):
+    filename: str = Field(min_length=1, max_length=260)
+    content_type: str = Field(default='', max_length=120)
+    data_base64: str = Field(min_length=1, max_length=7_000_000)
+
+class OperatorChatAttachmentIn(OperatorChatIn):
+    attachments: list[ChatAttachmentIn] = Field(min_length=1, max_length=5)
+
+class LocalFileReadAccessIn(BaseModel):
+    enabled: bool
 
 class AnalyticsQueryIn(BaseModel):
     question: str = Field(min_length=3, max_length=1000)
@@ -1138,40 +1151,93 @@ def ask_case(case_id:str, payload: CaseAskIn, x_operator_key:str|None=Header(def
             **answer,
         }
 
+def _answer_operator_chat(db: Session, identity: OperatorIdentity, payload: OperatorChatIn, attachments: list[ChatAttachment] | None = None):
+    attachments = attachments or []
+    local_file_selection: dict[str, Any] | None = None
+    if not attachments and settings.local_file_read_enabled and is_local_file_question(payload.question):
+        local_tool = LocalFileReadTool()
+        candidates = local_tool.find_candidates(payload.question)
+        if candidates:
+            selected_paths = OperatorChatAgent().plan_local_file_reads(
+                payload.question, [candidate.to_public() for candidate in candidates],
+            )
+            attachments = local_tool.read_selected(candidates, selected_paths)
+            local_file_selection = {
+                'candidate_count': len(candidates),
+                'selected_paths': selected_paths,
+                'read_count': len(attachments),
+            }
+    if not attachments and is_analytics_question(payload.question):
+        try:
+            result = AnalyticsAgent().run(question=payload.question, db=db, tenant_id=identity.tenant_id)
+        except AnalyticsQueryError as exc:
+            audit(db, identity, 'analytics_query_rejected', 'operator_chat', identity.subject, {
+                'question': payload.question, 'reason': str(exc), 'route': 'analytics',
+            })
+            db.commit()
+            raise HTTPException(422, str(exc)) from exc
+        audit(db, identity, 'analytics_query_executed', 'operator_chat', identity.subject, {
+            'question': payload.question, 'sql': result.sql, 'row_count': result.row_count,
+            'truncated': result.truncated, 'llm': result.llm, 'route': 'analytics',
+        })
+        db.commit()
+        return {
+            'question': payload.question, 'answer': result.answer, 'route': 'analytics',
+            'source': 'analytics', 'sql': result.sql, 'rows': result.rows,
+            'row_count': result.row_count, 'truncated': result.truncated, 'llm': result.llm,
+        }
+    answer=OperatorChatAgent().answer(payload.question, history=payload.history, attachments=attachments)
+    answer['route'] = 'chat'
+    audit(db,identity,'operator_chat_answered','operator_chat',identity.subject,{
+        'question':payload.question,
+        'history_items':len(payload.history or []),
+        'source':answer.get('source'),
+        'tools_used':answer.get('tools_used') or [],
+        'attachments':[attachment.audit_metadata() for attachment in attachments],
+        'local_file_selection': local_file_selection,
+        'llm':answer.get('llm') or {},
+    })
+    db.commit()
+    return answer
+
+
 @app.post('/v1/chat')
 def operator_chat(payload: OperatorChatIn, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
     with Session(engine) as db:
         identity=operator_identity_from_db(db,x_operator_key)
-        if is_analytics_question(payload.question):
-            try:
-                result = AnalyticsAgent().run(question=payload.question, db=db, tenant_id=identity.tenant_id)
-            except AnalyticsQueryError as exc:
-                audit(db, identity, 'analytics_query_rejected', 'operator_chat', identity.subject, {
-                    'question': payload.question, 'reason': str(exc), 'route': 'analytics',
-                })
-                db.commit()
-                raise HTTPException(422, str(exc)) from exc
-            audit(db, identity, 'analytics_query_executed', 'operator_chat', identity.subject, {
-                'question': payload.question, 'sql': result.sql, 'row_count': result.row_count,
-                'truncated': result.truncated, 'llm': result.llm, 'route': 'analytics',
-            })
-            db.commit()
-            return {
-                'question': payload.question, 'answer': result.answer, 'route': 'analytics',
-                'source': 'analytics', 'sql': result.sql, 'rows': result.rows,
-                'row_count': result.row_count, 'truncated': result.truncated, 'llm': result.llm,
-            }
-        answer=OperatorChatAgent().answer(payload.question, history=payload.history)
-        answer['route'] = 'chat'
-        audit(db,identity,'operator_chat_answered','operator_chat',identity.subject,{
-            'question':payload.question,
-            'history_items':len(payload.history or []),
-            'source':answer.get('source'),
-            'tools_used':answer.get('tools_used') or [],
-            'llm':answer.get('llm') or {},
+        return _answer_operator_chat(db, identity, payload)
+
+
+@app.post('/v1/chat/attachments')
+def operator_chat_with_attachments(payload: OperatorChatAttachmentIn, x_operator_key: str | None = Header(default=None)):
+    try:
+        attachments = decode_attachments([item.model_dump() for item in payload.attachments])
+    except AttachmentError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        return _answer_operator_chat(db, identity, payload, attachments)
+
+
+@app.get('/v1/local-files/access')
+def local_file_read_access(x_operator_key: str | None = Header(default=None)):
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        require_role(identity, 'ops_admin', 'config_admin')
+    return {'enabled': settings.local_file_read_enabled, 'mode': 'read_only'}
+
+
+@app.put('/v1/local-files/access')
+def update_local_file_read_access(payload: LocalFileReadAccessIn, x_operator_key: str | None = Header(default=None)):
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        require_role(identity, 'ops_admin', 'config_admin')
+        enabled = save_local_file_read_enabled(payload.enabled)
+        audit(db, identity, 'local_file_read_access_updated', 'runtime_configuration', 'local', {
+            'enabled': enabled, 'mode': 'read_only',
         })
         db.commit()
-        return answer
+    return {'enabled': enabled, 'mode': 'read_only'}
 
 @app.post('/v1/chat/stream')
 def operator_chat_stream(payload: OperatorChatIn, x_operator_key:str|None=Header(default=None)):
