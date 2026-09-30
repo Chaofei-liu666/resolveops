@@ -153,6 +153,69 @@ def test_main_chat_routes_an_unambiguous_order_reference_to_case(monkeypatch):
     assert result['case_id'] == '22a22222-2222-4222-8222-222222222222'
 
 
+def test_main_chat_resolves_a_case_pronoun_from_its_current_session(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+    monkeypatch.setattr(main_module, 'OperatorChatAgent', FakeOperatorChatAgent)
+
+    class FakeCaseQuestionAgent:
+        def __init__(self, _tools):
+            pass
+
+        def answer(self, **_kwargs):
+            return {'answer': '已读取当前 Case。', 'used_tools': [], 'observations': []}
+
+    monkeypatch.setattr(main_module, 'CaseQuestionAgent', FakeCaseQuestionAgent)
+    _seed(engine)
+    case_id = '33a33333-3333-4333-8333-333333333333'
+    with Session(engine) as db:
+        db.add(Case(id=case_id, tenant_id='demo', event_type='delivery_delay', order_id='SAL-ORD-2026-00003'))
+        db.commit()
+
+    created = create_chat_session(ChatSessionCreateIn(), x_operator_key='alice-key')
+    operator_chat(OperatorChatIn(question=f'查看 {case_id} 的状态', session_id=created['id']), x_operator_key='alice-key')
+    result = operator_chat(OperatorChatIn(question='为什么还在等待审批？', session_id=created['id']), x_operator_key='alice-key')
+
+    assert result['route'] == 'case'
+    assert result['case_id'] == case_id
+
+
+def test_broad_erp_request_returns_a_clarifying_question_not_a_guess():
+    assert main_module._needs_erp_identifier('查询 ERPNext 里的所有数据')
+    assert '不会批量导出' in main_module._erp_identifier_clarification()
+
+
+def test_main_chat_reads_an_explicit_erp_order_without_a_local_case(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+
+    class FakeERPNextAdapter:
+        def __init__(self, *_args):
+            pass
+
+        def sales_order(self, order_id):
+            assert order_id == 'SAL-ORD-2026-00009'
+            return {
+                'name': order_id, 'status': 'To Deliver and Bill', 'customer': '测试客户',
+                'transaction_date': '2026-09-30', 'delivery_date': '2026-10-03',
+                'grand_total': 1200, 'currency': 'CNY',
+                'items': [{'item_code': 'SKU-A12', 'qty': 3, 'delivered_qty': 0, 'warehouse': '重庆仓'}],
+            }
+
+    monkeypatch.setattr(main_module, 'ERPNextAdapter', FakeERPNextAdapter)
+    _seed(engine)
+    created = create_chat_session(ChatSessionCreateIn(), x_operator_key='alice-key')
+    result = operator_chat(OperatorChatIn(
+        question='请从 ERPNext 查询订单 SAL-ORD-2026-00009 的实时状态', session_id=created['id'],
+    ), x_operator_key='alice-key')
+
+    assert result['route'] == 'erpnext'
+    assert 'ERPNext 实时订单信息' in result['answer']
+    assert '测试客户' in result['answer']
+
+
 def test_local_file_router_does_not_scan_for_feature_questions():
     assert not is_local_file_question('本地文件工具如何实现？')
     assert not is_local_file_question('我想读取电脑上的文件并做总结，该怎么问？')

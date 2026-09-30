@@ -1188,6 +1188,140 @@ def _case_id_from_business_reference(db: Session, identity: OperatorIdentity, qu
     return matches[0].id if len(matches) == 1 else None
 
 
+def _is_case_follow_up(question: str) -> bool:
+    """Whether a vague phrase is asking about the previously discussed Case."""
+    import re
+    normalized = question.casefold()
+    has_reference = bool(re.search(r'这个|那个|该|它|刚才|上个|上一个|上述|前面|之前', normalized))
+    has_case_subject = bool(re.search(r'case|订单|审批|执行|轨迹|异常|人工|状态|处理|库存|采购|计划|事件|调用', normalized))
+    return has_reference and has_case_subject
+
+
+def _is_implicit_case_follow_up(question: str) -> bool:
+    """Recognize a contextual Case question such as “为什么还在等待审批”."""
+    import re
+    normalized = question.casefold()
+    subject = bool(re.search(r'case|订单|审批|执行|轨迹|异常|人工|状态|处理|库存|采购|计划|事件|调用', normalized))
+    follow_up = bool(re.search(r'为什么|怎么|如何|是否|还在|当前|下一步|结果|原因|情况', normalized))
+    return subject and follow_up and not is_analytics_question(question)
+
+
+def _recent_session_case_ids(db: Session, session: ChatSession | None, identity: OperatorIdentity) -> list[str]:
+    if session is None:
+        return []
+    messages = list(db.scalars(
+        select(ChatMessage).where(ChatMessage.session_id == session.id).order_by(ChatMessage.created_at.desc()).limit(30)
+    ).all())
+    seen: list[str] = []
+    for message in messages:
+        case_id = str((message.references or {}).get('case_id') or '')
+        if case_id and case_id not in seen:
+            seen.append(case_id)
+    if not seen:
+        return []
+    visible = set(db.scalars(select(Case.id).where(
+        Case.tenant_id == identity.tenant_id,
+        Case.id.in_(seen),
+    )).all())
+    return [case_id for case_id in seen if case_id in visible]
+
+
+def _case_reference_clarification(db: Session, case_ids: list[str]) -> str:
+    cases = list(db.scalars(select(Case).where(Case.id.in_(case_ids))).all())
+    by_id = {case.id: case for case in cases}
+    choices = [
+        f'{by_id[case_id].order_id}（{case_id[:8]}…）'
+        for case_id in case_ids if case_id in by_id
+    ]
+    if choices:
+        return '本次对话里提到过多个 Case：' + '、'.join(choices) + '。请说明要查询哪一个。'
+    return '请提供要查询的 Case ID 或订单号。'
+
+
+def _needs_erp_identifier(question: str) -> bool:
+    """Detect a real-time ERP question that lacks an unambiguous business object."""
+    import re
+    normalized = question.casefold()
+    asks_erp = bool(re.search(r'erpnext|\berp\b|实时.*(?:订单|库存|客户|物料|采购)|(?:订单|库存|客户|物料|采购).*实时', normalized))
+    broad_request = bool(re.search(r'所有数据|全部数据|全量|整个(?:erp|系统)|所有订单|全部订单', normalized))
+    return asks_erp and broad_request
+
+
+def _erp_identifier_clarification() -> str:
+    return (
+        '可以查询 ERPNext 的实时数据，但“所有数据”范围不明确，也不会批量导出整个 ERP。'
+        '请说明要查的对象和范围，例如销售订单号、物料编码与仓库、客户名称，或采购订单与时间范围。'
+    )
+
+
+def _erp_order_id_from_question(question: str) -> str | None:
+    """Extract an explicit Sales Order-like identifier without guessing names."""
+    import re
+    if not re.search(r'erpnext|\berp\b|订单|sales\s*order', question, re.IGNORECASE):
+        return None
+    match = re.search(
+        r'(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+){2,})(?![A-Za-z0-9_-])',
+        question,
+    )
+    return match.group(1) if match else None
+
+
+def _erp_order_answer_from_chat(question: str, order_id: str) -> dict[str, Any]:
+    """Read one explicitly named ERPNext Sales Order and expose a compact fact view."""
+    try:
+        order = ERPNextAdapter(
+            settings.erpnext_base_url, settings.erpnext_api_key, settings.erpnext_api_secret,
+        ).sales_order(order_id)
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code if exc.response is not None else None
+        if status_code == 404:
+            answer = f'ERPNext 中没有找到销售订单 {order_id}，或当前连接身份无权读取它。'
+        elif status_code in {401, 403}:
+            answer = 'ERPNext 拒绝了当前只读查询，请检查连接配置或 API 用户权限。'
+        else:
+            answer = f'ERPNext 查询订单 {order_id} 失败（HTTP {status_code or "未知"}）。'
+        return {'question': question, 'answer': answer, 'route': 'erpnext', 'source': 'erpnext', 'tools_used': ['get_order']}
+    except httpx.RequestError:
+        return {
+            'question': question,
+            'answer': '暂时无法连接 ERPNext，无法确认该订单的实时数据。请检查 ERPNext 服务和连接配置后重试。',
+            'route': 'erpnext', 'source': 'erpnext', 'tools_used': ['get_order'],
+        }
+
+    item_lines = []
+    for item in (order.get('items') or [])[:8]:
+        code = item.get('item_code') or item.get('item_name') or '未命名物料'
+        qty = item.get('qty')
+        delivered = item.get('delivered_qty')
+        warehouse = item.get('warehouse')
+        fragments = [str(code)]
+        if qty is not None:
+            fragments.append(f'数量 {qty}')
+        if delivered is not None:
+            fragments.append(f'已交付 {delivered}')
+        if warehouse:
+            fragments.append(f'仓库 {warehouse}')
+        item_lines.append('；'.join(fragments))
+    facts = [
+        f'订单：{order.get("name") or order_id}',
+        f'状态：{order.get("status") or "未返回"}',
+        f'客户：{order.get("customer") or "未返回"}',
+    ]
+    if order.get('transaction_date'):
+        facts.append(f'下单日期：{order["transaction_date"]}')
+    if order.get('delivery_date'):
+        facts.append(f'交付日期：{order["delivery_date"]}')
+    if order.get('grand_total') is not None:
+        facts.append(f'金额：{order["grand_total"]} {order.get("currency") or ""}'.strip())
+    answer = 'ERPNext 实时订单信息\n' + '\n'.join(facts)
+    if item_lines:
+        answer += '\n物料：\n' + '\n'.join(f'- {line}' for line in item_lines)
+    return {
+        'question': question, 'answer': answer, 'route': 'erpnext', 'source': 'erpnext',
+        'tools_used': ['get_order'], 'order_id': order.get('name') or order_id,
+    }
+
+
 def _session_detail(db: Session, session: ChatSession) -> dict[str, Any]:
     messages = list(db.scalars(
         select(ChatMessage).where(ChatMessage.session_id == session.id).order_by(ChatMessage.created_at)
@@ -1275,11 +1409,32 @@ def _answer_operator_chat(
     case_id = _first_case_id(payload.question) if not attachments else None
     if not case_id and not attachments:
         case_id = _case_id_from_business_reference(db, identity, payload.question)
+    referenced_case_ids = _recent_session_case_ids(db, session, identity) if not attachments else []
+    clarification: str | None = None
+    if not case_id and _is_case_follow_up(payload.question):
+        if len(referenced_case_ids) == 1:
+            case_id = referenced_case_ids[0]
+        elif len(referenced_case_ids) > 1:
+            clarification = _case_reference_clarification(db, referenced_case_ids)
+        else:
+            clarification = '请提供要查询的 Case ID 或订单号，我会读取它的状态、计划、审批和执行轨迹。'
+    elif not case_id and len(referenced_case_ids) == 1 and _is_implicit_case_follow_up(payload.question):
+        case_id = referenced_case_ids[0]
+
+    erp_order_id = _erp_order_id_from_question(payload.question) if not case_id and not attachments else None
     if case_id:
         result = _case_answer_from_chat(db, identity, payload.question, case_id) or {}
         if not result:
             result = {'question': payload.question, 'route': 'chat', 'source': 'system', 'tools_used': [],
                       'answer': '当前租户中没有找到这个 Case，或你没有查看它的权限。请检查 Case ID 是否完整。'}
+    elif clarification:
+        result = {'question': payload.question, 'route': 'clarification', 'source': 'clarification', 'tools_used': [],
+                  'answer': clarification}
+    elif erp_order_id:
+        result = _erp_order_answer_from_chat(payload.question, erp_order_id)
+    elif not attachments and _needs_erp_identifier(payload.question):
+        result = {'question': payload.question, 'route': 'clarification', 'source': 'clarification', 'tools_used': [],
+                  'answer': _erp_identifier_clarification()}
     elif not attachments and is_analytics_question(payload.question):
         try:
             analytics_result = AnalyticsAgent().run(question=payload.question, db=db, tenant_id=identity.tenant_id)
