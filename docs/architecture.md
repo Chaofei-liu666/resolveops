@@ -26,7 +26,8 @@ API 创建 Case 和 investigate Task
 | LLMGateway | 适配 Chat Completions，返回统一的消息、工具调用和用量数据。 |
 | Evidence / Policy | 校验方案证据和审批要求。 |
 | Executor / Verifier | 处理 ERP 写入、幂等键和写后回读。 |
-| Intent Router / AnalyticsAgent | 在主对话中识别运营分析意图；将这类问题转换为当前租户上的只读 SQL，并基于结果生成摘要。 |
+| ChatSession / ChatMemory | 按操作员和租户持久化会话、消息、会话摘要与用户主动保存的长期记忆。 |
+| Intent Router / AnalyticsAgent | 在主对话中识别 Case、运营分析和本地文件意图；将运营问题转换为当前租户上的只读 SQL，并基于结果生成摘要。 |
 
 ## 数据与一致性
 
@@ -39,7 +40,9 @@ API 创建 Case 和 investigate Task
 
 ## 主对话中的运营分析
 
-主对话先做轻量意图识别：普通项目问答进入无工具对话；同时包含运行数据对象与统计、查询、排序等分析意图的问题进入运营分析。后者与 Agent 调查、审批、执行分离，面向 Case、Approval、Event、Task 和 Invocation 的历史记录，支持跨表统计与 CTE，不参与 ERP 写入。
+主对话按会话恢复独立的历史与摘要。普通项目问答进入通用对话；出现 Case ID 时，系统在当前租户内自动调用只读 Case 问答链路；同时包含运行数据对象与统计、查询、排序等分析意图的问题进入运营分析；文件意图才会触发本地只读文件工具。三类读取均不参与 ERP 写入。
+
+用户可将一个会话主动存入长期记忆。保存的是经模型提炼的偏好、决定与结论，而非附件原文或整段聊天；新会话由 Agent 按问题相关性选择是否检索这些记忆。
 
 后端先为当前操作员注入租户范围的分析语义层，再校验模型生成的 SQL：只允许 `SELECT`，只能引用 `analytics_cases`、`analytics_approvals`、`analytics_events`、`analytics_tasks`、`analytics_invocations` 及用户 CTE。查询结果限制为 100 行，问题、SQL 和行数写入 AuditLog。
 

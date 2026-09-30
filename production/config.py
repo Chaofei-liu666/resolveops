@@ -46,7 +46,6 @@ class Settings(BaseSettings):
     erpnext_company: str | None = None
     erpnext_stock_difference_account: str | None = None
     erpnext_default_valuation_rate: float = 100
-    local_file_read_enabled: bool = False
 
 
 settings = Settings()
@@ -141,17 +140,6 @@ def secret_configured(name: str) -> bool:
     return isinstance(value, str) and bool(value.strip()) and value.strip().lower() not in {'replace-me', 'changeme'}
 
 
-def save_local_file_read_enabled(enabled: bool) -> bool:
-    """Persist the desktop user's one-time choice for the read-only file tool."""
-    profile = _read_runtime_profile()
-    profile['local_file_read_enabled'] = bool(enabled)
-    _write_runtime_profile(profile)
-    settings.local_file_read_enabled = bool(enabled)
-    return settings.local_file_read_enabled
-
-
 # Apply a saved profile during API/Worker boot, including an explicitly chosen
 # database endpoint.  The latter is never live-swapped after process start.
 _apply_values(_read_runtime_profile(), include_database=True)
-if isinstance(_read_runtime_profile().get('local_file_read_enabled'), bool):
-    settings.local_file_read_enabled = _read_runtime_profile()['local_file_read_enabled']

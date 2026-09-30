@@ -1,12 +1,12 @@
-"""Operator-level no-tool chat.
+"""General operator chat for non-sensitive questions and routed read results.
 
-This is the entry conversation before an operator selects or creates a Case.
-It deliberately exposes no ERP tools and performs no business writes.  The
-server still owns the LLM call so CLI clients do not need LLM credentials.
+The server owns the LLM call and keeps business writes outside this surface.
+Case, analytics, file and memory routes supply read-only context when relevant.
 """
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 from typing import Any
 
@@ -17,11 +17,10 @@ from .chat_attachments import ChatAttachment
 
 
 OPERATOR_CHAT_SYSTEM = """You are ResolveOps, an enterprise Agent Workbench assistant for order fulfillment exception cases.
-You are in the operator-level chat before a specific Case is selected.
-This top-level chat is allowed to answer normal harmless questions as well as non-sensitive ResolveOps project questions: architecture, Agent loop, tool contracts, scheduling, persistence, approval controls, desktop runtime, testing, and deployment choices.
-Use the supplied ResolveOps implementation notes as authoritative context. Do not claim implementation details are unavailable merely because they are technical.
-Boundary: this chat has no ERP write tools. For live ERP or Case facts, rely only on data supplied by the request or the separately-routed read-only analytics result; never invent facts.
-Do not force every answer back to order handling. Mention /new or /focus <case-id> only when the user asks to create/analyze a business exception or when it is genuinely relevant.
+This is a general operator chat. It can answer normal harmless questions as well as non-sensitive ResolveOps project questions: architecture, Agent loop, tool contracts, scheduling, persistence, approval controls, desktop runtime, testing, and deployment choices.
+Use the supplied ResolveOps implementation notes and the provided conversation context as authoritative. Do not claim implementation details are unavailable merely because they are technical.
+The server may separately provide read-only Case facts, analytics, local-file results, and user-approved long-term memories. Use those facts naturally when present. Never invent live business facts or claim that a write happened.
+Do not redirect the operator to another page merely because a question concerns a Case. Explain the result from the supplied read-only data. Do not mention internal commands such as /focus or /new.
 If the operator asks what underlying model is configured, use the provided configured_model and configured_base_url values.
 Never reveal API keys, passwords, tokens, private keys, connection strings containing credentials, or other secret values. You may explain how secrets are stored, configured, and protected without printing their values.
 Use the provided recent conversation history to understand references like "刚刚", "继续", and "为什么".
@@ -35,7 +34,7 @@ RESOLVEOPS_IMPLEMENTATION_NOTES = """ResolveOps implementation notes:
 - The LLM is not given arbitrary ERP or database access. Tools are typed and schema-validated. Business writes are proposed as an Action Plan and are guarded by evidence, policy and approval; ERP writes are not performed by the top-level chat.
 - Independent read-only tool calls within one Agent turn are scheduled with Python concurrent.futures.ThreadPoolExecutor (default maximum four). Duplicate calls are cached by tool name and arguments. Dependent calls and writes remain ordered.
 - The main chat recognizes questions about operational records plus an analysis intent such as count, list, trend, grouping, sorting or recent history. Those questions go to a read-only analytics chain: LLM generates scoped SELECT/WITH SQL over tenant-filtered semantic views, the server validates it and caps results at 100 rows, then a second LLM call summarizes the result. Generated SQL and row count are audited.
-- When the desktop owner enables the local-file tool, the Agent can search readable files on local disks by filename, choose up to five relevant candidates, and read their text or supported images for the current answer. It is read-only: it cannot create, edit, delete, rename, run files, or access known credential stores. File contents are not persisted.
+- When a question needs it, the Agent can search readable files on local disks by filename, choose up to five relevant candidates, and read their text or supported images for the current answer. It is read-only: it cannot create, edit, delete, rename, run files, or access known credential stores. File contents are not persisted.
 - The assistant may explain all of the above and other non-sensitive project design details. It must never expose secret values or pretend it has live facts without a read-only query result."""
 
 LOCAL_FILE_READ_PLANNER_SYSTEM = """You choose files for a read-only local-file tool.
@@ -44,6 +43,16 @@ Return JSON only: {"paths":["exact candidate path"]}. Choose at most five exact 
 
 def chat_system_prompt() -> str:
     return f'{OPERATOR_CHAT_SYSTEM}\n\n{RESOLVEOPS_IMPLEMENTATION_NOTES}'
+
+
+MEMORY_SELECTOR_SYSTEM = """Select only long-term memories that materially help answer the current question.
+The memories are user-approved summaries from other conversations, not current business facts.
+Return JSON only: {\"ids\":[\"memory-id\"]}. Return an empty list when none is needed.
+Never select a memory merely because it exists."""
+
+
+MEMORY_SUMMARIZER_SYSTEM = """Turn a user-approved ResolveOps conversation into a compact long-term memory.
+Keep only durable preferences, project decisions, confirmed conclusions, and useful context. Do not retain secrets, API keys, passwords, raw attachment contents, temporary status, or unsupported claims. Write concise Chinese plain text."""
 
 
 def attachment_message(question: str, attachments: list[ChatAttachment]) -> str | list[dict[str, Any]]:
@@ -167,7 +176,7 @@ class OperatorChatAgent:
     def __init__(self, llm_gateway: LLMGateway | None = None) -> None:
         self.llm = llm_gateway or LLMGateway()
 
-    def answer(self, question: str, history: list[dict[str, str]] | None = None, attachments: list[ChatAttachment] | None = None) -> dict[str, Any]:
+    def answer(self, question: str, history: list[dict[str, str]] | None = None, attachments: list[ChatAttachment] | None = None, memories: list[dict[str, str]] | None = None) -> dict[str, Any]:
         safe_history = normalize_chat_history(history)
         attachments = attachments or []
         if is_model_identity_question(question):
@@ -187,6 +196,15 @@ class OperatorChatAgent:
                 ),
             },
         ]
+        if memories:
+            memory_text = '\n'.join(
+                f"- [{item.get('id')}] {item.get('title', '')}: {item.get('content', '')}"
+                for item in memories[:6]
+            )
+            messages.append({'role': 'system', 'content': (
+                'The following are user-approved long-term memories selected as relevant. '
+                'Use them as context, not as proof of current business state.\n' + memory_text
+            )})
         messages.extend(safe_history)
         messages.append({'role': 'user', 'content': attachment_message(question, attachments)})
         result = self.llm.chat({
@@ -217,7 +235,45 @@ class OperatorChatAgent:
             'llm': result.telemetry(),
             'history_items': len(safe_history),
             'attachments': [attachment.audit_metadata() for attachment in attachments],
+            'memory_ids': [item.get('id') for item in memories or [] if item.get('id')],
         }
+
+    def select_relevant_memories(self, question: str, candidates: list[dict[str, str]]) -> list[str]:
+        if not candidates:
+            return []
+        result = self.llm.chat({'messages': [
+            {'role': 'system', 'content': MEMORY_SELECTOR_SYSTEM},
+            {'role': 'user', 'content': f'Question: {question}\nMemories: {json.dumps(candidates[:20], ensure_ascii=False)}'},
+        ], 'response_format': {'type': 'json_object'}, 'temperature': 0})
+        allowed = {item.get('id') for item in candidates}
+        if result.ok:
+            try:
+                parsed = json.loads(str((result.first_message() or {}).get('content') or '{}'))
+                return [item for item in parsed.get('ids', []) if isinstance(item, str) and item in allowed][:6]
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+        terms = set(re.findall(r'[a-z0-9_.-]{2,}|[\u4e00-\u9fff]{2,}', question.lower()))
+        terms.update(block[index:index + 2] for block in re.findall(r'[\u4e00-\u9fff]{3,}', question) for index in range(len(block) - 1))
+        return [
+            str(item['id']) for item in candidates
+            if terms and any(term in f"{item.get('title', '')} {item.get('content', '')}".lower() for term in terms)
+        ][:3]
+
+    def summarize_memory(self, title: str, messages: list[dict[str, str]]) -> str:
+        visible = [
+            {'role': item.get('role'), 'content': str(item.get('content') or '')[:1600]}
+            for item in messages[-20:] if item.get('role') in {'user', 'assistant'}
+        ]
+        result = self.llm.chat({'messages': [
+            {'role': 'system', 'content': MEMORY_SUMMARIZER_SYSTEM},
+            {'role': 'user', 'content': f'Title: {title}\nConversation: {json.dumps(visible, ensure_ascii=False)}'},
+        ], 'temperature': 0.2})
+        if result.ok:
+            text = str((result.first_message() or {}).get('content') or '').strip()
+            if text:
+                return text[:1800]
+        user_items = [item['content'] for item in visible if item['role'] == 'user']
+        return ('；'.join(user_items[-4:]) or title)[:800]
 
     def plan_local_file_reads(self, question: str, files: list[dict[str, Any]]) -> list[str]:
         """Choose candidate paths before the read-only local-file tool reads bytes."""

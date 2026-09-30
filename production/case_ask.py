@@ -391,13 +391,14 @@ class CaseQuestionAgent:
 
     @staticmethod
     def _failed_answer(question: str, result, observations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        reason = result.error_code or result.error_type or '模型服务暂不可用'
         return {
             'question': question,
-            'answer': 'The Case question could not be answered because the LLM call failed.',
-            'rationale': result.error_code or 'llm_error',
+            'answer': f'已定位到该 Case，但暂时无法生成查询回答：{reason}。请稍后重试。',
+            'rationale': reason,
             'used_evidence': [],
             'used_tools': [],
-            'safe_next_steps': ['Use case show or eval case to inspect the current Case state manually.'],
+            'safe_next_steps': ['稍后重试，或在 Case 工作台查看当前状态和执行轨迹。'],
             'observations': observations or [],
             'llm': result.telemetry(),
         }

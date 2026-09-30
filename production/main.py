@@ -2,6 +2,7 @@
 from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import hashlib, hmac, json
 from pathlib import Path
 from typing import Any, Literal
@@ -15,11 +16,11 @@ from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from .config import connection_value, save_local_file_read_enabled, save_runtime_connections, secret_configured, settings
+from .config import connection_value, save_runtime_connections, secret_configured, settings
 from .database import create_database_engine, is_sqlite_url
 from .approval_state import approval_is_expired, utc_now
 from .migrations import apply_migrations
-from .models import AuditLog, Base, Approval, Case, Event, Invocation, LogisticsLane, Operator, Task
+from .models import AuditLog, Base, Approval, Case, ChatMemory, ChatMessage, ChatSession, Event, Invocation, LogisticsLane, Operator, Task
 from .runtime_status import build_runtime_status
 from .tool_trace import build_tool_trace
 from .erpnext import ERPNextAdapter
@@ -30,6 +31,7 @@ from .operator_chat import OperatorChatAgent
 from .analytics import AnalyticsAgent, AnalyticsQueryError, is_analytics_question
 from .chat_attachments import AttachmentError, ChatAttachment, decode_attachments
 from .local_file_tool import LocalFileReadTool, is_local_file_question
+from .chat_sessions import active_memories, add_message, delete_session, message_out, recent_history, redact, session_for_identity, session_out, update_summary
 from .tools import BusinessReadTools
 from .events import emit
 
@@ -64,6 +66,7 @@ class CaseAskIn(BaseModel):
 class OperatorChatIn(BaseModel):
     question: str = Field(min_length=1, max_length=1000)
     history: list[dict[str, str]] = Field(default_factory=list)
+    session_id: str | None = Field(default=None, max_length=64)
 
 class ChatAttachmentIn(BaseModel):
     filename: str = Field(min_length=1, max_length=260)
@@ -73,8 +76,14 @@ class ChatAttachmentIn(BaseModel):
 class OperatorChatAttachmentIn(OperatorChatIn):
     attachments: list[ChatAttachmentIn] = Field(min_length=1, max_length=5)
 
-class LocalFileReadAccessIn(BaseModel):
-    enabled: bool
+class ChatSessionCreateIn(BaseModel):
+    title: str | None = Field(default=None, max_length=160)
+
+class ChatSessionRenameIn(BaseModel):
+    title: str = Field(min_length=1, max_length=160)
+
+class ChatSessionDeleteIn(BaseModel):
+    delete_memory: bool = False
 
 class AnalyticsQueryIn(BaseModel):
     question: str = Field(min_length=3, max_length=1000)
@@ -1104,7 +1113,7 @@ def create_case(payload: CaseCreateIn, x_operator_key:str|None=Header(default=No
 def ask_case(case_id:str, payload: CaseAskIn, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
     with Session(engine) as db:
         identity=operator_identity_from_db(db,x_operator_key)
-        case=db.get(Case,case_id)
+        case=db.scalar(select(Case).where(Case.id == case_id, Case.tenant_id == identity.tenant_id))
         if not case:
             raise HTTPException(404,'case not found')
         context=CaseContextBuilder(db).build(case_id, {'reason':'operator_case_question'})
@@ -1151,61 +1160,176 @@ def ask_case(case_id:str, payload: CaseAskIn, x_operator_key:str|None=Header(def
             **answer,
         }
 
-def _answer_operator_chat(db: Session, identity: OperatorIdentity, payload: OperatorChatIn, attachments: list[ChatAttachment] | None = None):
+def _first_case_id(question: str) -> str | None:
+    import re
+    # ``\b`` is Unicode-aware in Python: a Chinese character immediately before
+    # a UUID counts as a word character, so ``查看<uuid>`` was not detected.
+    # Restrict the guards to UUID characters instead, which accepts natural
+    # Chinese, punctuation and parentheses around a Case ID.
+    match = re.search(
+        r'(?<![0-9A-Za-z-])[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}(?![0-9A-Za-z-])',
+        question,
+    )
+    return match.group(0) if match else None
+
+
+def _case_id_from_business_reference(db: Session, identity: OperatorIdentity, question: str) -> str | None:
+    """Resolve an unambiguous order/source-event reference within this tenant."""
+    question_folded = question.casefold()
+    candidates = list(db.scalars(
+        select(Case).where(Case.tenant_id == identity.tenant_id).order_by(Case.updated_at.desc()).limit(200)
+    ).all())
+    matches = [
+        case for case in candidates
+        if case.order_id.casefold() in question_folded
+        or (case.source_event_id and case.source_event_id.casefold() in question_folded)
+    ]
+    # The chat must not guess if a reference maps to more than one Case.
+    return matches[0].id if len(matches) == 1 else None
+
+
+def _session_detail(db: Session, session: ChatSession) -> dict[str, Any]:
+    messages = list(db.scalars(
+        select(ChatMessage).where(ChatMessage.session_id == session.id).order_by(ChatMessage.created_at)
+    ).all())
+    memory = db.scalar(select(ChatMemory).where(ChatMemory.session_id == session.id))
+    references = [message.references or {} for message in messages]
+    attachments = [attachment for message in messages for attachment in (message.attachments or [])]
+    case_ids = list(dict.fromkeys(str(ref['case_id']) for ref in references if ref.get('case_id')))
+    memory_ids = list(dict.fromkeys(str(memory_id) for ref in references for memory_id in (ref.get('memory_ids') or [])))
+    local_file_read_count = sum(int(ref.get('local_file_read_count') or 0) for ref in references)
+    return {
+        **session_out(session, message_count=len(messages), memory=memory),
+        'messages': [message_out(message) for message in messages],
+        'context': {
+            'summary': session.summary or '尚未形成会话摘要。',
+            'case_ids': case_ids,
+            'attachments': attachments,
+            'local_file_read_count': local_file_read_count,
+            'memory_ids': memory_ids,
+            'memory_saved': memory is not None,
+        },
+    }
+
+
+def _case_answer_from_chat(db: Session, identity: OperatorIdentity, question: str, case_id: str) -> dict[str, Any] | None:
+    case = db.scalar(select(Case).where(Case.id == case_id, Case.tenant_id == identity.tenant_id))
+    if not case:
+        return None
+    context = CaseContextBuilder(db).build(case.id, {'reason': 'operator_chat_case_question'})
+    isolation = validate_case_context_isolation(context)
+    if not isolation['allowed']:
+        raise HTTPException(409, {'error': 'context_isolation_failed', 'isolation': isolation})
+    tools = BusinessReadTools(ERPNextAdapter(settings.erpnext_base_url, settings.erpnext_api_key, settings.erpnext_api_secret), case.event_type)
+
+    # A main-chat read must not append operational events to the Case trace.
+    # The normal audit record below remains sufficient for accountability.
+    def record_observation(_observation: dict[str, Any]) -> None:
+        return None
+    answer = CaseQuestionAgent(tools).answer(
+        order_id=case.order_id, question=question, case_context=context, on_observation=record_observation,
+    )
+    return {
+        'question': question, 'route': 'case', 'case_id': case.id, 'status': case.status,
+        'event_type': case.event_type, 'order_id': case.order_id, **answer,
+    }
+
+
+def _selected_chat_memories(db: Session, identity: OperatorIdentity, session: ChatSession | None, question: str, agent: OperatorChatAgent) -> list[dict[str, str]]:
+    if session is None or not hasattr(agent, 'select_relevant_memories'):
+        return []
+    candidates = active_memories(db, tenant_id=identity.tenant_id, subject=identity.subject, exclude_session_id=session.id)
+    public = [{'id': item.id, 'title': item.title, 'content': item.content} for item in candidates]
+    selected_ids = set(agent.select_relevant_memories(question, public))
+    return [item for item in public if item['id'] in selected_ids]
+
+
+def _answer_operator_chat(
+    db: Session,
+    identity: OperatorIdentity,
+    payload: OperatorChatIn,
+    attachments: list[ChatAttachment] | None = None,
+    session: ChatSession | None = None,
+):
     attachments = attachments or []
+    uploaded_metadata = [attachment.audit_metadata() for attachment in attachments]
+    history = recent_history(db, session.id) if session else payload.history
+    if session:
+        if session.title == '新对话' and not history:
+            session.title = payload.question.strip().replace('\n', ' ')[:32] or '新对话'
+        add_message(db, session, role='user', content=payload.question, attachments=uploaded_metadata)
+
     local_file_selection: dict[str, Any] | None = None
-    if not attachments and settings.local_file_read_enabled and is_local_file_question(payload.question):
+    agent = OperatorChatAgent()
+    if not attachments and is_local_file_question(payload.question):
         local_tool = LocalFileReadTool()
         candidates = local_tool.find_candidates(payload.question)
         if candidates:
-            selected_paths = OperatorChatAgent().plan_local_file_reads(
-                payload.question, [candidate.to_public() for candidate in candidates],
-            )
+            selected_paths = agent.plan_local_file_reads(payload.question, [candidate.to_public() for candidate in candidates])
             attachments = local_tool.read_selected(candidates, selected_paths)
             local_file_selection = {
-                'candidate_count': len(candidates),
-                'selected_paths': selected_paths,
-                'read_count': len(attachments),
+                'candidate_count': len(candidates), 'selected_paths': selected_paths, 'read_count': len(attachments),
             }
-    if not attachments and is_analytics_question(payload.question):
+
+    result: dict[str, Any]
+    case_id = _first_case_id(payload.question) if not attachments else None
+    if not case_id and not attachments:
+        case_id = _case_id_from_business_reference(db, identity, payload.question)
+    if case_id:
+        result = _case_answer_from_chat(db, identity, payload.question, case_id) or {}
+        if not result:
+            result = {'question': payload.question, 'route': 'chat', 'source': 'system', 'tools_used': [],
+                      'answer': '当前租户中没有找到这个 Case，或你没有查看它的权限。请检查 Case ID 是否完整。'}
+    elif not attachments and is_analytics_question(payload.question):
         try:
-            result = AnalyticsAgent().run(question=payload.question, db=db, tenant_id=identity.tenant_id)
+            analytics_result = AnalyticsAgent().run(question=payload.question, db=db, tenant_id=identity.tenant_id)
         except AnalyticsQueryError as exc:
             audit(db, identity, 'analytics_query_rejected', 'operator_chat', identity.subject, {
                 'question': payload.question, 'reason': str(exc), 'route': 'analytics',
             })
             db.commit()
             raise HTTPException(422, str(exc)) from exc
-        audit(db, identity, 'analytics_query_executed', 'operator_chat', identity.subject, {
-            'question': payload.question, 'sql': result.sql, 'row_count': result.row_count,
-            'truncated': result.truncated, 'llm': result.llm, 'route': 'analytics',
-        })
-        db.commit()
-        return {
-            'question': payload.question, 'answer': result.answer, 'route': 'analytics',
-            'source': 'analytics', 'sql': result.sql, 'rows': result.rows,
-            'row_count': result.row_count, 'truncated': result.truncated, 'llm': result.llm,
+        result = {
+            'question': payload.question, 'answer': analytics_result.answer, 'route': 'analytics',
+            'source': 'analytics', 'sql': analytics_result.sql, 'rows': analytics_result.rows,
+            'row_count': analytics_result.row_count, 'truncated': analytics_result.truncated, 'llm': analytics_result.llm,
         }
-    answer=OperatorChatAgent().answer(payload.question, history=payload.history, attachments=attachments)
-    answer['route'] = 'chat'
-    audit(db,identity,'operator_chat_answered','operator_chat',identity.subject,{
-        'question':payload.question,
-        'history_items':len(payload.history or []),
-        'source':answer.get('source'),
-        'tools_used':answer.get('tools_used') or [],
-        'attachments':[attachment.audit_metadata() for attachment in attachments],
-        'local_file_selection': local_file_selection,
-        'llm':answer.get('llm') or {},
-    })
+    else:
+        memories = _selected_chat_memories(db, identity, session, payload.question, agent)
+        kwargs: dict[str, Any] = {'history': history}
+        if attachments:
+            kwargs['attachments'] = attachments
+        if memories:
+            kwargs['memories'] = memories
+        result = agent.answer(payload.question, **kwargs)
+        result['route'] = 'chat'
+
+    references = {
+        'case_id': result.get('case_id'),
+        'memory_ids': result.get('memory_ids') or [],
+        'local_file_read_count': (local_file_selection or {}).get('read_count', 0),
+    }
+    audit(db, identity, 'operator_chat_answered', 'operator_chat', session.id if session else identity.subject, {
+        'question': payload.question, 'history_items': len(history or []), 'source': result.get('source'),
+        'route': result.get('route'), 'tools_used': result.get('used_tools') or [],
+        'attachments': uploaded_metadata, 'local_file_selection': local_file_selection, 'llm': result.get('llm') or {},
+    }, case_id=result.get('case_id'))
+    if session:
+        add_message(db, session, role='assistant', content=result.get('answer') or '未获得回答。', route=result.get('route'), references=references)
+        update_summary(session, recent_history(db, session.id, limit=8))
+        result['session'] = _session_detail(db, session)
     db.commit()
-    return answer
+    return result
 
 
 @app.post('/v1/chat')
 def operator_chat(payload: OperatorChatIn, x_operator_key:str|None=Header(default=None), x_operator:str|None=Header(default=None), x_operator_role:str|None=Header(default=None)):
     with Session(engine) as db:
         identity=operator_identity_from_db(db,x_operator_key)
-        return _answer_operator_chat(db, identity, payload)
+        session = session_for_identity(db, payload.session_id, tenant_id=identity.tenant_id, subject=identity.subject) if payload.session_id else None
+        if payload.session_id and session is None:
+            raise HTTPException(404, 'chat session not found')
+        return _answer_operator_chat(db, identity, payload, session=session)
 
 
 @app.post('/v1/chat/attachments')
@@ -1216,28 +1340,96 @@ def operator_chat_with_attachments(payload: OperatorChatAttachmentIn, x_operator
         raise HTTPException(422, str(exc)) from exc
     with Session(engine) as db:
         identity = operator_identity_from_db(db, x_operator_key)
-        return _answer_operator_chat(db, identity, payload, attachments)
+        session = session_for_identity(db, payload.session_id, tenant_id=identity.tenant_id, subject=identity.subject) if payload.session_id else None
+        if payload.session_id and session is None:
+            raise HTTPException(404, 'chat session not found')
+        return _answer_operator_chat(db, identity, payload, attachments, session=session)
 
-
-@app.get('/v1/local-files/access')
-def local_file_read_access(x_operator_key: str | None = Header(default=None)):
+@app.get('/v1/chat/sessions')
+def list_chat_sessions(x_operator_key: str | None = Header(default=None)):
     with Session(engine) as db:
         identity = operator_identity_from_db(db, x_operator_key)
-        require_role(identity, 'ops_admin', 'config_admin')
-    return {'enabled': settings.local_file_read_enabled, 'mode': 'read_only'}
+        sessions = list(db.scalars(select(ChatSession).where(
+            ChatSession.tenant_id == identity.tenant_id, ChatSession.operator_subject == identity.subject,
+        ).order_by(ChatSession.updated_at.desc()).limit(100)).all())
+        memories = {item.session_id: item for item in db.scalars(select(ChatMemory).where(
+            ChatMemory.tenant_id == identity.tenant_id, ChatMemory.operator_subject == identity.subject,
+        )).all()}
+        return [session_out(item, message_count=db.scalar(select(func.count(ChatMessage.id)).where(ChatMessage.session_id == item.id)) or 0, memory=memories.get(item.id)) for item in sessions]
 
 
-@app.put('/v1/local-files/access')
-def update_local_file_read_access(payload: LocalFileReadAccessIn, x_operator_key: str | None = Header(default=None)):
+@app.post('/v1/chat/sessions')
+def create_chat_session(payload: ChatSessionCreateIn, x_operator_key: str | None = Header(default=None)):
     with Session(engine) as db:
         identity = operator_identity_from_db(db, x_operator_key)
-        require_role(identity, 'ops_admin', 'config_admin')
-        enabled = save_local_file_read_enabled(payload.enabled)
-        audit(db, identity, 'local_file_read_access_updated', 'runtime_configuration', 'local', {
-            'enabled': enabled, 'mode': 'read_only',
-        })
+        session = ChatSession(tenant_id=identity.tenant_id, operator_subject=identity.subject, title=(payload.title or '新对话').strip()[:160] or '新对话')
+        db.add(session); db.flush(); audit(db, identity, 'chat_session_created', 'chat_session', session.id, {}); db.commit()
+        return _session_detail(db, session)
+
+
+@app.get('/v1/chat/sessions/{session_id}')
+def get_chat_session(session_id: str, x_operator_key: str | None = Header(default=None)):
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        session = session_for_identity(db, session_id, tenant_id=identity.tenant_id, subject=identity.subject)
+        if not session: raise HTTPException(404, 'chat session not found')
+        return _session_detail(db, session)
+
+
+@app.patch('/v1/chat/sessions/{session_id}')
+def rename_chat_session(session_id: str, payload: ChatSessionRenameIn, x_operator_key: str | None = Header(default=None)):
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        session = session_for_identity(db, session_id, tenant_id=identity.tenant_id, subject=identity.subject)
+        if not session: raise HTTPException(404, 'chat session not found')
+        session.title = payload.title.strip(); audit(db, identity, 'chat_session_renamed', 'chat_session', session.id, {}); db.commit()
+        return _session_detail(db, session)
+
+
+@app.delete('/v1/chat/sessions/{session_id}')
+def remove_chat_session(session_id: str, payload: ChatSessionDeleteIn, x_operator_key: str | None = Header(default=None)):
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        session = session_for_identity(db, session_id, tenant_id=identity.tenant_id, subject=identity.subject)
+        if not session: raise HTTPException(404, 'chat session not found')
+        delete_session(db, session, delete_memory=payload.delete_memory)
+        audit(db, identity, 'chat_session_deleted', 'chat_session', session_id, {'delete_memory': payload.delete_memory})
         db.commit()
-    return {'enabled': enabled, 'mode': 'read_only'}
+    return None
+
+
+@app.post('/v1/chat/sessions/{session_id}/memory')
+def persist_chat_memory(session_id: str, x_operator_key: str | None = Header(default=None)):
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        session = session_for_identity(db, session_id, tenant_id=identity.tenant_id, subject=identity.subject)
+        if not session: raise HTTPException(404, 'chat session not found')
+        messages = recent_history(db, session.id, limit=30)
+        content = redact(OperatorChatAgent().summarize_memory(session.title, messages)) or session.title
+        memory = db.scalar(select(ChatMemory).where(ChatMemory.session_id == session.id))
+        if memory is None:
+            memory = ChatMemory(session_id=session.id, tenant_id=identity.tenant_id, operator_subject=identity.subject, title=session.title, content=content)
+            db.add(memory)
+        else:
+            memory.title, memory.content = session.title, content
+        session.memory_saved_at = datetime.now(UTC)
+        audit(db, identity, 'chat_memory_persisted', 'chat_session', session.id, {})
+        db.commit()
+        return _session_detail(db, session)
+
+
+@app.delete('/v1/chat/sessions/{session_id}/memory')
+def remove_chat_memory(session_id: str, x_operator_key: str | None = Header(default=None)):
+    with Session(engine) as db:
+        identity = operator_identity_from_db(db, x_operator_key)
+        session = session_for_identity(db, session_id, tenant_id=identity.tenant_id, subject=identity.subject)
+        if not session: raise HTTPException(404, 'chat session not found')
+        memory = db.scalar(select(ChatMemory).where(ChatMemory.session_id == session.id))
+        if memory: db.delete(memory)
+        session.memory_saved_at = None
+        audit(db, identity, 'chat_memory_deleted', 'chat_session', session.id, {})
+        db.commit()
+        return _session_detail(db, session)
 
 @app.post('/v1/chat/stream')
 def operator_chat_stream(payload: OperatorChatIn, x_operator_key:str|None=Header(default=None)):
@@ -1295,7 +1487,7 @@ def ask_case_stream(case_id:str, payload: CaseAskIn, x_operator_key:str|None=Hea
     """SSE Case Q&A: server-controlled read tools, streamed final answer."""
     with Session(engine) as db:
         identity=operator_identity_from_db(db, x_operator_key)
-        case=db.get(Case, case_id)
+        case=db.scalar(select(Case).where(Case.id == case_id, Case.tenant_id == identity.tenant_id))
         if not case:
             raise HTTPException(404, 'case not found')
         context=CaseContextBuilder(db).build(case_id, {'reason':'operator_case_question_stream'})

@@ -93,6 +93,45 @@ class Operator(Base):
     status: Mapped[str]=mapped_column(String(20), default='active', index=True)
     created_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), server_default=func.now())
 
+
+class ChatSession(Base):
+    """An operator-owned conversation.  Sessions never cross a tenant boundary."""
+    __tablename__ = 'chat_sessions'
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
+    tenant_id: Mapped[str] = mapped_column(String(80), index=True)
+    operator_subject: Mapped[str] = mapped_column(String(140), index=True)
+    title: Mapped[str] = mapped_column(String(160), default='新对话')
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    memory_saved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ChatMessage(Base):
+    """Durable visible messages; attachment bytes are deliberately excluded."""
+    __tablename__ = 'chat_messages'
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
+    session_id: Mapped[str] = mapped_column(String, index=True)
+    role: Mapped[str] = mapped_column(String(20))
+    content: Mapped[str] = mapped_column(Text)
+    route: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    references: Mapped[dict] = mapped_column(JSON, default=dict)
+    attachments: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChatMemory(Base):
+    """A user-approved, compact summary of a conversation for optional recall."""
+    __tablename__ = 'chat_memories'
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
+    session_id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(80), index=True)
+    operator_subject: Mapped[str] = mapped_column(String(140), index=True)
+    title: Mapped[str] = mapped_column(String(160))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
 class CaseLesson(Base):
     __tablename__='case_lessons'
     id: Mapped[str]=mapped_column(String, primary_key=True, default=lambda:str(uuid4()))

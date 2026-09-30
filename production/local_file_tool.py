@@ -52,9 +52,14 @@ class LocalFileCandidate:
 
 def is_local_file_question(question: str) -> bool:
     normalized = question.lower()
+    # Asking about the feature itself must not trigger a disk scan.  A scan is
+    # reserved for a request to work with an actual local document or folder.
+    meta_markers = ('工具', '权限', '怎么用', '怎么问', '如何用', '如何读取', '如何读', '能不能', '是否', '原理', '实现', '功能', '开启', '启用')
+    if any(marker in normalized for marker in meta_markers) and not re.search(r'[a-z]:[\\/]', normalized):
+        return False
     markers = ('文件', '文件夹', '目录', '电脑', '本地', '桌面', '下载', '文档', 'pdf', 'word', 'excel', 'xlsx', '照片', '图片', 'image')
-    actions = ('读取', '读', '查看', '找', '搜索', '分析', '总结', '整理', '打开', '检索')
-    return any(marker in normalized for marker in markers) and any(action in normalized for action in actions)
+    actions = ('读取', '读', '查看', '找', '搜索', '分析', '总结', '整理', '打开', '检索', '帮我')
+    return bool(re.search(r'[a-z]:[\\/]', normalized)) or (any(marker in normalized for marker in markers) and any(action in normalized for action in actions))
 
 
 def _content_type(suffix: str) -> str:

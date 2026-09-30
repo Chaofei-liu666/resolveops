@@ -1,4 +1,4 @@
-const state = { activeView: 'dashboard', cases: [], selectedCaseId: null, selectedDetail: null, runtime: null, identity: null, tracePoller: null, tracePollBusy: false, chatHistory: [], chatAttachments: [], localFileReadEnabled: false };
+const state = { activeView: 'dashboard', cases: [], selectedCaseId: null, selectedDetail: null, runtime: null, identity: null, tracePoller: null, tracePollBusy: false, chatSessions: [], activeChatSession: null, chatAttachments: [], chatMenuSessionId: null };
 const $ = (selector) => document.querySelector(selector);
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const key = () => localStorage.getItem('resolveops.operatorKey') || '';
@@ -73,7 +73,7 @@ function activate(view) {
   const names = { chat: ['RESOLVEOPS ASSISTANT', '主对话'], dashboard: ['运营总览', '订单异常工作台'], cases: ['CASE WORKSPACE', 'Case 工作台'], approvals: ['HUMAN-IN-THE-LOOP', '待审批'], traces: ['TRACE / EVENTS', '执行轨迹'], settings: ['LOCAL CONFIGURATION', '系统配置'] };
   $('#page-eyebrow').textContent = names[view][0]; $('#page-title').textContent = names[view][1];
   if (view === 'settings') loadSettings();
-  if (view === 'chat') renderChatContext();
+  if (view === 'chat') { renderChatContext(); if (key() && state.identity) loadChatSessions(); }
   if (view === 'traces') { renderTrace(); syncTracePolling(); }
   else stopTracePolling();
 }
@@ -238,18 +238,102 @@ function appendChatMessage(role, content, payload = null) {
 }
 
 function renderChatContext() {
-  $('#chat-case-context').textContent = String(state.cases.length);
-  $('#chat-approval-context').textContent = String(pendingApprovals().length);
-  $('#chat-file-context').textContent = state.localFileReadEnabled ? '本地文件工具已开启：仅执行读取。' : '本地文件工具未开启';
+  const session = state.activeChatSession;
+  const context = session?.context || {};
+  $('#chat-summary').textContent = context.summary || '尚未形成摘要。';
+  $('#chat-message-context').textContent = String(session?.message_count || 0);
+  $('#chat-case-context').textContent = String((context.case_ids || []).length);
+  $('#chat-file-context').textContent = String((context.attachments || []).length + Number(context.local_file_read_count || 0));
+  $('#chat-memory-context').textContent = context.memory_saved ? '已存入长期记忆' : '未存入长期记忆';
 }
 
-function startNewChat() {
-  state.chatHistory = []; state.chatAttachments = [];
-  $('#chat-messages').innerHTML = '';
-  appendChatMessage('assistant', '新会话已开始。你可以问项目设计、Case 运营数据，或让我分析文件和本地资料。');
-  $('#chat-title').textContent = '当前任务'; $('#chat-subtitle').textContent = '新会话等待首次提问';
-  $('#conversation-list').innerHTML = '<button class="conversation-item is-active" type="button"><strong>当前任务</strong><span>可询问项目、Case 与本地资料</span><small>刚刚</small></button>';
-  renderChatAttachments(); renderChatContext(); $('#chat-question').focus();
+function renderChatMessages() {
+  const messages = $('#chat-messages'); messages.innerHTML = '';
+  const records = state.activeChatSession?.messages || [];
+  if (!records.length) appendChatMessage('assistant', '你好。可以直接问项目实现、运营数据，或粘贴一个 Case ID 查看它的状态、计划和审批轨迹。');
+  else records.forEach((message) => appendChatMessage(message.role, message.content));
+}
+
+function renderChatSessions() {
+  const list = $('#conversation-list');
+  if (!state.chatSessions.length) {
+    list.innerHTML = '<div class="empty-inline"><strong>暂无会话</strong><span>点击右上角 + 开始新的对话。</span></div>';
+    return;
+  }
+  list.innerHTML = state.chatSessions.map((session) => `<button class="conversation-item ${session.id === state.activeChatSession?.id ? 'is-active' : ''}" type="button" data-chat-session="${esc(session.id)}"><strong>${esc(session.title || '新对话')}</strong><span>${esc(session.summary || '等待首次提问')}</span><small>${esc(dateText(session.updated_at))}${session.memory_saved ? ' · 已记忆' : ''}</small></button>`).join('');
+  document.querySelectorAll('[data-chat-session]').forEach((button) => {
+    button.addEventListener('click', () => loadChatSession(button.dataset.chatSession));
+    button.addEventListener('contextmenu', (event) => { event.preventDefault(); openConversationMenu(button.dataset.chatSession, event.clientX, event.clientY); });
+  });
+}
+
+function applyChatSession(session) {
+  state.activeChatSession = session;
+  const index = state.chatSessions.findIndex((item) => item.id === session.id);
+  const summary = { ...session }; delete summary.messages; delete summary.context;
+  if (index >= 0) state.chatSessions[index] = { ...state.chatSessions[index], ...summary };
+  else state.chatSessions.unshift(summary);
+  state.chatSessions.sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+  $('#chat-title').textContent = session.title || '新对话';
+  $('#chat-subtitle').textContent = session.message_count ? '' : '直接提问即可';
+  renderChatSessions(); renderChatMessages(); renderChatContext();
+}
+
+async function loadChatSessions() {
+  if (!key() || !state.identity) return;
+  try {
+    state.chatSessions = await api('/v1/chat/sessions');
+    const target = state.activeChatSession?.id && state.chatSessions.find((item) => item.id === state.activeChatSession.id);
+    if (target) await loadChatSession(target.id, false);
+    else if (state.chatSessions[0]) await loadChatSession(state.chatSessions[0].id, false);
+    else { state.activeChatSession = null; renderChatSessions(); renderChatMessages(); renderChatContext(); }
+  } catch (_) { /* The API status already explains authentication failures. */ }
+}
+
+async function loadChatSession(sessionId, focus = false) {
+  if (!sessionId) return;
+  try { applyChatSession(await api(`/v1/chat/sessions/${encodeURIComponent(sessionId)}`)); if (focus) $('#chat-question').focus(); }
+  catch (error) { window.alert(`无法打开会话：${error.message}`); }
+}
+
+async function startNewChat() {
+  if (!key() || !state.identity) { openIdentityDialog(); return; }
+  try { applyChatSession(await api('/v1/chat/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })); state.chatAttachments = []; renderChatAttachments(); $('#chat-question').focus(); }
+  catch (error) { window.alert(`无法新建会话：${error.message}`); }
+}
+
+function closeConversationMenu() { $('#conversation-menu').hidden = true; state.chatMenuSessionId = null; }
+function openConversationMenu(sessionId, x, y) {
+  const menu = $('#conversation-menu'); const session = state.chatSessions.find((item) => item.id === sessionId);
+  if (!session) return;
+  if (!menu.hidden && state.chatMenuSessionId === sessionId) { closeConversationMenu(); return; }
+  state.chatMenuSessionId = sessionId;
+  menu.querySelector('[data-chat-action="memory"]').textContent = session.memory_saved ? '取消持久化记忆' : '存入长期记忆';
+  menu.style.left = `${Math.min(x, window.innerWidth - 164)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - 140)}px`;
+  menu.hidden = false;
+}
+
+async function runConversationAction(action) {
+  const sessionId = state.chatMenuSessionId; const session = state.chatSessions.find((item) => item.id === sessionId);
+  closeConversationMenu(); if (!session) return;
+  try {
+    if (action === 'rename') {
+      const title = window.prompt('会话名称', session.title || '新对话'); if (!title?.trim()) return;
+      applyChatSession(await api(`/v1/chat/sessions/${encodeURIComponent(sessionId)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: title.trim() }) }));
+    } else if (action === 'memory') {
+      const method = session.memory_saved ? 'DELETE' : 'POST';
+      applyChatSession(await api(`/v1/chat/sessions/${encodeURIComponent(sessionId)}/memory`, { method }));
+    } else if (action === 'delete') {
+      if (!window.confirm(`删除“${session.title}”吗？`)) return;
+      const deleteMemory = session.memory_saved && window.confirm('此会话已有长期记忆。是否同时删除长期记忆？');
+      await api(`/v1/chat/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ delete_memory: Boolean(deleteMemory) }) });
+      state.chatSessions = state.chatSessions.filter((item) => item.id !== sessionId);
+      if (state.activeChatSession?.id === sessionId) state.activeChatSession = null;
+      renderChatSessions(); renderChatMessages(); renderChatContext();
+      if (!state.activeChatSession && state.chatSessions[0]) await loadChatSession(state.chatSessions[0].id);
+    }
+  } catch (error) { window.alert(`操作未完成：${error.message}`); }
 }
 
 function fileSize(size) { return size >= 1024 * 1024 ? `${(size / (1024 * 1024)).toFixed(1)} MB` : `${Math.ceil(size / 1024)} KB`; }
@@ -283,28 +367,6 @@ function chooseChatFiles(event) {
   renderChatAttachments();
 }
 
-async function loadLocalFileAccess() {
-  const button = $('#local-file-access'); const status = $('#local-file-status');
-  if (!key() || !state.identity) { button.disabled = true; status.textContent = '先验证本地管理员身份后才能开启。'; return; }
-  try {
-    const payload = await api('/v1/local-files/access'); state.localFileReadEnabled = Boolean(payload.enabled);
-    button.disabled = false; button.textContent = state.localFileReadEnabled ? '关闭本地文件工具' : '开启本地文件工具';
-    status.textContent = state.localFileReadEnabled ? '已开启：Agent 可自行检索本机可读文件，且仅执行读取。' : '关闭：仅可分析手动上传的附件。';
-    renderChatContext();
-  } catch (_) {
-    button.disabled = true; status.textContent = '仅本地管理员可管理本地文件工具。';
-  }
-}
-
-async function toggleLocalFileAccess() {
-  const button = $('#local-file-access'); if (button.disabled) return;
-  const next = !state.localFileReadEnabled;
-  if (next && !window.confirm('开启后，Agent 可自行检索本机可读文档并读取相关文件。该工具只读，不会修改、删除或运行文件。是否开启？')) return;
-  button.disabled = true;
-  try { await api('/v1/local-files/access', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: next }) }); await loadLocalFileAccess(); }
-  catch (error) { window.alert(`无法更新本地文件工具：${error.message}`); await loadLocalFileAccess(); }
-}
-
 async function runChat(event) {
   event.preventDefault();
   if (!key() || !state.identity) {
@@ -313,19 +375,19 @@ async function runChat(event) {
   }
   const typedQuestion = $('#chat-question').value.trim(); const files = [...state.chatAttachments];
   if (!typedQuestion && !files.length) return;
+  if (!state.activeChatSession) await startNewChat();
+  if (!state.activeChatSession) return;
   const question = typedQuestion || '请分析我提供的文件。';
   const button = $('#chat-submit'); const original = button.textContent;
   const displayQuestion = files.length ? `${question}\n\n附件：${files.map((file) => file.name).join('、')}` : question;
   appendChatMessage('user', displayQuestion); $('#chat-question').value = ''; state.chatAttachments = []; renderChatAttachments();
-  $('#chat-title').textContent = question.length > 26 ? `${question.slice(0, 26)}…` : question; $('#chat-subtitle').textContent = '正在处理你的问题';
+  $('#chat-subtitle').textContent = '正在识别问题并准备回答';
   button.disabled = true; button.textContent = '处理中…';
   try {
     const payload = await api(files.length ? '/v1/chat/attachments' : '/v1/chat', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, history: state.chatHistory, ...(files.length ? { attachments: await Promise.all(files.map(filePayload)) } : {}) }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question, session_id: state.activeChatSession.id, ...(files.length ? { attachments: await Promise.all(files.map(filePayload)) } : {}) }),
     });
-    state.chatHistory.push({ role: 'user', content: question }, { role: 'assistant', content: payload.answer || '' });
-    state.chatHistory = state.chatHistory.slice(-12);
-    appendChatMessage('assistant', payload.answer || '未获得回答。', payload);
+    if (payload.session) applyChatSession(payload.session); else appendChatMessage('assistant', payload.answer || '未获得回答。', payload);
     $('#chat-subtitle').textContent = payload.route === 'analytics' ? '已完成只读运营分析' : '已完成回答';
   } catch (error) {
     appendChatMessage('assistant', `未完成：${error.message}`);
@@ -404,7 +466,7 @@ async function refreshData() {
     state.identity = await api('/v1/operator/me');
     state.cases = await api('/v1/cases?limit=50'); $('#case-count').textContent = state.cases.length;
     try { state.runtime = await api('/v1/runtime/status'); } catch (_) { state.runtime = null; }
-    setApiStatus(`已认证 · ${state.identity.role}`, 'ok'); renderDashboard(); renderCaseList(); renderApprovals(); await loadLocalFileAccess(); renderChatContext(); if (state.selectedCaseId) await selectCase(state.selectedCaseId, false); return state.identity;
+    setApiStatus(`已认证 · ${state.identity.role}`, 'ok'); renderDashboard(); renderCaseList(); renderApprovals(); await loadChatSessions(); renderChatContext(); if (state.selectedCaseId) await selectCase(state.selectedCaseId, false); return state.identity;
   } catch (error) { state.identity = null; setApiStatus('认证失败', 'bad'); $('#dashboard-cases').innerHTML = empty('无法读取 Case', error.message); return null; }
 }
 
@@ -419,6 +481,15 @@ $('#switch-identity').addEventListener('click', switchIdentity);
 $('#clear-key').addEventListener('click', () => { clearKey(); state.identity = null; $('#operator-key').value = ''; $('#identity-current').textContent = '已退出当前身份。'; setApiStatus('未认证', 'muted'); renderDashboard(); renderCaseList(); renderApprovals(); });
 $('#create-case-form').addEventListener('submit', createCase); $('#cancel-create-case').addEventListener('click', () => $('#create-case-dialog').close());
 $('#chat-form').addEventListener('submit', runChat);
-$('#chat-files').addEventListener('change', chooseChatFiles); $('#local-file-access').addEventListener('click', toggleLocalFileAccess);
-$('#new-chat').addEventListener('click', startNewChat); $('#clear-chat').addEventListener('click', startNewChat);
+$('#chat-files').addEventListener('change', chooseChatFiles);
+$('#new-chat').addEventListener('click', startNewChat);
+document.querySelectorAll('.chat-suggestion').forEach((button) => button.addEventListener('click', () => { $('#chat-question').value = button.dataset.chatPrompt || ''; $('#chat-question').focus(); }));
+document.querySelectorAll('[data-chat-action]').forEach((button) => button.addEventListener('click', () => runConversationAction(button.dataset.chatAction)));
+document.addEventListener('click', (event) => { if (!event.target.closest('#conversation-menu')) closeConversationMenu(); });
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') { closeConversationMenu(); return; }
+  if (event.target !== $('#chat-question') || event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+  event.preventDefault();
+  $('#chat-form').requestSubmit();
+});
 if (key()) refreshData(); else { renderDashboard(); renderCaseList(); renderApprovals(); }
