@@ -15,6 +15,8 @@ from production.main import (
     remove_chat_session,
 )
 from production.models import Base, Case, ChatMemory, ChatMessage, Operator
+from production.erpnext import ERPNextAdapter
+from production.tool_result import ToolResult
 from production.local_file_tool import is_local_file_question
 
 
@@ -214,6 +216,55 @@ def test_main_chat_reads_an_explicit_erp_order_without_a_local_case(monkeypatch)
     assert result['route'] == 'erpnext'
     assert 'ERPNext 实时订单信息' in result['answer']
     assert '测试客户' in result['answer']
+
+
+def test_erp_adapter_lists_warehouses_with_a_shaped_read_request(monkeypatch):
+    adapter = ERPNextAdapter('http://erp.example', 'key', 'secret')
+    captured = {}
+
+    def fake_get(path, params=None):
+        captured['path'] = path
+        captured['params'] = params
+        return [{'name': '主仓', 'disabled': 0}]
+
+    monkeypatch.setattr(adapter, '_get', fake_get)
+    assert adapter.warehouses(limit=500) == [{'name': '主仓', 'disabled': 0}]
+    assert captured['path'] == '/api/resource/Warehouse'
+    assert captured['params']['limit_page_length'] == 100
+
+
+def test_main_chat_reads_erp_warehouses_instead_of_explaining_capability(monkeypatch):
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(main_module, 'engine', engine)
+
+    class FakeERPWorkspaceReadTools:
+        def __init__(self, _adapter):
+            pass
+
+        def definitions(self):
+            return [{'type': 'function', 'function': {'name': 'list_warehouses'}}]
+
+        def execute_result(self, name, arguments, context_id):
+            assert (name, arguments, context_id) == ('list_warehouses', {}, '')
+            return ToolResult.success({'warehouses': [{'warehouse_name': '主仓'}, {'warehouse_name': '上海仓'}]})
+
+    class FakeCaseQuestionAgent:
+        def __init__(self, tools):
+            assert tools.definitions()[0]['function']['name'] == 'list_warehouses'
+
+        def answer(self, **_kwargs):
+            return {'answer': 'ERPNext 当前返回 2 个仓库。', 'used_tools': ['list_warehouses'], 'observations': []}
+
+    monkeypatch.setattr(main_module, 'ERPWorkspaceReadTools', FakeERPWorkspaceReadTools)
+    monkeypatch.setattr(main_module, 'CaseQuestionAgent', FakeCaseQuestionAgent)
+    _seed(engine)
+    created = create_chat_session(ChatSessionCreateIn(), x_operator_key='alice-key')
+    result = operator_chat(OperatorChatIn(question='有哪些仓库？', session_id=created['id']), x_operator_key='alice-key')
+
+    assert result['route'] == 'erpnext'
+    assert result['used_tools'] == ['list_warehouses']
+    assert '主仓' in result['answer']
 
 
 def test_local_file_router_does_not_scan_for_feature_questions():

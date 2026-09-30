@@ -30,6 +30,62 @@ class ERPNextAdapter:
     def sales_order(self, name: str) -> dict:
         return self._get(f'/api/resource/Sales Order/{name}')
 
+    def list_resource(
+        self,
+        doctype: str,
+        *,
+        fields: list[str],
+        filters: list[list[object]] | None = None,
+        order_by: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        """Read a bounded, explicitly shaped ERPNext resource collection."""
+        params: dict[str, object] = {
+            'fields': json.dumps(fields, ensure_ascii=False),
+            'limit_page_length': max(1, min(int(limit), 100)),
+        }
+        if filters:
+            params['filters'] = json.dumps(filters, ensure_ascii=False)
+        if order_by:
+            params['order_by'] = order_by
+        data = self._get(f'/api/resource/{doctype}', params)
+        return data if isinstance(data, list) else []
+
+    def warehouses(self, *, limit: int = 100) -> list[dict]:
+        return self.list_resource(
+            'Warehouse',
+            fields=['name', 'warehouse_name', 'parent_warehouse', 'is_group', 'disabled', 'company'],
+            order_by='modified desc', limit=limit,
+        )
+
+    def sales_orders(self, *, status: str | None = None, limit: int = 100) -> list[dict]:
+        filters = [['status', '=', status]] if status else None
+        return self.list_resource(
+            'Sales Order',
+            fields=['name', 'customer', 'status', 'transaction_date', 'delivery_date', 'grand_total', 'currency', 'docstatus'],
+            filters=filters, order_by='modified desc', limit=limit,
+        )
+
+    def customers(self, *, limit: int = 100) -> list[dict]:
+        return self.list_resource(
+            'Customer', fields=['name', 'customer_name', 'customer_group', 'territory', 'disabled'],
+            order_by='modified desc', limit=limit,
+        )
+
+    def items(self, *, limit: int = 100) -> list[dict]:
+        return self.list_resource(
+            'Item', fields=['name', 'item_name', 'item_group', 'stock_uom', 'disabled', 'is_stock_item'],
+            order_by='modified desc', limit=limit,
+        )
+
+    def purchase_orders(self, *, status: str | None = None, limit: int = 100) -> list[dict]:
+        filters = [['status', '=', status]] if status else None
+        return self.list_resource(
+            'Purchase Order',
+            fields=['name', 'supplier', 'status', 'transaction_date', 'schedule_date', 'grand_total', 'currency', 'docstatus'],
+            filters=filters, order_by='modified desc', limit=limit,
+        )
+
     def resource_exists(self, doctype: str, name: str) -> dict:
         """Check whether a named ERPNext resource is readable by the API user."""
         try:

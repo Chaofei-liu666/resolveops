@@ -23,7 +23,7 @@ Your identity: a focused assistant for order fulfillment exceptions and related 
 Answer operator questions about exactly one business Case.
 You may handle normal conversation, conceptual explanations, short writing requests, and project questions when they do not require business tools or external real-time data. Keep the ResolveOps identity clear and naturally bring the operator back to the current Case when useful.
 If the operator asks for external real-time facts, state that no matching external tool is available instead of guessing. Do not use business tools for general conversation.
-You may call read-only business tools when the current Case context does not contain enough fresh evidence.
+You may call read-only business tools when the supplied context does not contain enough fresh evidence. The context can describe a Case or a direct ERPNext workspace inquiry; follow its scope and never invent a Case when there is none.
 Never execute writes, never approve actions, never claim that an ERP write happened unless the Case context contains invocation and verification evidence.
 Tool errors mean unknown, not negative business facts.
 Return JSON only with keys: answer, rationale, used_evidence, used_tools, safe_next_steps.
@@ -82,7 +82,7 @@ class CaseQuestionAgent:
             'temperature': 0,
         })
         if not first.ok:
-            return self._failed_answer(question, first)
+            return self._failed_answer(question, first, case_context=case_context)
 
         first_message = first.first_message() or {}
         messages.append(first_message)
@@ -157,7 +157,7 @@ class CaseQuestionAgent:
             'temperature': 0,
         })
         if not final.ok:
-            return self._failed_answer(question, final, observations)
+            return self._failed_answer(question, final, observations, case_context=case_context)
 
         parsed = self._parse_answer((final.first_message() or {}).get('content'))
         if parsed.get('parse_error'):
@@ -390,15 +390,25 @@ class CaseQuestionAgent:
         }
 
     @staticmethod
-    def _failed_answer(question: str, result, observations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def _failed_answer(
+        question: str,
+        result,
+        observations: list[dict[str, Any]] | None = None,
+        case_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         reason = result.error_code or result.error_type or '模型服务暂不可用'
+        scope = (case_context or {}).get('scope') if isinstance((case_context or {}).get('scope'), dict) else {}
+        is_workspace_read = scope.get('mode') == 'erpnext_workspace_read'
         return {
             'question': question,
-            'answer': f'已定位到该 Case，但暂时无法生成查询回答：{reason}。请稍后重试。',
+            'answer': (
+                f'ERPNext 查询暂时无法完成：{reason}。请稍后重试。'
+                if is_workspace_read else f'已定位到该 Case，但暂时无法生成查询回答：{reason}。请稍后重试。'
+            ),
             'rationale': reason,
             'used_evidence': [],
             'used_tools': [],
-            'safe_next_steps': ['稍后重试，或在 Case 工作台查看当前状态和执行轨迹。'],
+            'safe_next_steps': ['稍后重试。'] if is_workspace_read else ['稍后重试，或在 Case 工作台查看当前状态和执行轨迹。'],
             'observations': observations or [],
             'llm': result.telemetry(),
         }

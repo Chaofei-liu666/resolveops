@@ -32,6 +32,7 @@ from .analytics import AnalyticsAgent, AnalyticsQueryError, is_analytics_questio
 from .chat_attachments import AttachmentError, ChatAttachment, decode_attachments
 from .local_file_tool import LocalFileReadTool, is_local_file_question
 from .chat_sessions import active_memories, add_message, delete_session, message_out, recent_history, redact, session_for_identity, session_out, update_summary
+from .erp_chat_tools import ERPWorkspaceReadTools
 from .tools import BusinessReadTools
 from .events import emit
 
@@ -1322,6 +1323,82 @@ def _erp_order_answer_from_chat(question: str, order_id: str) -> dict[str, Any]:
     }
 
 
+def _is_erp_workspace_question(question: str) -> bool:
+    import re
+    return bool(re.search(
+        r'erpnext|\berp\b|仓库|库存|销售订单|采购订单|客户|物料|商品|价格|在途采购',
+        question, re.IGNORECASE,
+    ))
+
+
+def _direct_erp_list_tool(question: str) -> tuple[str, str, str] | None:
+    """Return a certain list intent; ambiguous or compound questions use the Agent."""
+    import re
+    normalized = question.casefold()
+    list_cue = bool(re.search(r'有哪些|哪些|列出|列表|最近|全部|所有', normalized))
+    if not list_cue:
+        return None
+    candidates = [
+        ('仓库', 'list_warehouses', 'warehouses'),
+        (r'销售订单|sales\s*order', 'list_sales_orders', 'sales_orders'),
+        (r'采购订单|purchase\s*order', 'list_purchase_orders', 'purchase_orders'),
+        ('客户', 'list_customers', 'customers'),
+        ('物料|商品', 'list_items', 'items'),
+    ]
+    matched = [item for item in candidates if re.search(item[0], normalized, re.IGNORECASE)]
+    return matched[0] if len(matched) == 1 else None
+
+
+def _direct_erp_list_answer(question: str, tool_name: str, result_key: str) -> dict[str, Any]:
+    tools = ERPWorkspaceReadTools(
+        ERPNextAdapter(settings.erpnext_base_url, settings.erpnext_api_key, settings.erpnext_api_secret)
+    )
+    result = tools.execute_result(tool_name, {}, '')
+    if result.status != 'success':
+        return {
+            'question': question, 'route': 'erpnext', 'source': 'erpnext', 'tools_used': [tool_name],
+            'answer': 'ERPNext 实时查询未完成。请检查 ERPNext 服务、连接配置和当前 API 用户的读取权限后重试。',
+        }
+    rows = (result.data or {}).get(result_key) or []
+    names = [str(row.get('warehouse_name') or row.get('customer_name') or row.get('item_name') or row.get('name') or '') for row in rows]
+    names = [name for name in names if name]
+    labels = {
+        'warehouses': '仓库', 'sales_orders': '销售订单', 'purchase_orders': '采购订单',
+        'customers': '客户', 'items': '物料',
+    }
+    label = labels[result_key]
+    if not names:
+        answer = f'ERPNext 当前没有返回可读取的{label}。'
+    else:
+        answer = f'ERPNext 实时返回 {len(names)} 个{label}：\n' + '\n'.join(f'- {name}' for name in names)
+    return {
+        'question': question, 'answer': answer, 'route': 'erpnext', 'source': 'erpnext',
+        'tools_used': [tool_name], 'rows': rows, 'row_count': len(rows),
+    }
+
+
+def _erp_workspace_answer_from_chat(question: str) -> dict[str, Any]:
+    """Answer a non-Case operational question with typed ERPNext read tools."""
+    tools = ERPWorkspaceReadTools(
+        ERPNextAdapter(settings.erpnext_base_url, settings.erpnext_api_key, settings.erpnext_api_secret)
+    )
+    context = {
+        'scope': {'mode': 'erpnext_workspace_read', 'source_system': 'ERPNext'},
+        'current_state': {'status': 'read_only', 'case_id': None, 'order_id': None},
+        'instruction': (
+            'This is a direct ERPNext read-only inquiry, not a Case. Use the typed ERP tools when they can answer the question. '
+            'If the requested object is ambiguous, ask one concise clarifying question. Do not describe schemas in place of a query.'
+        ),
+    }
+    answer = CaseQuestionAgent(tools).answer(
+        order_id='', question=question, case_context=context, on_observation=lambda _observation: None,
+    )
+    return {
+        'question': question, 'route': 'erpnext', 'source': 'erpnext',
+        **answer,
+    }
+
+
 def _session_detail(db: Session, session: ChatSession) -> dict[str, Any]:
     messages = list(db.scalars(
         select(ChatMessage).where(ChatMessage.session_id == session.id).order_by(ChatMessage.created_at)
@@ -1422,6 +1499,7 @@ def _answer_operator_chat(
         case_id = referenced_case_ids[0]
 
     erp_order_id = _erp_order_id_from_question(payload.question) if not case_id and not attachments else None
+    erp_list_intent = _direct_erp_list_tool(payload.question) if not case_id and not attachments else None
     if case_id:
         result = _case_answer_from_chat(db, identity, payload.question, case_id) or {}
         if not result:
@@ -1435,6 +1513,11 @@ def _answer_operator_chat(
     elif not attachments and _needs_erp_identifier(payload.question):
         result = {'question': payload.question, 'route': 'clarification', 'source': 'clarification', 'tools_used': [],
                   'answer': _erp_identifier_clarification()}
+    elif erp_list_intent:
+        tool_name, result_key = erp_list_intent[1], erp_list_intent[2]
+        result = _direct_erp_list_answer(payload.question, tool_name, result_key)
+    elif not attachments and _is_erp_workspace_question(payload.question):
+        result = _erp_workspace_answer_from_chat(payload.question)
     elif not attachments and is_analytics_question(payload.question):
         try:
             analytics_result = AnalyticsAgent().run(question=payload.question, db=db, tenant_id=identity.tenant_id)
